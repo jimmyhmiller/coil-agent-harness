@@ -46,6 +46,23 @@
    (process subprocess/Child)
    (error (slice u8))])
 
+;; The protocol depends on newline-delimited JSON, not on subprocess mechanics.
+;; Tests can supply an in-memory transport while the production implementation
+;; delegates to Coil's hosted child-process and I/O libraries.
+(deftrait CodexTransport [Self]
+  (codex-transport-send [(self (ptr Self))
+                         (allocator (ptr Allocator))
+                         (message Json)]
+                        (-> i64))
+  (codex-transport-read [(self (ptr Self))
+                         (allocator (ptr Allocator))
+                         (timeout-ms i64)
+                         (result (mut CodexRead))]
+                        (-> i64))
+  (codex-transport-close [(self (ptr Self))] (-> i64)))
+
+(defstruct CodexConnection [(transport (dyn CodexTransport))])
+
 (defn codex-spawn [(allocator (ptr Allocator))] (-> CodexSpawnResult)
   (let [result (alloc/stack CodexSpawnResult)
         child (alloc/stack subprocess/Child)
@@ -69,7 +86,7 @@
              (store! (field result error) "could not spawn Codex app-server"))))
     (load result)))
 
-(defn codex-close [(process (ptr subprocess/Child))] (-> i64)
+(defn codex-child-close [(process (ptr subprocess/Child))] (-> i64)
   (subprocess/child-close-stdin process)
   (match (subprocess/child-try-wait process)
     (Ok [status]
@@ -162,9 +179,9 @@
                       (reasoning-effort-name (load (field request reasoning))))
     (codex-rpc-request allocator 3 "turn/start" (load params))))
 
-(defn codex-send [(allocator (ptr Allocator))
-                  (process (ptr subprocess/Child))
-                  (message Json)] (-> i64)
+(defn codex-child-send [(allocator (ptr Allocator))
+                        (process (ptr subprocess/Child))
+                        (message Json)] (-> i64)
   (let [line (json-stringify allocator message)
         writer (alloc/stack io/Writer)]
     (match (subprocess/child-stdin-writer writer process)
@@ -174,9 +191,9 @@
               (Ok [written] 0)
               (Err [failure] -1))))))
 
-(defn codex-read [(allocator (ptr Allocator))
-                  (process (ptr subprocess/Child))
-                  (timeout-ms i64)] (-> CodexRead)
+(defn codex-child-read [(allocator (ptr Allocator))
+                        (process (ptr subprocess/Child))
+                        (timeout-ms i64)] (-> CodexRead)
   (let [result (alloc/stack CodexRead)
         reader (alloc/stack io/Reader)]
     (store! (field result ok) false)
@@ -219,6 +236,42 @@
                                             "Codex app-server returned invalid JSON")))))))))))
     (load result)))
 
+(impl CodexTransport subprocess/Child
+  (codex-transport-send [(self (ptr subprocess/Child))
+                         (allocator (ptr Allocator))
+                         (message Json)]
+                        (-> i64)
+                        (codex-child-send allocator self message))
+  (codex-transport-read [(self (ptr subprocess/Child))
+                         (allocator (ptr Allocator))
+                         (timeout-ms i64)
+                         (result (mut CodexRead))]
+                        (-> i64)
+                        (do
+                          (store! result (codex-child-read allocator self timeout-ms))
+                          0))
+  (codex-transport-close [(self (ptr subprocess/Child))]
+                         (-> i64)
+                         (codex-child-close self)))
+
+(defn codex-send [(allocator (ptr Allocator))
+                  (connection (ptr CodexConnection))
+                  (message Json)] (-> i64)
+  (codex-transport-send (load (field connection transport)) allocator message))
+
+(defn codex-read [(allocator (ptr Allocator))
+                  (connection (ptr CodexConnection))
+                  (timeout-ms i64)] (-> CodexRead)
+  (let [result (alloc/stack CodexRead)]
+    (codex-transport-read (load (field connection transport))
+                          allocator
+                          timeout-ms
+                          (mut result))
+    (load result)))
+
+(defn codex-close [(connection (ptr CodexConnection))] (-> i64)
+  (codex-transport-close (load (field connection transport))))
+
 (defn codex-emit [(emitter (ptr EventEmitter))
                   (request (ptr ModelRequest))
                   (kind EventKind)
@@ -234,7 +287,7 @@
               payload))
 
 (defn codex-reject-server-request [(allocator (ptr Allocator))
-                                   (process (ptr subprocess/Child))
+                                   (process (ptr CodexConnection))
                                    (message Json)] (-> i64)
   (let [(mut error) (json-object allocator)
         (mut response) (json-object allocator)]
@@ -247,7 +300,7 @@
     (codex-send allocator process (load response))))
 
 (defn codex-observe-message [(allocator (ptr Allocator))
-                             (process (ptr subprocess/Child))
+                             (process (ptr CodexConnection))
                              (emitter (ptr EventEmitter))
                              (request (ptr ModelRequest))
                              (message Json)] (-> i64)
@@ -268,7 +321,7 @@
     (None [] 0)))
 
 (defn codex-wait-response [(allocator (ptr Allocator))
-                           (process (ptr subprocess/Child))
+                           (process (ptr CodexConnection))
                            (emitter (ptr EventEmitter))
                            (request (ptr ModelRequest))
                            (wanted-id i64)] (-> CodexWait)
@@ -304,7 +357,7 @@
     (load result)))
 
 (defn codex-turn-loop [(allocator (ptr Allocator))
-                       (process (ptr subprocess/Child))
+                       (process (ptr CodexConnection))
                        (emitter (ptr EventEmitter))
                        (request (ptr ModelRequest))
                        (thread-id (slice u8))] (-> ModelResult)
@@ -359,7 +412,7 @@
           (ModelOk (load response))))))
 
 (defn codex-start-and-run-turn [(allocator (ptr Allocator))
-                                (process (ptr subprocess/Child))
+                                (process (ptr CodexConnection))
                                 (emitter (ptr EventEmitter))
                                 (request (ptr ModelRequest))
                                 (thread-id (slice u8))] (-> ModelResult)
@@ -376,7 +429,7 @@
 ;; Send one request and wait for its matching response. Keeping write and read
 ;; failure together prevents a failed write from surfacing later as a read timeout.
 (defn codex-call [(allocator (ptr Allocator))
-                  (process (ptr subprocess/Child))
+                  (process (ptr CodexConnection))
                   (emitter (ptr EventEmitter))
                   (request (ptr ModelRequest))
                   (message Json)
@@ -390,7 +443,7 @@
             (Err (load (field response error)))))))
 
 (defn codex-notify-initialized [(allocator (ptr Allocator))
-                                (process (ptr subprocess/Child))] (-> (Result i64 (slice u8)))
+                                (process (ptr CodexConnection))] (-> (Result i64 (slice u8)))
   (if (= (codex-send allocator
                      process
                      (codex-initialized-notification allocator))
@@ -414,7 +467,7 @@
                          (request (ptr ModelRequest))
                          (emitter (ptr EventEmitter))
                          (allocator (ptr Allocator))
-                         (process (ptr subprocess/Child))] (-> (Result (slice u8) (slice u8)))
+                         (process (ptr CodexConnection))] (-> (Result (slice u8) (slice u8)))
   (try (try! (codex-call allocator
                          process
                          emitter
@@ -437,7 +490,7 @@
                          (request (ptr ModelRequest))
                          (emitter (ptr EventEmitter))
                          (allocator (ptr Allocator))
-                         (process (ptr subprocess/Child))] (-> ModelResult)
+                         (process (ptr CodexConnection))] (-> ModelResult)
   (match (codex-open-thread context request emitter allocator process)
     (Err [message] (model-failure "codex-app-server" 0 message))
     (Ok [thread-id]
@@ -470,15 +523,20 @@
   (let [spawn-result (codex-spawn allocator)]
     (if (!= (load (field spawn-result code)) 0)
         (model-failure "codex-app-server" 0 (load (field spawn-result error)))
-        (let [(mut process) (load (field spawn-result process))]
+        (let [process
+                (box allocator
+                     subprocess/Child
+                     (load (field spawn-result process)))
+              connection (box allocator CodexConnection (zeroed CodexConnection))]
+          (store! (field connection transport) process)
           (codex-emit emitter request (ModelRequestStarted) (JsonNull))
           (let [result
                   (codex-run-session context
                                      request
                                      emitter
                                      allocator
-                                     (mut process))]
-            (codex-close (mut process))
+                                     connection)]
+            (codex-close connection)
             (codex-finish emitter request result))))))
 
 (impl ModelProvider CodexAppServerContext

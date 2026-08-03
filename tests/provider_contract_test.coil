@@ -5,14 +5,49 @@
 (import "coil.match" :use *)
 (import "coil.str" :use *)
 (import "harness-json" :use *)
+(import "harness-event" :use *)
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
 (import "codex-app-server" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "openai-responses" :use *)
+(import "provider-common" :use *)
 
 (defstruct UnusedTool [])
+
+(defstruct FakeCodexTransport
+  [(send-code i64)
+   (read-result CodexRead)
+   (send-count i64)
+   (read-count i64)
+   (close-count i64)])
+
+(impl CodexTransport FakeCodexTransport
+  (codex-transport-send [(self (ptr FakeCodexTransport))
+                         (allocator (ptr Allocator))
+                         (message Json)]
+                        (-> i64)
+                        (do
+                          (store! (field self send-count)
+                                  (+ (load (field self send-count)) 1))
+                          (load (field self send-code))))
+  (codex-transport-read [(self (ptr FakeCodexTransport))
+                         (allocator (ptr Allocator))
+                         (timeout-ms i64)
+                         (result (mut CodexRead))]
+                        (-> i64)
+                        (do
+                          (store! (field self read-count)
+                                  (+ (load (field self read-count)) 1))
+                          (store! result (load (field self read-result)))
+                          0))
+  (codex-transport-close [(self (ptr FakeCodexTransport))]
+                         (-> i64)
+                         (do
+                           (store! (field self close-count)
+                                   (+ (load (field self close-count)) 1))
+                           0)))
 
 (impl ToolImplementation UnusedTool
   (execute-tool [(self (ptr UnusedTool))
@@ -169,3 +204,48 @@
            (assert (match (codex-thread-id (load (field missing value)))
                      (Ok [thread-id] false)
                      (Err [message] (str-eq message "thread/start omitted thread id"))))))
+
+(deftest codex-transport-call-and-close-contract
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               parsed (json-parse allocator "{\"id\":1,\"result\":{}}")
+               read-result (alloc/stack CodexRead)
+               successful (box allocator FakeCodexTransport (zeroed FakeCodexTransport))
+               failed (box allocator FakeCodexTransport (zeroed FakeCodexTransport))
+               successful-connection (box allocator CodexConnection (zeroed CodexConnection))
+               failed-connection (box allocator CodexConnection (zeroed CodexConnection))
+               sink (box allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new sink sequence))]
+           (store! (field read-result ok) true)
+           (store! (field read-result eof) false)
+           (store! (field read-result message) (load (field parsed value)))
+           (store! (field read-result error) "")
+           (store! (field successful read-result) (load read-result))
+           (store! (field successful-connection transport) successful)
+           (assert (match (codex-call allocator
+                                      successful-connection
+                                      emitter
+                                      request
+                                      (json-object allocator)
+                                      1
+                                      "send failed")
+                     (Ok [message] (= (json-number-i64 (json-get message "id")) 1))
+                     (Err [message] false)))
+           (assert-eq (load (field successful send-count)) 1)
+           (assert-eq (load (field successful read-count)) 1)
+           (codex-close successful-connection)
+           (assert-eq (load (field successful close-count)) 1)
+           (store! (field failed send-code) -1)
+           (store! (field failed-connection transport) failed)
+           (assert (match (codex-call allocator
+                                      failed-connection
+                                      emitter
+                                      request
+                                      (json-object allocator)
+                                      1
+                                      "send failed")
+                     (Ok [message] false)
+                     (Err [message] (str-eq message "send failed"))))
+           (assert-eq (load (field failed send-count)) 1)
+           (assert-eq (load (field failed read-count)) 0)))
