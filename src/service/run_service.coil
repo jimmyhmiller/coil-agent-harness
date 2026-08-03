@@ -1,0 +1,355 @@
+(module harness-run-service)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-run-state" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
+
+(deftrait RunController [Self]
+  (start-durable-run [(self (ptr Self)) (command Json)] (-> i64))
+  (cancel-durable-run [(self (ptr Self)) (run-id (slice u8))] (-> i64)))
+
+(defstruct RunService
+  [(allocator (ptr Allocator))
+   (journal-path (slice u8))
+   (journal (ptr EventJournal))
+   (emitter (ptr EventEmitter))
+   (controller (dyn RunController))])
+
+(defstruct ServiceResponse [(status i64) (body Json)])
+(defstruct ServiceHttpRequest
+  [(method (slice u8))
+   (target (slice u8))
+   (body (slice u8))])
+
+(defn service-response [(status i64) (body Json)] (-> ServiceResponse)
+  (let [response (alloc/stack ServiceResponse)]
+    (store! (field response status) status)
+    (store! (field response body) body)
+    (load response)))
+
+(defn service-error [(allocator (ptr Allocator))
+                     (status i64)
+                     (code (slice u8))
+                     (message (slice u8))] (-> ServiceResponse)
+  (let [(mut body) (json-object allocator)]
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-put-string! (mut body) "error" code)
+    (json-put-string! (mut body) "message" message)
+    (service-response status (load body))))
+
+(defn command-string [(command Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at command key)
+    (Some [value] value)
+    (None [] "")))
+
+(defn command-valid? [(command Json)] (-> bool)
+  (and (= (json-number-i64 (json-get command "version")) 1)
+       (and (> (slice-len [u8] (command-string command "command_id")) 0)
+            (> (slice-len [u8] (command-string command "run_id")) 0))))
+
+(defn service-recover [(service (ptr RunService))] (-> JournalRecovery)
+  (event-journal-recover (load (field service allocator))
+                         (load (field service journal-path))))
+
+(defn service-run-response [(service (ptr RunService))
+                            (events (ref (ArrayList Json)))
+                            (run-id (slice u8))
+                            (status i64)] (-> ServiceResponse)
+  (let [view (project-run events run-id)]
+    (service-response status
+                      (run-view-json (load (field service allocator)) view))))
+
+(defn service-create-run [(service (ptr RunService))
+                          (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))]
+    (if (not (command-valid? command))
+        (service-error allocator 400 "invalid_command" "expected a versioned create command")
+        (let [recovery (service-recover service)
+              command-id (command-string command "command_id")
+              run-id (command-string command "run_id")]
+          (if (not (load (field recovery ok)))
+              (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+              (if (> (journal-command-sequence (field recovery events) command-id) 0)
+                  (service-run-response service (field recovery events) run-id 200)
+                  (let [provider (command-string command "provider")
+                        model (command-string command "model")]
+                    (emit-event (load (field service emitter))
+                                (now-ms)
+                                (RunCreated)
+                                run-id
+                                run-id
+                                ""
+                                provider
+                                model
+                                command)
+                    (if (event-journal-failed? (load (field service journal)))
+                        (service-error allocator 500 "journal_write_failed" "create command was not durable")
+                        (let [start-code
+                                (start-durable-run (load (field service controller))
+                                                   command)
+                              refreshed (service-recover service)]
+                          (if (!= start-code 0)
+                              (service-error allocator
+                                             503
+                                             "run_start_failed"
+                                             "run was durably queued but could not start")
+                              (service-run-response service
+                                                    (field refreshed events)
+                                                    run-id
+                                                    202)))))))))))
+
+(defn service-cancel-run [(service (ptr RunService))
+                          (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))]
+    (if (not (command-valid? command))
+        (service-error allocator 400 "invalid_command" "expected a versioned cancellation command")
+        (let [recovery (service-recover service)
+              command-id (command-string command "command_id")
+              run-id (command-string command "run_id")]
+          (if (not (load (field recovery ok)))
+              (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+              (if (> (journal-command-sequence (field recovery events) command-id) 0)
+                  (service-run-response service (field recovery events) run-id 200)
+                  (let [view (project-run (field recovery events) run-id)]
+                    (match-else (load (field view status))
+                                (RunNotFound []
+                                             (service-error allocator 404 "run_not_found" "run does not exist"))
+                                (RunSucceeded []
+                                              (service-error allocator 409 "run_terminal" "run is already terminal"))
+                                (RunErrored []
+                                            (service-error allocator 409 "run_terminal" "run is already terminal"))
+                                (RunCancelledStatus []
+                                                    (service-error allocator
+                                                                   409
+                                                                   "run_terminal"
+                                                                   "run is already terminal"))
+                                (_ (do
+                                     (emit-event (load (field service emitter))
+                                                 (now-ms)
+                                                 (RunCancellationRequested)
+                                                 run-id
+                                                 run-id
+                                                 ""
+                                                 (load (field view provider))
+                                                 (load (field view model))
+                                                 command)
+                                     (if (event-journal-failed? (load (field service journal)))
+                                         (service-error allocator
+                                                        500
+                                                        "journal_write_failed"
+                                                        "cancellation command was not durable")
+                                         (do
+                                           (cancel-durable-run (load (field service controller))
+                                                               run-id)
+                                           (let [refreshed (service-recover service)]
+                                             (service-run-response service
+                                                                   (field refreshed events)
+                                                                   run-id
+                                                                   202))))))))))))))
+
+(defn service-query-run [(service (ptr RunService))
+                         (run-id (slice u8))] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        recovery (service-recover service)]
+    (if (not (load (field recovery ok)))
+        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (let [view (project-run (field recovery events) run-id)]
+          (match-else (load (field view status))
+                      (RunNotFound []
+                                   (service-error allocator 404 "run_not_found" "run does not exist"))
+                      (_ (service-response 200 (run-view-json allocator view))))))))
+
+(defn service-query-events [(service (ptr RunService))
+                            (run-id (slice u8))
+                            (after-sequence i64)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        recovery (service-recover service)]
+    (if (not (load (field recovery ok)))
+        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (let [(mut result) (json-object allocator)
+              (mut events) (json-array allocator)
+              source (field recovery events)
+              (mut i) 0
+              n (al-len [Json] (load source))]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (let [event (al-get [Json] (load source) (load i))]
+                      (when (and (run-event? event run-id)
+                                 (> (json-number-i64 (json-get event "sequence"))
+                                    after-sequence))
+                        (json-array-push! (mut events) event)
+                        0)
+                      (store! i (+ (load i) 1)))))
+          (json-object-put! (mut result) "version" (json-integer allocator 1))
+          (json-put-string! (mut result) "run_id" run-id)
+          (json-object-put! (mut result) "events" (load events))
+          (json-object-put! (mut result)
+                            "next_cursor"
+                            (json-integer allocator
+                                          (load (field recovery last-sequence))))
+          (service-response 200 (load result))))))
+
+(defn run-created-before? [(events (ref (ArrayList Json)))
+                           (before i64)
+                           (run-id (slice u8))] (-> bool)
+  (let [(mut i) 0
+        (mut found) false]
+    (loop (if (>= (load i) before)
+              (break)
+              (let [event (al-get [Json] (load events) (load i))]
+                (when (and (run-event? event run-id)
+                           (match (json-string-at event "event")
+                             (Some [kind] (str-eq kind "run.created"))
+                             (None [] false)))
+                  (store! found true)
+                  0)
+                (if (load found)
+                    (break)
+                    (store! i (+ (load i) 1))))))
+    (load found)))
+
+;; Recover all durable runs once at service startup. Queued work is safe to launch
+;; because no run.started fact exists. In-flight work is never replayed blindly.
+(defn service-recover-runs! [(service (ptr RunService))] (-> i64)
+  (let [recovery (service-recover service)]
+    (if (not (load (field recovery ok)))
+        -1
+        (let [events (field recovery events)
+              (mut i) 0
+              n (al-len [Json] (load events))
+              (mut recovered) 0]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (let [event (al-get [Json] (load events) (load i))
+                          kind
+                            (match (json-string-at event "event")
+                              (Some [value] value)
+                              (None [] ""))
+                          run-id
+                            (match (json-string-at event "run_id")
+                              (Some [value] value)
+                              (None [] ""))]
+                      (when (and (str-eq kind "run.created")
+                                 (not (run-created-before? events (load i) run-id)))
+                        (let [view (project-run events run-id)]
+                          (match-else (load (field view status))
+                                      (RunQueued []
+                                                 (let [start-code
+                                                         (start-durable-run (load (field service controller))
+                                                                            (json-get event "payload"))]
+                                                   (if (= start-code 0)
+                                                       (store! recovered (+ (load recovered) 1))
+                                                       (emit-event (load (field service emitter))
+                                                                   (now-ms)
+                                                                   (RunFailed)
+                                                                   run-id
+                                                                   run-id
+                                                                   ""
+                                                                   (load (field view provider))
+                                                                   (load (field view model))
+                                                                   (JsonString "queued run could not restart")))))
+                                      (RunRunning []
+                                                  (emit-event (load (field service emitter))
+                                                              (now-ms)
+                                                              (RunFailed)
+                                                              run-id
+                                                              run-id
+                                                              ""
+                                                              (load (field view provider))
+                                                              (load (field view model))
+                                                              (JsonString "service restarted while run was in flight")))
+                                      (RunCancelling []
+                                                     (emit-event (load (field service emitter))
+                                                                 (now-ms)
+                                                                 (RunCancelled)
+                                                                 run-id
+                                                                 run-id
+                                                                 ""
+                                                                 (load (field view provider))
+                                                                 (load (field view model))
+                                                                 (JsonString "cancellation confirmed by service restart")))
+                                      (_ 0)))
+                        0)
+                      (store! i (+ (load i) 1)))))
+          (if (event-journal-failed? (load (field service journal)))
+              -1
+              (load recovered))))))
+
+(defn service-parse-command [(service (ptr RunService))
+                             (body (slice u8))] (-> JsonParseResult)
+  (json-parse (load (field service allocator)) body))
+
+(defn service-target-parts [(target (slice u8))] (-> (slice u8))
+  (subslice [u8] target 9 (slice-len [u8] target)))
+
+(defn service-events-run-id [(rest (slice u8))] (-> (slice u8))
+  (match (str-find rest "/events")
+    (Some [position] (subslice [u8] rest 0 position))
+    (None [] "")))
+
+(defn service-events-cursor [(target (slice u8))] (-> i64)
+  (match (str-find target "?after=")
+    (None [] 0)
+    (Some [position]
+          (match (str-parse-int (subslice [u8] target (+ position 7) (slice-len [u8] target)))
+            (Some [value] value)
+            (None [] 0)))))
+
+(defn service-cancel-run-id [(rest (slice u8))] (-> (slice u8))
+  (match (str-find rest "/cancel")
+    (Some [position]
+          (if (= (+ position 7) (slice-len [u8] rest))
+              (subslice [u8] rest 0 position)
+              ""))
+    (None [] "")))
+
+;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
+;; request into this value and serialize the returned status/body.
+(defn service-handle-http [(service (ptr RunService))
+                           (request (ptr ServiceHttpRequest))] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        method (load (field request method))
+        target (load (field request target))]
+    (cond (and (str-eq method "POST") (str-eq target "/v1/runs"))
+            (let [parsed (service-parse-command service (load (field request body)))]
+              (if (load (field parsed ok))
+                  (service-create-run service (load (field parsed value)))
+                  (service-error allocator 400 "invalid_json" "request body is not valid JSON")))
+          (starts-with target "/v1/runs/")
+            (let [rest (service-target-parts target)
+                  cancel-run-id (service-cancel-run-id rest)
+                  events-run-id (service-events-run-id rest)]
+              (cond (and (str-eq method "POST")
+                         (> (slice-len [u8] cancel-run-id) 0))
+                      (let [parsed
+                              (service-parse-command service
+                                                     (load (field request body)))]
+                        (if (not (load (field parsed ok)))
+                            (service-error allocator
+                                           400
+                                           "invalid_json"
+                                           "request body is not valid JSON")
+                            (let [command (load (field parsed value))]
+                              (if (not (str-eq (command-string command "run_id")
+                                               cancel-run-id))
+                                  (service-error allocator
+                                                 409
+                                                 "run_id_mismatch"
+                                                 "path and command run IDs differ")
+                                  (service-cancel-run service command)))))
+                    (and (str-eq method "GET")
+                         (> (slice-len [u8] events-run-id) 0))
+                      (service-query-events service
+                                            events-run-id
+                                            (service-events-cursor target))
+                    (str-eq method "GET") (service-query-run service rest)
+                    :else (service-error allocator 405 "method_not_allowed" "method is not supported")))
+          :else (service-error allocator 404 "not_found" "route does not exist"))))

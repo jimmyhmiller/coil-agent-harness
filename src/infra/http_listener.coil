@@ -1,0 +1,189 @@
+(module harness-http-listener)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.http.server" :as server)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+(extern socket :cc c [i32 i32 i32] (-> i32))
+(extern setsockopt :cc c [i32 i32 i32 (ptr i8) u32] (-> i32))
+(extern bind :cc c [i32 (ptr i8) u32] (-> i32))
+(extern listen :cc c [i32 i32] (-> i32))
+(extern accept :cc c [i32 (ptr i8) (ptr u32)] (-> i32))
+(extern getsockname :cc c [i32 (ptr i8) (ptr u32)] (-> i32))
+
+(const HARNESS_AF_INET 2)
+(const HARNESS_SOCK_STREAM 1)
+
+(defn listener-socket-options [] (-> Code)
+  (if (primitive/code-eq (primitive/target-os) `linux)
+      `(do
+         (const HARNESS_SOL_SOCKET 1)
+         (const HARNESS_SO_REUSEADDR 2)
+         (const HARNESS_SOCKADDR_FAMILY0 2)
+         (const HARNESS_SOCKADDR_FAMILY1 0))
+      `(do
+         (const HARNESS_SOL_SOCKET 65535)
+         (const HARNESS_SO_REUSEADDR 4)
+         (const HARNESS_SOCKADDR_FAMILY0 16)
+         (const HARNESS_SOCKADDR_FAMILY1 2))))
+(meta (listener-socket-options))
+
+(defstruct HttpListener [(fd i64) (port i64)])
+(defsum ListenerOpenResult
+  (ListenerOpened [(listener HttpListener)])
+  (ListenerOpenFailed [(message (slice u8))]))
+(defsum AcceptedHttpRequest
+  (HttpRequestAccepted [(request server/Request)])
+  (HttpRequestRejected [(status i64)]))
+
+(defn sockaddr-loopback! [(address (ptr (array u8 16))) (port i64)] (-> i64)
+  (let [bytes (index address 0)]
+    (store! (index bytes 0) (cast u8 HARNESS_SOCKADDR_FAMILY0))
+    (store! (index bytes 1) (cast u8 HARNESS_SOCKADDR_FAMILY1))
+    (store! (index bytes 2) (cast u8 (/ port 256)))
+    (store! (index bytes 3) (cast u8 (% port 256)))
+    (store! (index bytes 4) (cast u8 127))
+    (store! (index bytes 5) (cast u8 0))
+    (store! (index bytes 6) (cast u8 0))
+    (store! (index bytes 7) (cast u8 1))
+    (let [(mut i) 8]
+      (loop (if (>= (load i) 16)
+                (break)
+                (do
+                  (store! (index bytes (load i)) (cast u8 0))
+                  (store! i (+ (load i) 1))))))
+    0))
+
+(defn sockaddr-port [(address (ptr (array u8 16)))] (-> i64)
+  (+ (* (cast i64 (load (index (index address 0) 2))) 256)
+     (cast i64 (load (index (index address 0) 3)))))
+
+(defn http-listener-open [(port i64)] (-> ListenerOpenResult)
+  (let [fd (socket HARNESS_AF_INET HARNESS_SOCK_STREAM 0)]
+    (if (< fd (cast i32 0))
+        (ListenerOpenFailed "could not create listening socket")
+        (let [reuse (alloc/stack i32)
+              address (alloc/stack (array u8 16))
+              address-length (alloc/stack u32)]
+          (store! reuse (cast i32 1))
+          (setsockopt fd
+                      HARNESS_SOL_SOCKET
+                      HARNESS_SO_REUSEADDR
+                      (cast (ptr i8) reuse)
+                      (cast u32 4))
+          (sockaddr-loopback! address port)
+          (if (or (!= (bind fd (cast (ptr i8) (index address 0)) (cast u32 16))
+                      (cast i32 0))
+                  (!= (listen fd 64) (cast i32 0)))
+              (do
+                (os/close fd)
+                (ListenerOpenFailed "could not bind listening socket"))
+              (do
+                (store! address-length (cast u32 16))
+                (getsockname fd
+                             (cast (ptr i8) (index address 0))
+                             address-length)
+                (let [listener (alloc/stack HttpListener)]
+                  (store! (field listener fd) (cast i64 fd))
+                  (store! (field listener port) (sockaddr-port address))
+                  (ListenerOpened (load listener)))))))))
+
+(defn http-listener-close! [(listener (ptr HttpListener))] (-> i64)
+  (let [fd (load (field listener fd))]
+    (when (>= fd 0)
+      (os/close (cast i32 fd))
+      (store! (field listener fd) -1)
+      0)
+    0))
+
+(defn http-listener-accept [(listener (ptr HttpListener))] (-> i64)
+  (cast i64
+        (accept (cast i32 (load (field listener fd)))
+                (cast (ptr i8) 0)
+                (cast (ptr u32) 0))))
+
+(defn push-http-crlf! [(buffer (mut StrBuf))] (-> i64)
+  (sb-push-byte! (mut buffer) (cast u8 13))
+  (sb-push-byte! (mut buffer) (cast u8 10)))
+
+(defn read-accepted-http [(allocator (ptr Allocator))
+                          (client-fd i64)] (-> AcceptedHttpRequest)
+  (let [(mut bytes) (al-new [u8] allocator)
+        buffer (alloc/stack (array u8 16384))]
+    (block :done
+           (loop (let [read-count
+                         (cast i64
+                               (io/read (cast i32 client-fd)
+                                        (cast (ptr i8) (index buffer 0))
+                                        (cast isize 16384)))]
+                   (if (<= read-count 0)
+                       (return-from :done (HttpRequestRejected 400))
+                       (do
+                         (al-extend! [u8]
+                                     (mut bytes)
+                                     (cast (ptr u8) (index buffer 0))
+                                     read-count)
+                         (if (> (al-len [u8] (load bytes)) 8388608)
+                             (return-from :done (HttpRequestRejected 413))
+                             (match (server/parse-request allocator
+                                                          (al-slice [u8] (load bytes)))
+                               (Ok [request]
+                                   (return-from :done (HttpRequestAccepted request)))
+                               (Err [failure]
+                                    (when (!= (server/error-code failure) 14)
+                                      (return-from :done (HttpRequestRejected 400))
+                                      0)))))))))))
+
+(defn write-http-response [(allocator (ptr Allocator))
+                           (client-fd i64)
+                           (status i64)
+                           (body (slice u8))] (-> i64)
+  (let [(mut head) (sb-new allocator)
+        writer (alloc/stack io/Writer)]
+    (sb-push-str! (mut head) "HTTP/1.1 ")
+    (sb-push-str! (mut head)
+                  (cond (= status 200) "200 OK"
+                        (= status 202) "202 Accepted"
+                        (= status 400) "400 Bad Request"
+                        (= status 404) "404 Not Found"
+                        (= status 405) "405 Method Not Allowed"
+                        (= status 409) "409 Conflict"
+                        (= status 413) "413 Payload Too Large"
+                        (= status 500) "500 Internal Server Error"
+                        :else "503 Service Unavailable"))
+    (push-http-crlf! (mut head))
+    (sb-push-str! (mut head) "Content-Type: application/json")
+    (push-http-crlf! (mut head))
+    (sb-push-str! (mut head) "Connection: close")
+    (push-http-crlf! (mut head))
+    (sb-push-str! (mut head) "Content-Length: ")
+    ;; Decimal length without relying on a global formatter.
+    (let [(mut digits) (sb-new allocator)
+          (mut divisor) 1
+          length (slice-len [u8] body)]
+      (loop (if (> (* (load divisor) 10) length)
+                (break)
+                (store! divisor (* (load divisor) 10))))
+      (loop (do
+              (sb-push-byte! (mut digits)
+                             (cast u8 (+ 48 (% (/ length (load divisor)) 10))))
+              (if (= (load divisor) 1)
+                  (break)
+                  (store! divisor (/ (load divisor) 10)))))
+      (sb-push-str! (mut head) (sb-str (load digits))))
+    (push-http-crlf! (mut head))
+    (push-http-crlf! (mut head))
+    (let [out (io/fd-writer writer client-fd)]
+      (match (io/print-str out (sb-str (load head)))
+        (Err [failure] -1)
+        (Ok [written]
+            (match (io/print-str out body)
+              (Err [failure] -1)
+              (Ok [body-written] (+ written body-written))))))))

@@ -18,10 +18,15 @@ The current slice can:
 - run the entire model/tool loop on a background worker and join it later;
 - emit structured JSON event records suitable for a terminal, server, or future UI.
 - append those versioned events to an fsync-backed journal and recover ordered history
-  while safely ignoring a torn final record.
+  while safely ignoring a torn final record;
+- accept versioned create, cancel, run-query, and cursor-based event-query commands
+  through a loopback HTTP service boundary;
+- rebuild durable run state on restart, relaunch work that was only queued, and
+  terminalize work whose in-process outcome can no longer be known.
 
-This is not yet a remote service. Durable command handling, network APIs, and restart
-resumption are not yet claimed; the event journal and its recovery rules are in place.
+The HTTP listener and durable service are currently library entry points exercised by
+real-socket integration tests. The CLI does not yet expose a long-running `serve`
+command, and remote deployment still needs authentication and transport hardening.
 
 ## Build and verify
 
@@ -83,6 +88,7 @@ src/runtime/    Bounded model/tool loop, background handle, parallel tool execut
 src/providers/  OpenAI Responses, two DeepSeek dialects, Codex App Server
 src/infra/      Small adapters over Coil's hosted HTTP, time, and OS libraries
 src/persistence/ Append-only event journal and recovery
+src/service/     Durable run projection, versioned API routing, and HTTP serving
 schemas/codex/  Generated schemas for the locally installed Codex App Server protocol
 tests/          Deterministic unit, contract, concurrency, and runtime tests
 ```
@@ -125,8 +131,9 @@ steps, each represented by lifecycle events.
 
 ## Next architectural slice
 
-The next slice should put the runtime behind a versioned remote command/query/event
-API and persist the event stream. That is the right point to add durable run identity,
-reconnection cursors, cancellation propagation, and restart recovery. All current
-provider adapters now emit incremental text deltas with bounded synchronous
-backpressure.
+The next slice should add interactive authorization as a durable request/decision
+protocol, then connect the service controller to the production runtime and expose a
+long-running authenticated `serve` command. Production tools can then grow behind the
+same provider-neutral validation, authorization, timeout, cancellation, and event
+contracts. All current provider adapters emit incremental text deltas with bounded
+synchronous backpressure.

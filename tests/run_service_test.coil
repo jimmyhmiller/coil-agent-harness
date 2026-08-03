@@ -1,0 +1,219 @@
+(module harness-run-service-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-run-service" :use *)
+(import "provider-common" :use *)
+
+(defstruct FakeRunController [(starts i64) (cancels i64)])
+
+(impl RunController FakeRunController
+  (start-durable-run [(self (ptr FakeRunController)) (command Json)]
+                     (-> i64)
+                     (do
+                       (store! (field self starts) (+ (load (field self starts)) 1))
+                       0))
+  (cancel-durable-run [(self (ptr FakeRunController)) (run-id (slice u8))]
+                      (-> i64)
+                      (do
+                        (store! (field self cancels) (+ (load (field self cancels)) 1))
+                        0)))
+
+(defn service-command [(allocator (ptr Allocator))
+                       (command-id (slice u8))] (-> Json)
+  (let [(mut command) (json-object allocator)]
+    (json-object-put! (mut command) "version" (json-integer allocator 1))
+    (json-put-string! (mut command) "command_id" command-id)
+    (json-put-string! (mut command) "run_id" "run-1")
+    (json-put-string! (mut command) "provider" "fake")
+    (json-put-string! (mut command) "model" "fake-model")
+    (json-put-string! (mut command) "prompt" "hello")
+    (load command)))
+
+(defn run-command [(allocator (ptr Allocator))
+                   (command-id (slice u8))
+                   (run-id (slice u8))] (-> Json)
+  (let [(mut command) (service-command allocator command-id)]
+    (json-put-string! (mut command) "run_id" run-id)
+    (load command)))
+
+(defn http-service-call [(service (ptr RunService))
+                         (method (slice u8))
+                         (target (slice u8))
+                         (body (slice u8))] (-> ServiceResponse)
+  (let [request (alloc/stack ServiceHttpRequest)]
+    (store! (field request method) method)
+    (store! (field request target) target)
+    (store! (field request body) body)
+    (service-handle-http service request)))
+
+(deftest persists-idempotent-create-cancel-and-cursor-queries
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-run-service.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field controller cancels) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (let [created
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+                 duplicate
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+                 queried (http-service-call service "GET" "/v1/runs/run-1" "")]
+             (assert-eq (load (field created status)) 202)
+             (assert-eq (load (field duplicate status)) 200)
+             (assert-eq (load (field queried status)) 200)
+             (assert-eq (load (field controller starts)) 1)
+             (assert (match (json-string-at (load (field queried body)) "status")
+                       (Some [value] (str-eq value "queued"))
+                       (None [] false))))
+           (let [events
+                   (http-service-call service
+                                      "GET"
+                                      "/v1/runs/run-1/events?after=0"
+                                      "")]
+             (assert-eq (json-array-length (json-get (load (field events body)) "events")) 1))
+           (let [cancelled
+                   (service-cancel-run service
+                                       (service-command allocator "cancel-1"))
+                 duplicate-cancel
+                   (service-cancel-run service
+                                       (service-command allocator "cancel-1"))
+                 after-create (service-query-events service "run-1" 1)]
+             (assert-eq (load (field cancelled status)) 202)
+             (assert-eq (load (field duplicate-cancel status)) 200)
+             (assert-eq (load (field controller cancels)) 1)
+             (assert-eq (json-array-length (json-get (load (field after-create body)) "events"))
+                        1)
+             (assert (match (json-string-at (load (field cancelled body)) "status")
+                       (Some [value] (str-eq value "cancelling"))
+                       (None [] false))))
+           (event-journal-close! journal)))
+
+(deftest http-boundary-rejects-invalid-json-and-run-id-mismatch
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-run-service-errors.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path false)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (let [invalid (http-service-call service "POST" "/v1/runs" "{")
+                 mismatch
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs/path-id/cancel"
+                                      "{\"version\":1,\"command_id\":\"cancel\",\"run_id\":\"body-id\"}")]
+             (assert-eq (load (field invalid status)) 400)
+             (assert-eq (load (field mismatch status)) 409))
+           (event-journal-close! journal)))
+
+(deftest restart-launches-only-queued-work-and-terminalizes-in-flight-work
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-run-service-restart.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field controller cancels) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (emit-event emitter
+                       1
+                       (RunCreated)
+                       "queued"
+                       "queued"
+                       ""
+                       "fake"
+                       "fake-model"
+                       (run-command allocator "q" "queued"))
+           (emit-event emitter
+                       2
+                       (RunCreated)
+                       "running"
+                       "running"
+                       ""
+                       "fake"
+                       "fake-model"
+                       (run-command allocator "r" "running"))
+           (emit-event emitter
+                       3
+                       (RunStarted)
+                       "running"
+                       "running"
+                       ""
+                       "fake"
+                       "fake-model"
+                       (JsonNull))
+           (emit-event emitter
+                       4
+                       (RunCreated)
+                       "cancelling"
+                       "cancelling"
+                       ""
+                       "fake"
+                       "fake-model"
+                       (run-command allocator "c" "cancelling"))
+           (emit-event emitter
+                       5
+                       (RunCancellationRequested)
+                       "cancelling"
+                       "cancelling"
+                       ""
+                       "fake"
+                       "fake-model"
+                       (run-command allocator "cancel" "cancelling"))
+           (assert-eq (service-recover-runs! service) 1)
+           (assert-eq (load (field controller starts)) 1)
+           (let [running (service-query-run service "running")
+                 cancelling (service-query-run service "cancelling")]
+             (assert (match (json-string-at (load (field running body)) "status")
+                       (Some [value] (str-eq value "failed"))
+                       (None [] false)))
+             (assert (match (json-string-at (load (field cancelling body)) "status")
+                       (Some [value] (str-eq value "cancelled"))
+                       (None [] false))))
+           (event-journal-close! journal)))

@@ -1,0 +1,112 @@
+(module harness-remote-api-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "coil.thread" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-http" :use *)
+(import "harness-http-listener" :use *)
+(import "harness-json" :use *)
+(import "harness-run-service" :use *)
+(import "harness-service-http-server" :use *)
+(import "provider-common" :use *)
+
+(defstruct RemoteFakeController [(starts i64)])
+(impl RunController RemoteFakeController
+  (start-durable-run [(self (ptr RemoteFakeController)) (command Json)]
+                     (-> i64)
+                     (do (store! (field self starts) (+ (load (field self starts)) 1)) 0))
+  (cancel-durable-run [(self (ptr RemoteFakeController)) (run-id (slice u8))]
+                      (-> i64)
+                      0))
+
+(defstruct RemoteServerJob
+  [(allocator (ptr Allocator))
+   (listener (ptr HttpListener))
+   (service (ptr RunService))
+   (result (ptr i64))])
+
+(defn remote-server-thread [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr RemoteServerJob) opaque)]
+    (store! (load (field job result))
+            (serve-run-service-once (load (field job allocator))
+                                    (load (field job listener))
+                                    (load (field job service))))
+    (cast (ptr i8) 0)))
+
+(defn remote-test-url [(allocator (ptr Allocator)) (port i64)] (-> (slice u8))
+  (let [number (json-stringify allocator (json-integer allocator port))
+        prefix (concat-or-empty allocator "http://127.0.0.1:" number)]
+    (concat-or-empty allocator prefix "/v1/runs")))
+
+(deftest accepts-a-versioned-command-over-a-real-http-socket
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-remote-api.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack RemoteFakeController)
+               service (alloc/stack RunService)
+               listener (alloc/stack HttpListener)
+               server-result (box allocator i64 -1)
+               server-job (alloc/stack RemoteServerJob)
+               server-thread (alloc/stack Thread)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (match (http-listener-open 0)
+             (ListenerOpenFailed [message] (assert false))
+             (ListenerOpened [opened] (store! listener opened)))
+           (assert (> (load (field listener port)) 0))
+           (store! (field server-job allocator) allocator)
+           (store! (field server-job listener) listener)
+           (store! (field server-job service) service)
+           (store! (field server-job result) server-result)
+           (assert-eq (cast i64
+                            (thread-spawn server-thread
+                                          (fnptr-of remote-server-thread)
+                                          (cast (ptr i8) server-job)))
+                      0)
+           (let [headers
+                   (box allocator
+                        (ArrayList (slice u8))
+                        (al-new [(slice u8)] allocator))
+                 request (alloc/stack HttpRequest)]
+             (al-push! [(slice u8)] headers "Content-Type: application/json")
+             (store! (field request url)
+                     (remote-test-url allocator (load (field listener port))))
+             (store! (field request headers) headers)
+             (store! (field request body)
+                     "{\"version\":1,\"command_id\":\"remote-1\",\"run_id\":\"remote-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+             (store! (field request timeout-ms) 3000)
+             (store! (field (field request chunks) context) (cast (ptr i8) 0))
+             (store! (field (field request chunks) consume)
+                     (fnptr-of discard-http-chunk))
+             (let [response (http-post allocator request)
+                   parsed (json-parse allocator (load (field response body)))]
+               (assert-eq (load (field response transport-code)) 0)
+               (assert-eq (load (field response status-code)) 202)
+               (assert (load (field parsed ok)))
+               (assert (match (json-string-at (load (field parsed value)) "status")
+                         (Some [value] (str-eq value "queued"))
+                         (None [] false)))))
+           (thread-join server-thread)
+           (assert-eq (load server-result) 0)
+           (assert-eq (load (field controller starts)) 1)
+           (let [recovery (event-journal-recover allocator path)]
+             (assert (load (field recovery ok)))
+             (assert-eq (load (field recovery last-sequence)) 1))
+           (http-listener-close! listener)
+           (event-journal-close! journal)))

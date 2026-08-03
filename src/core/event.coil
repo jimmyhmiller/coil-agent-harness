@@ -7,7 +7,9 @@
 ;; Stable semantic lifecycle categories. Additions are expected; existing meanings
 ;; must not be repurposed because persisted event streams and UIs depend on them.
 (defsum EventKind
+  (RunCreated [])
   (RunStarted [])
+  (RunCancellationRequested [])
   (RunCompleted [])
   (RunFailed [])
   (RunCancelled [])
@@ -90,7 +92,9 @@
 ;; Stable wire name for an event category.
 (defn event-kind-name [(kind EventKind)] (-> (slice u8))
   (match kind
+    (RunCreated [] "run.created")
     (RunStarted [] "run.started")
+    (RunCancellationRequested [] "run.cancellation_requested")
     (RunCompleted [] "run.completed")
     (RunFailed [] "run.failed")
     (RunCancelled [] "run.cancelled")
