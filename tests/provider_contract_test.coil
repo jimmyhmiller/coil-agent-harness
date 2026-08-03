@@ -7,6 +7,7 @@
 (import "harness-json" :use *)
 (import "harness-event" :use *)
 (import "harness-model" :use *)
+(import "harness-sse" :use *)
 (import "harness-tool" :use *)
 (import "codex-app-server" :use *)
 (import "deepseek-anthropic" :use *)
@@ -27,6 +28,25 @@
   [(total i64)
    (completed i64)
    (failed i64)])
+
+(defstruct DeltaEventSink [(deltas i64) (valid bool)])
+
+(impl EventSink DeltaEventSink
+  (publish-event [(self (ptr DeltaEventSink)) (event (ptr Event))]
+                 (-> i64)
+                 (match-else (load (field event kind))
+                             (ModelResponseDelta []
+                                                 (do
+                                                   (store! (field self deltas)
+                                                           (+ (load (field self deltas)) 1))
+                                                   (match-else (load (field event payload))
+                                                               (JsonString [value]
+                                                                           (when (not (str-eq value "hi"))
+                                                                             (store! (field self valid) false)
+                                                                             0))
+                                                               (_ (store! (field self valid) false)))
+                                                   0))
+                             (_ 0))))
 
 (impl EventSink CodexEventCounts
   (publish-event [(self (ptr CodexEventCounts)) (event (ptr Event))]
@@ -128,12 +148,42 @@
            (assert (match (json-bool-value (json-get wire "parallel_tool_calls"))
                      (Some [value] value)
                      (None [] false)))
+           (assert (match (json-bool-value (json-get wire "stream"))
+                     (Some [value] value)
+                     (None [] false)))
            (assert (match (json-string-at tool "type")
                      (Some [value] (str-eq value "function"))
                      (None [] false)))
            (assert (match (json-bool-value (json-get tool "strict"))
                      (Some [value] value)
                      (None [] false)))))
+
+(deftest openai-stream-emits-deltas-and-retains-the-terminal-response
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               sink (alloc/stack DeltaEventSink)
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               state (alloc/stack OpenAIStreamState)
+               decoder (alloc/stack SseDecoder)]
+           (store! (field sink deltas) 0)
+           (store! (field sink valid) true)
+           (store! (field state allocator) allocator)
+           (store! (field state request) request)
+           (store! (field state emitter) emitter)
+           (store! (field state completed) false)
+           (store! (field state failed) false)
+           (store! (field state response) (JsonNull))
+           (store! decoder (sse-decoder-new allocator state 4096))
+           (assert (sse-decoder-feed! decoder
+                                      "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-stream\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{}}}\n\n"))
+           (assert-eq (load (field sink deltas)) 1)
+           (assert (load (field sink valid)))
+           (assert (load (field state completed)))
+           (assert (match (json-string-at (load (field state response)) "id")
+                     (Some [value] (str-eq value "resp-stream"))
+                     (None [] false)))
+           (sse-decoder-free! decoder)))
 
 (deftest openai-parses-parallel-function-calls
          (let [allocator (malloc-allocator)

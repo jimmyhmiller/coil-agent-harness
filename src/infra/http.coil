@@ -3,8 +3,30 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.http.client" :as client)
+(import "coil.primitive" :as primitive)
 (import "coil.result" :use *)
 (import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+(extern curl_easy_init :cc c [] (-> (ptr i8)))
+(extern curl_easy_cleanup :cc c [(ptr i8)] (-> void))
+(extern curl_easy_perform :cc c [(ptr i8)] (-> i32))
+(extern curl_easy_setopt :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_getinfo :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_slist_append :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
+(extern curl_slist_free_all :cc c [(ptr i8)] (-> void))
+
+(const HARNESS_CURLOPT_WRITEDATA 10001)
+(const HARNESS_CURLOPT_URL 10002)
+(const HARNESS_CURLOPT_WRITEFUNCTION 20011)
+(const HARNESS_CURLOPT_POSTFIELDS 10015)
+(const HARNESS_CURLOPT_HTTPHEADER 10023)
+(const HARNESS_CURLOPT_CUSTOMREQUEST 10036)
+(const HARNESS_CURLOPT_NOSIGNAL 99)
+(const HARNESS_CURLOPT_POSTFIELDSIZE_LARGE 30120)
+(const HARNESS_CURLOPT_TIMEOUT_MS 155)
+(const HARNESS_CURLOPT_CONNECTTIMEOUT_MS 156)
+(const HARNESS_CURLINFO_RESPONSE_CODE 2097154)
 
 (defstruct HttpChunkSink
   [(context (ptr i8))
@@ -23,8 +45,49 @@
    (body (slice u8))
    (error (slice u8))])
 
+(defstruct StreamingCapture
+  [(sink HttpChunkSink)
+   (body (ArrayList u8))
+   (max-captured-bytes i64)])
+
 (defn discard-http-chunk [(data (ptr u8)) (len usize) (context (ptr i8))] (-> usize)
   len)
+
+(defn capture-streaming-chunk [(data (ptr i8))
+                               (size isize)
+                               (count isize)
+                               (opaque (ptr i8))] (-> isize)
+  (let [capture (cast (ptr StreamingCapture) opaque)
+        length (* (cast i64 size) (cast i64 count))
+        current (al-len [u8] (load (field capture body)))
+        available (- (load (field capture max-captured-bytes)) current)
+        retained (if (< available length) available length)
+        sink (field capture sink)]
+    (when (> retained 0)
+      (al-extend! [u8]
+                  (mut (field capture body))
+                  (cast (ptr u8) data)
+                  retained)
+      0)
+    (cast isize
+          (primitive/call-ptr (load (field sink consume))
+                              (cast (ptr u8) data)
+                              (cast usize length)
+                              (load (field sink context))))))
+
+(defn curl-header-list [(allocator (ptr Allocator))
+                        (lines (ptr (ArrayList (slice u8))))] (-> (ptr i8))
+  (let [(mut list) (cast (ptr i8) 0)
+        (mut i) 0
+        n (al-len [(slice u8)] (load lines))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [line (al-get [(slice u8)] (load lines) (load i))
+                    c-line (str->cstr allocator line)]
+                (store! list (curl_slist_append (load list) c-line))
+                (raw-free allocator c-line (+ (slice-len [u8] line) 1) 1)
+                (store! i (+ (load i) 1)))))
+    (load list)))
 
 (defn header-colon [(line (slice u8))] (-> i64)
   (let [(mut i) 0
@@ -85,4 +148,67 @@
            (do
              (store! (field result transport-code) -1)
              (store! (field result error) "HTTP transport failed"))))
+    (load result)))
+
+;; Perform a blocking POST while delivering response bytes as libcurl receives them.
+;; Returning fewer bytes from the sink aborts transport, providing synchronous
+;; backpressure. Only the first MiB is retained for diagnostics.
+(defn http-post-stream [(allocator (ptr Allocator))
+                        (request (ptr HttpRequest))] (-> HttpResponse)
+  (let [easy (curl_easy_init)
+        result (alloc/stack HttpResponse)]
+    (store! (field result transport-code) 0)
+    (store! (field result status-code) 0)
+    (store! (field result body) "")
+    (store! (field result error) "")
+    (if (= (cast i64 easy) 0)
+        (do
+          (store! (field result transport-code) -1)
+          (store! (field result error) "could not initialize HTTP transport")
+          0)
+        (let [capture (alloc/stack StreamingCapture)
+              url (str->cstr allocator (load (field request url)))
+              method (str->cstr allocator "POST")
+              headers (curl-header-list allocator (load (field request headers)))
+              body (load (field request body))]
+          (store! (field capture sink) (load (field request chunks)))
+          (store! (field capture body) (al-new [u8] allocator))
+          (store! (field capture max-captured-bytes) 1048576)
+          (curl_easy_setopt easy HARNESS_CURLOPT_URL url)
+          (curl_easy_setopt easy HARNESS_CURLOPT_CUSTOMREQUEST method)
+          (curl_easy_setopt easy HARNESS_CURLOPT_HTTPHEADER headers)
+          (curl_easy_setopt easy
+                            HARNESS_CURLOPT_POSTFIELDS
+                            (cast (ptr i8) (slice-data [u8] body)))
+          (curl_easy_setopt easy HARNESS_CURLOPT_POSTFIELDSIZE_LARGE (slice-len [u8] body))
+          (curl_easy_setopt easy
+                            HARNESS_CURLOPT_WRITEFUNCTION
+                            (fnptr-of capture-streaming-chunk))
+          (curl_easy_setopt easy HARNESS_CURLOPT_WRITEDATA (cast (ptr i8) capture))
+          (curl_easy_setopt easy HARNESS_CURLOPT_NOSIGNAL 1)
+          (curl_easy_setopt easy
+                            HARNESS_CURLOPT_CONNECTTIMEOUT_MS
+                            (load (field request timeout-ms)))
+          (curl_easy_setopt easy
+                            HARNESS_CURLOPT_TIMEOUT_MS
+                            (load (field request timeout-ms)))
+          (let [performed (curl_easy_perform easy)]
+            (if (= (cast i64 performed) 0)
+                (cast i64
+                      (curl_easy_getinfo easy
+                                         HARNESS_CURLINFO_RESPONSE_CODE
+                                         (field result status-code)))
+                (do
+                  (store! (field result transport-code) (cast i64 performed))
+                  (store! (field result error) "HTTP streaming transport failed")))
+            (store! (field result body)
+                    (al-into-slice [u8] (mut (field capture body))))
+            (raw-free allocator
+                      url
+                      (+ (slice-len [u8] (load (field request url))) 1)
+                      1)
+            (raw-free allocator method 5 1)
+            (curl_slist_free_all headers)
+            (curl_easy_cleanup easy)
+            0)))
     (load result)))

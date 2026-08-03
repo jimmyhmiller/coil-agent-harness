@@ -95,7 +95,8 @@ steps, each represented by lifecycle events.
 ## Important current behavior
 
 - OpenAI uses strict Responses API function definitions and `function_call_output`
-  continuation items keyed by `call_id`.
+  continuation items keyed by `call_id`. Responses are decoded incrementally from
+  SSE and text deltas are emitted as they arrive.
 - DeepSeek OpenAI-compatible strict tools use its beta endpoint. On a continuation,
   the full previous assistant message is replayed so `reasoning_content` is retained.
 - DeepSeek Anthropic compatibility uses `tool_use` and `tool_result` content blocks.
@@ -120,6 +121,6 @@ steps, each represented by lifecycle events.
 
 The next slice should put the runtime behind a versioned remote command/query/event
 API and persist the event stream. That is the right point to add durable run identity,
-reconnection cursors, cancellation propagation, and restart recovery. Direct-provider
-token streaming also needs an incremental SSE decoder and an explicit backpressure
-policy; only Codex deltas are streamed in the current implementation.
+reconnection cursors, cancellation propagation, and restart recovery. DeepSeek token
+streaming still needs provider-specific incremental reconstruction; OpenAI Responses
+and Codex deltas are streamed in the current implementation.

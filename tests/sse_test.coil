@@ -1,0 +1,71 @@
+(module harness-sse-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.str" :use *)
+(import "harness-sse" :use *)
+
+(defstruct RecordingSseSink
+  [(count (ptr i64))
+   (valid (ptr i64))
+   (reject-after i64)])
+
+(impl SseEventSink RecordingSseSink
+  (consume-sse-event [(self (ptr RecordingSseSink))
+                      (event-name (slice u8))
+                      (data (slice u8))]
+                     (-> bool)
+                     (let [position (load (load (field self count)))]
+                       (if (= position 0)
+                           (when (or (not (str-eq event-name "message"))
+                                     (not (str-eq data "hel\nlo")))
+                             (store! (load (field self valid)) 0)
+                             0)
+                           (when (or (> position 1)
+                                     (not (str-eq event-name ""))
+                                     (not (str-eq data "done")))
+                             (store! (load (field self valid)) 0)
+                             0))
+                       (store! (load (field self count)) (+ position 1))
+                       (or (< (load (field self reject-after)) 0)
+                           (< position (load (field self reject-after)))))))
+
+(deftest decodes-frames-across-arbitrary-chunk-boundaries
+         (let [allocator (malloc-allocator)
+               count (box allocator i64 0)
+               valid (box allocator i64 1)
+               sink (alloc/stack RecordingSseSink)
+               decoder (alloc/stack SseDecoder)]
+           (store! (field sink count) count)
+           (store! (field sink valid) valid)
+           (store! (field sink reject-after) -1)
+           (store! decoder (sse-decoder-new allocator sink 1024))
+           (assert (sse-decoder-feed! decoder "event: message\ndata: hel"))
+           (assert-eq (load count) 0)
+           (assert (sse-decoder-feed! decoder "\ndata: lo\n"))
+           (assert-eq (load count) 0)
+           (assert (sse-decoder-feed! decoder "\n"))
+           (assert-eq (load count) 1)
+           (assert (sse-decoder-feed! decoder "data: done\n\n"))
+           (assert-eq (load count) 2)
+           (assert-eq (load valid) 1)
+           (sse-decoder-free! decoder)))
+
+(deftest applies-bounded-buffer-and-synchronous-backpressure
+         (let [allocator (malloc-allocator)
+               count (box allocator i64 0)
+               valid (box allocator i64 1)
+               sink (alloc/stack RecordingSseSink)
+               bounded (alloc/stack SseDecoder)
+               rejected (alloc/stack SseDecoder)]
+           (store! (field sink count) count)
+           (store! (field sink valid) valid)
+           (store! (field sink reject-after) -1)
+           (store! bounded (sse-decoder-new allocator sink 4))
+           (assert (not (sse-decoder-feed! bounded "12345")))
+           (assert (sse-decoder-failed? bounded))
+           (sse-decoder-free! bounded)
+           (store! (field sink reject-after) 0)
+           (store! rejected (sse-decoder-new allocator sink 1024))
+           (assert (not (sse-decoder-feed! rejected "data: ignored\n\n")))
+           (assert (sse-decoder-failed? rejected))
+           (sse-decoder-free! rejected)))

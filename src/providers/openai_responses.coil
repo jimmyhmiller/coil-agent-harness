@@ -11,6 +11,7 @@
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
 (import "harness-http" :use *)
+(import "harness-sse" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
@@ -94,6 +95,7 @@
                                       (load (field request max-output-tokens))))
       0)
     (json-put-bool! (mut body) "store" true)
+    (json-put-bool! (mut body) "stream" true)
     (load body)))
 
 (defn openai-usage [(root Json)] (-> ModelUsage)
@@ -175,6 +177,106 @@
               (load (field request model))
               payload))
 
+(defstruct OpenAIStreamState
+  [(allocator (ptr Allocator))
+   (request (ptr ModelRequest))
+   (emitter (ptr EventEmitter))
+   (completed bool)
+   (failed bool)
+   (response Json)])
+
+(impl SseEventSink OpenAIStreamState
+  (consume-sse-event [(self (ptr OpenAIStreamState))
+                      (event-name (slice u8))
+                      (data (slice u8))]
+                     (-> bool)
+                     (if (str-eq data "[DONE]")
+                         true
+                         (let [parsed (json-parse (load (field self allocator)) data)]
+                           (if (not (load (field parsed ok)))
+                               (do (store! (field self failed) true) false)
+                               (let [wire (load (field parsed value))
+                                     kind
+                                       (if (> (slice-len [u8] event-name) 0)
+                                           event-name
+                                           (match (json-string-at wire "type")
+                                             (Some [value] value)
+                                             (None [] "")))]
+                                 (cond (str-eq kind "response.output_text.delta")
+                                         (match (json-string-at wire "delta")
+                                           (Some [delta]
+                                                 (do
+                                                   (openai-event (load (field self emitter))
+                                                                 (load (field self request))
+                                                                 (ModelResponseDelta)
+                                                                 (JsonString delta))
+                                                   true))
+                                           (None [] true))
+                                       (str-eq kind "response.completed")
+                                         (do
+                                           (store! (field self response)
+                                                   (json-get wire "response"))
+                                           (store! (field self completed) true)
+                                           true)
+                                       (str-eq kind "response.failed") (do (store! (field self failed) true) false)
+                                       :else true)))))))
+
+(defn openai-execute-stream [(context (ptr OpenAIResponsesContext))
+                             (request (ptr ModelRequest))
+                             (emitter (ptr EventEmitter))
+                             (allocator (ptr Allocator))] (-> ModelResult)
+  (let [key (api-key allocator (load (field context credential)))]
+    (if (= (slice-len [u8] key) 0)
+        (model-failure "openai-responses" 0 "OPENAI_API_KEY or OPENAI_KEY is not set")
+        (let [headers
+                (box allocator
+                     (ArrayList (slice u8))
+                     (al-new [(slice u8)] allocator))
+              authorization (concat-or-empty allocator "Authorization: Bearer " key)
+              state (alloc/stack OpenAIStreamState)
+              decoder (alloc/stack SseDecoder)
+              http-request (alloc/stack HttpRequest)]
+          (al-push! [(slice u8)] headers "Content-Type: application/json")
+          (al-push! [(slice u8)] headers "Accept: text/event-stream")
+          (al-push! [(slice u8)] headers authorization)
+          (store! (field state allocator) allocator)
+          (store! (field state request) request)
+          (store! (field state emitter) emitter)
+          (store! (field state completed) false)
+          (store! (field state failed) false)
+          (store! (field state response) (JsonNull))
+          (store! decoder (sse-decoder-new allocator state 1048576))
+          (store! (field http-request url) (load (field context endpoint)))
+          (store! (field http-request headers) headers)
+          (store! (field http-request body)
+                  (json-stringify allocator (openai-request-json allocator request)))
+          (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+          (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
+          (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
+          (openai-event emitter request (ModelRequestStarted) (JsonNull))
+          (let [http (http-post-stream allocator http-request)
+                status (load (field http status-code))]
+            (sse-decoder-free! decoder)
+            (if (or (!= (load (field http transport-code)) 0)
+                    (< status 200)
+                    (>= status 300)
+                    (load (field state failed))
+                    (not (load (field state completed))))
+                (let [message
+                        (if (load (field state failed))
+                            "OpenAI stream failed"
+                            (if (or (< status 200) (>= status 300))
+                                "OpenAI streaming request returned an error"
+                                (load (field http error))))]
+                  (openai-event emitter request (ModelRequestFailed) (JsonString message))
+                  (model-failure "openai-responses" status message))
+                (let [response (openai-parse-response allocator (load (field state response)))]
+                  (openai-event emitter
+                                request
+                                (ModelRequestCompleted)
+                                (JsonString (load (field response response-id))))
+                  (ModelOk response))))))))
+
 (defn openai-execute [(context (ptr OpenAIResponsesContext))
                       (request (ptr ModelRequest))
                       (emitter (ptr EventEmitter))
@@ -243,4 +345,4 @@
                   (emitter (ptr EventEmitter))
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
-                 (openai-execute self request emitter allocator)))
+                 (openai-execute-stream self request emitter allocator)))
