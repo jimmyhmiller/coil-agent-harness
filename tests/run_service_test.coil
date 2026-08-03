@@ -6,6 +6,7 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
+(import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
 (import "provider-common" :use *)
@@ -58,6 +59,7 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
+               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack FakeRunController)
                service (alloc/stack RunService)]
            (fs/write-file allocator path "")
@@ -65,12 +67,16 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new journal sequence))
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! (field controller starts) 0)
            (store! (field controller cancels) 0)
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
+           (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (let [created
                    (http-service-call service
@@ -111,6 +117,7 @@
              (assert (match (json-string-at (load (field cancelled body)) "status")
                        (Some [value] (str-eq value "cancelling"))
                        (None [] false))))
+           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 
 (deftest http-boundary-rejects-invalid-json-and-run-id-mismatch
@@ -119,6 +126,7 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
+               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack FakeRunController)
                service (alloc/stack RunService)]
            (fs/write-file allocator path "")
@@ -126,10 +134,14 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new journal sequence))
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
+           (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (let [invalid (http-service-call service "POST" "/v1/runs" "{")
                  mismatch
@@ -139,6 +151,7 @@
                                       "{\"version\":1,\"command_id\":\"cancel\",\"run_id\":\"body-id\"}")]
              (assert-eq (load (field invalid status)) 400)
              (assert-eq (load (field mismatch status)) 409))
+           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 
 (deftest restart-launches-only-queued-work-and-terminalizes-in-flight-work
@@ -147,6 +160,7 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
+               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack FakeRunController)
                service (alloc/stack RunService)]
            (fs/write-file allocator path "")
@@ -154,12 +168,16 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new journal sequence))
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! (field controller starts) 0)
            (store! (field controller cancels) 0)
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
+           (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (emit-event emitter
                        1
@@ -216,4 +234,5 @@
              (assert (match (json-string-at (load (field cancelling body)) "status")
                        (Some [value] (str-eq value "cancelled"))
                        (None [] false))))
+           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))

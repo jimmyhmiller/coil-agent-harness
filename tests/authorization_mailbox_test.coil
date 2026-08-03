@@ -1,0 +1,68 @@
+(module harness-authorization-mailbox-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.atomic" :use *)
+(import "coil.match" :use *)
+(import "coil.thread" :use *)
+(import "harness-authorization-mailbox" :use *)
+(import "harness-system" :use *)
+
+(defstruct MailboxWaitJob
+  [(mailbox (ptr AuthorizationMailbox))
+   (generation i64)
+   (changed (ptr i64))])
+
+(defn mailbox-wait-worker [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr MailboxWaitJob) opaque)]
+    (when (authorization-mailbox-wait (load (field job mailbox))
+                                      (load (field job generation))
+                                      1000)
+      (atomic-add (load (field job changed)) 1)
+      0)
+    (cast (ptr i8) 0)))
+
+(deftest wakes-every-waiter-after-one-notification
+         (let [allocator (malloc-allocator)
+               mailbox (alloc/stack AuthorizationMailbox)
+               changed (box allocator i64 0)
+               first-job (alloc/stack MailboxWaitJob)
+               second-job (alloc/stack MailboxWaitJob)
+               first-thread (alloc/stack Thread)
+               second-thread (alloc/stack Thread)]
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
+           (let [generation (authorization-mailbox-generation mailbox)]
+             (store! (field first-job mailbox) mailbox)
+             (store! (field first-job generation) generation)
+             (store! (field first-job changed) changed)
+             (store! (field second-job mailbox) mailbox)
+             (store! (field second-job generation) generation)
+             (store! (field second-job changed) changed)
+             (assert-eq (cast i64
+                              (thread-spawn first-thread
+                                            (fnptr-of mailbox-wait-worker)
+                                            (cast (ptr i8) first-job)))
+                        0)
+             (assert-eq (cast i64
+                              (thread-spawn second-thread
+                                            (fnptr-of mailbox-wait-worker)
+                                            (cast (ptr i8) second-job)))
+                        0)
+             (sleep-ms 20)
+             (assert-eq (authorization-mailbox-notify! mailbox) 0)
+             (thread-join first-thread)
+             (thread-join second-thread)
+             (assert-eq (atomic-load changed) 2))
+           (authorization-mailbox-close! allocator mailbox)))
+
+(deftest observes-a-notification-that-precedes-the-wait
+         (let [allocator (malloc-allocator)
+               mailbox (alloc/stack AuthorizationMailbox)]
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
+           (let [generation (authorization-mailbox-generation mailbox)]
+             (authorization-mailbox-notify! mailbox)
+             (assert (authorization-mailbox-wait mailbox generation 100)))
+           (authorization-mailbox-close! allocator mailbox)))

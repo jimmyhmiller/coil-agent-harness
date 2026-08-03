@@ -1,0 +1,49 @@
+(module harness-shutdown-signal-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.thread" :use *)
+(import "harness-http-listener" :use *)
+(import "harness-shutdown-signal" :use *)
+(import "harness-system" :use *)
+
+(defstruct ListenerWaitJob
+  [(listener (ptr HttpListener))
+   (shutdown (ptr ShutdownSignal))
+   (result (ptr i64))])
+
+(defn listener-wait-worker [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr ListenerWaitJob) opaque)
+        (mut done) false]
+    (loop (if (load done)
+              (break)
+              (if (shutdown-signal-requested? (load (field job shutdown)))
+                  (store! done true)
+                  (http-listener-wait-readable (load (field job listener)) 25))))
+    (store! (load (field job result)) 0)
+    (cast (ptr i8) 0)))
+
+(deftest wakes-a-bounded-listener-loop-for-graceful-shutdown
+         (let [listener (alloc/stack HttpListener)
+               shutdown (alloc/stack ShutdownSignal)
+               result (alloc/stack i64)
+               job (alloc/stack ListenerWaitJob)
+               worker (alloc/stack Thread)]
+           (match (http-listener-open 0)
+             (ListenerOpenFailed [message] (assert false))
+             (ListenerOpened [opened] (store! listener opened)))
+           (store! shutdown (shutdown-signal-new))
+           (store! result -1)
+           (store! (field job listener) listener)
+           (store! (field job shutdown) shutdown)
+           (store! (field job result) result)
+           (assert-eq (cast i64
+                            (thread-spawn worker
+                                          (fnptr-of listener-wait-worker)
+                                          (cast (ptr i8) job)))
+                      0)
+           (sleep-ms 20)
+           (shutdown-signal-request! shutdown)
+           (thread-join worker)
+           (assert-eq (load result) 0)
+           (http-listener-close! listener)))

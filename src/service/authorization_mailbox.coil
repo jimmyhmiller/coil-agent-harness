@@ -1,0 +1,132 @@
+(module harness-authorization-mailbox)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.atomic" :use *)
+(import "harness-system" :use *)
+
+(extern pthread_mutex_init :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_mutex_destroy :cc c [(ptr i8)] (-> i32))
+(extern pthread_mutex_lock :cc c [(ptr i8)] (-> i32))
+(extern pthread_mutex_unlock :cc c [(ptr i8)] (-> i32))
+(extern pthread_cond_init :cc c [(ptr i8) (ptr i8)] (-> i32))
+(extern pthread_cond_destroy :cc c [(ptr i8)] (-> i32))
+(extern pthread_cond_broadcast :cc c [(ptr i8)] (-> i32))
+(extern pthread_cond_timedwait :cc c [(ptr i8) (ptr i8) (ptr MailboxTimespec)] (-> i32))
+
+;; pthread mutexes and condition variables are opaque and differ in size between
+;; supported hosts. Sixty-four aligned bytes covers both Darwin and Linux ABIs.
+(const MAILBOX_SYNC_BYTES 64)
+
+(defstruct MailboxTimespec [(sec i64) (nsec i64)])
+(defstruct AuthorizationMailbox
+  [(mutex (ptr i8))
+   (condition (ptr i8))
+   (generation (ptr i64))
+   (initialized bool)])
+
+(defsum AuthorizationMailboxOpenResult
+  (AuthorizationMailboxOpened [(mailbox AuthorizationMailbox)])
+  (AuthorizationMailboxOpenFailed [(message (slice u8))]))
+
+(defn authorization-mailbox-initialize [(allocator (ptr Allocator))
+                                        (mutex (ptr i8))
+                                        (condition (ptr i8))] (-> AuthorizationMailboxOpenResult)
+  (let [mailbox (alloc/stack AuthorizationMailbox)
+        mutex-code (pthread_mutex_init mutex (cast (ptr i8) 0))]
+    (if (!= (cast i64 mutex-code) 0)
+        (do
+          (raw-free allocator mutex MAILBOX_SYNC_BYTES 8)
+          (raw-free allocator condition MAILBOX_SYNC_BYTES 8)
+          (AuthorizationMailboxOpenFailed "could not initialize authorization mutex"))
+        (let [condition-code (pthread_cond_init condition (cast (ptr i8) 0))]
+          (if (!= (cast i64 condition-code) 0)
+              (do
+                (pthread_mutex_destroy mutex)
+                (raw-free allocator mutex MAILBOX_SYNC_BYTES 8)
+                (raw-free allocator condition MAILBOX_SYNC_BYTES 8)
+                (AuthorizationMailboxOpenFailed "could not initialize authorization condition"))
+              (do
+                (store! (field mailbox mutex) mutex)
+                (store! (field mailbox condition) condition)
+                (store! (field mailbox generation) (box allocator i64 1))
+                (store! (field mailbox initialized) true)
+                (AuthorizationMailboxOpened (load mailbox))))))))
+
+(defn authorization-mailbox-open [(allocator (ptr Allocator))] (-> AuthorizationMailboxOpenResult)
+  (match (raw-alloc allocator MAILBOX_SYNC_BYTES 8)
+    (None [] (AuthorizationMailboxOpenFailed "could not allocate authorization mutex"))
+    (Some [mutex]
+          (match (raw-alloc allocator MAILBOX_SYNC_BYTES 8)
+            (None []
+                  (do
+                    (raw-free allocator mutex MAILBOX_SYNC_BYTES 8)
+                    (AuthorizationMailboxOpenFailed "could not allocate authorization condition")))
+            (Some [condition]
+                  (authorization-mailbox-initialize allocator mutex condition))))))
+
+(defn authorization-mailbox-generation [(mailbox (ptr AuthorizationMailbox))] (-> i64)
+  (atomic-load (load (field mailbox generation))))
+
+(defn authorization-mailbox-notify! [(mailbox (ptr AuthorizationMailbox))] (-> i64)
+  (if (not (load (field mailbox initialized)))
+      -1
+      (do
+        (pthread_mutex_lock (load (field mailbox mutex)))
+        (atomic-add (load (field mailbox generation)) 1)
+        (pthread_cond_broadcast (load (field mailbox condition)))
+        (pthread_mutex_unlock (load (field mailbox mutex)))
+        0)))
+
+(defn mailbox-timeout [(timeout-ms i64)] (-> MailboxTimespec)
+  (let [deadline (+ (now-ms) timeout-ms)
+        result (alloc/stack MailboxTimespec)]
+    (store! (field result sec) (/ deadline 1000))
+    (store! (field result nsec) (* (% deadline 1000) 1000000))
+    (load result)))
+
+;; Wait until generation differs from the caller's observation or the timeout
+;; expires. The generation is checked while holding the same mutex used by notify,
+;; preventing a decision between journal read and sleep from becoming a lost wakeup.
+(defn authorization-mailbox-wait [(mailbox (ptr AuthorizationMailbox))
+                                  (observed-generation i64)
+                                  (timeout-ms i64)] (-> bool)
+  (if (or (not (load (field mailbox initialized))) (<= timeout-ms 0))
+      false
+      (let [absolute-timeout (alloc/stack MailboxTimespec)
+            (mut changed) false]
+        (store! absolute-timeout (mailbox-timeout timeout-ms))
+        (pthread_mutex_lock (load (field mailbox mutex)))
+        (if (!= (authorization-mailbox-generation mailbox)
+                observed-generation)
+            (store! changed true)
+            (do
+              (pthread_cond_timedwait (load (field mailbox condition))
+                                      (load (field mailbox mutex))
+                                      absolute-timeout)
+              (store! changed
+                      (!= (authorization-mailbox-generation mailbox)
+                          observed-generation))))
+        (pthread_mutex_unlock (load (field mailbox mutex)))
+        (load changed))))
+
+(defn authorization-mailbox-close! [(allocator (ptr Allocator))
+                                    (mailbox (ptr AuthorizationMailbox))] (-> i64)
+  (if (not (load (field mailbox initialized)))
+      0
+      (do
+        (pthread_cond_destroy (load (field mailbox condition)))
+        (pthread_mutex_destroy (load (field mailbox mutex)))
+        (raw-free allocator
+                  (load (field mailbox condition))
+                  MAILBOX_SYNC_BYTES
+                  8)
+        (raw-free allocator
+                  (load (field mailbox mutex))
+                  MAILBOX_SYNC_BYTES
+                  8)
+        (raw-free allocator
+                  (cast (ptr i8) (load (field mailbox generation)))
+                  8
+                  8)
+        (store! (field mailbox initialized) false)
+        0)))

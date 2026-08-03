@@ -2,14 +2,17 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
 (import "coil.result" :use *)
 (import "coil.str" :use *)
+(import "coil.thread" :use *)
 (import "codex-app-server" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "harness-agent-runner" :use *)
+(import "harness-authorization-mailbox" :use *)
 (import "harness-event" :use *)
 (import "harness-interactive-authorizer" :use *)
 (import "harness-json" :use *)
@@ -24,31 +27,92 @@
   [(run-id (slice u8))
    (handle AgentRunHandle)])
 
+(deftrait RuntimeProviderFactory [Self]
+  (resolve-runtime-provider [(self (ptr Self))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))]
+                            (-> (Option (dyn ModelProvider)))))
+
+(defstruct DefaultRuntimeProviderFactory [])
+
+(impl RuntimeProviderFactory DefaultRuntimeProviderFactory
+  (resolve-runtime-provider [(self (ptr DefaultRuntimeProviderFactory))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))]
+                            (-> (Option (dyn ModelProvider)))
+                            (cond (str-eq provider-name "openai")
+                                    (Some (box allocator
+                                               OpenAIResponsesContext
+                                               (openai-context-default)))
+                                  (str-eq provider-name "deepseek-openai")
+                                    (Some (box allocator
+                                               DeepSeekOpenAIContext
+                                               (deepseek-openai-context-default)))
+                                  (str-eq provider-name "deepseek-anthropic")
+                                    (Some (box allocator
+                                               DeepSeekAnthropicContext
+                                               (deepseek-anthropic-context-default)))
+                                  (str-eq provider-name "codex")
+                                    (let [cwd-result (os/current-dir allocator)
+                                          cwd
+                                            (match cwd-result
+                                              (Ok [owned] (os/owned-string-slice owned))
+                                              (Err [failure] "."))]
+                                      (Some (box allocator
+                                                 CodexAppServerContext
+                                                 (codex-context cwd))))
+                                  :else (None [(dyn ModelProvider)]))))
+
 (defstruct RuntimeRunController
   [(allocator (ptr Allocator))
    (registry (ptr ToolRegistry))
+   (provider-factory (dyn RuntimeProviderFactory))
    (emitter (ptr EventEmitter))
+   (mailbox (ptr AuthorizationMailbox))
    (journal-path (slice u8))
    (runs (ArrayList ActiveRuntimeRun))
+   (pending (ArrayList Json))
+   (pending-next i64)
+   (state-lock (ptr i64))
+   (stopping (ptr i64))
+   (scheduler Thread)
+   (scheduler-started bool)
    (policy AgentRunPolicy)
    (max-active-runs i64)
    (authorization-timeout-ms i64)])
 
 (defn runtime-controller-new [(allocator (ptr Allocator))
                               (registry (ptr ToolRegistry))
+                              (provider-factory (dyn RuntimeProviderFactory))
                               (emitter (ptr EventEmitter))
+                              (mailbox (ptr AuthorizationMailbox))
                               (journal-path (slice u8))] (-> RuntimeRunController)
   (let [controller (alloc/stack RuntimeRunController)]
     (store! (field controller allocator) allocator)
     (store! (field controller registry) registry)
+    (store! (field controller provider-factory) provider-factory)
     (store! (field controller emitter) emitter)
+    (store! (field controller mailbox) mailbox)
     (store! (field controller journal-path) journal-path)
     (store! (field controller runs) (al-new [ActiveRuntimeRun] allocator))
+    (store! (field controller pending) (al-new [Json] allocator))
+    (store! (field controller pending-next) 0)
+    (store! (field controller state-lock) (box allocator i64 0))
+    (store! (field controller stopping) (box allocator i64 0))
+    (store! (field controller scheduler-started) false)
     (store! (field (field controller policy) max-model-turns) 8)
     (store! (field (field controller policy) max-parallel-tools) 8)
     (store! (field controller max-active-runs) 32)
     (store! (field controller authorization-timeout-ms) 300000)
     (load controller)))
+
+(defn runtime-controller-lock! [(controller (ptr RuntimeRunController))] (-> i64)
+  (let [lock (load (field controller state-lock))]
+    (loop (if (= (atomic-cas lock 0 1) 0) (break) 0)))
+  0)
+
+(defn runtime-controller-unlock! [(controller (ptr RuntimeRunController))] (-> i64)
+  (atomic-store (load (field controller state-lock)) 0))
 
 (defn runtime-command-timeout [(command Json)] (-> i64)
   (let [value (json-number-i64 (json-get command "timeout_ms"))]
@@ -106,11 +170,11 @@
     (store! (field authorizer model) (load (field request model)))
     (store! (field authorizer cancellation)
             (load (field request cancellation)))
+    (store! (field authorizer mailbox) (load (field controller mailbox)))
     (store! (field authorizer run-deadline-monotonic-ms)
             (load (field request deadline-monotonic-ms)))
     (store! (field authorizer authorization-timeout-ms)
             (load (field controller authorization-timeout-ms)))
-    (store! (field authorizer poll-interval-ms) 100)
     authorizer))
 
 (defn runtime-controller-reap! [(controller (ptr RuntimeRunController))] (-> i64)
@@ -182,59 +246,96 @@
                             (load active))
                   0))))))
 
-(defn runtime-controller-start! [(controller (ptr RuntimeRunController))
-                                 (command Json)] (-> i64)
+(defn runtime-controller-launch! [(controller (ptr RuntimeRunController))
+                                  (command Json)] (-> i64)
   (runtime-controller-reap! controller)
   (let [allocator (load (field controller allocator))
         provider-name (command-string command "provider")]
-    (cond (str-eq provider-name "openai")
-            (let [context
-                    (box allocator
-                         OpenAIResponsesContext
-                         (openai-context-default))]
-              (runtime-controller-start-provider! controller command context))
-          (str-eq provider-name "deepseek-openai")
-            (let [context
-                    (box allocator
-                         DeepSeekOpenAIContext
-                         (deepseek-openai-context-default))]
-              (runtime-controller-start-provider! controller command context))
-          (str-eq provider-name "deepseek-anthropic")
-            (let [context
-                    (box allocator
-                         DeepSeekAnthropicContext
-                         (deepseek-anthropic-context-default))]
-              (runtime-controller-start-provider! controller command context))
-          (str-eq provider-name "codex")
-            (let [cwd-result (os/current-dir allocator)
-                  cwd
-                    (match cwd-result
-                      (Ok [owned] (os/owned-string-slice owned))
-                      (Err [failure] "."))
-                  context (box allocator CodexAppServerContext (codex-context cwd))]
-              (runtime-controller-start-provider! controller command context))
-          :else -1)))
+    (match (resolve-runtime-provider (load (field controller provider-factory))
+                                     allocator
+                                     provider-name)
+      (Some [provider]
+            (runtime-controller-start-provider! controller command provider))
+      (None [] -1))))
 
-(defn runtime-controller-cancel! [(controller (ptr RuntimeRunController))
-                                  (run-id (slice u8))] (-> i64)
+(defn runtime-controller-pending? [(controller (ptr RuntimeRunController))
+                                   (run-id (slice u8))] (-> bool)
+  (let [(mut i) (load (field controller pending-next))
+        n (al-len [Json] (load (field controller pending)))
+        (mut found) false]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [command (al-get [Json] (load (field controller pending)) (load i))]
+                (if (str-eq (command-string command "run_id") run-id)
+                    (do (store! found true) (break))
+                    (store! i (+ (load i) 1))))))
+    (load found)))
+
+(defn runtime-controller-enqueue-locked! [(controller (ptr RuntimeRunController))
+                                          (command Json)] (-> i64)
+  (let [run-id (command-string command "run_id")]
+    (if (or (runtime-controller-active? controller run-id)
+            (runtime-controller-pending? controller run-id))
+        0
+        (do
+          (al-push! [Json] (mut (field controller pending)) command)
+          0))))
+
+(defn runtime-controller-fail-launch! [(controller (ptr RuntimeRunController))
+                                       (command Json)] (-> i64)
+  (emit-event (load (field controller emitter))
+              (now-ms)
+              (RunFailed)
+              (command-string command "run_id")
+              (command-string command "run_id")
+              ""
+              (command-string command "provider")
+              (command-string command "model")
+              (JsonString "queued run could not start")))
+
+(defn runtime-controller-drain-locked! [(controller (ptr RuntimeRunController))] (-> i64)
   (runtime-controller-reap! controller)
-  (let [(mut i) 0
-        n (al-len [ActiveRuntimeRun] (load (field controller runs)))
+  (let [count (al-len [Json] (load (field controller pending)))]
+    (loop (if (or (>= (load (field controller pending-next)) count)
+                  (>= (al-len [ActiveRuntimeRun] (load (field controller runs)))
+                      (load (field controller max-active-runs))))
+              (break)
+              (let [index (load (field controller pending-next))
+                    command (al-get [Json] (load (field controller pending)) index)]
+                (store! (field controller pending-next) (+ index 1))
+                (when (> (str-len (command-string command "run_id")) 0)
+                  (when (!= (runtime-controller-launch! controller command) 0)
+                    (runtime-controller-fail-launch! controller command)
+                    0)
+                  0))))
+    (when (>= (load (field controller pending-next)) count)
+      (al-clear! [Json] (mut (field controller pending)))
+      (store! (field controller pending-next) 0)
+      0)
+    0))
+
+(defn runtime-controller-cancel-pending-locked! [(controller (ptr RuntimeRunController))
+                                                 (run-id (slice u8))] (-> bool)
+  (let [(mut i) (load (field controller pending-next))
+        n (al-len [Json] (load (field controller pending)))
         (mut cancelled) false]
     (loop (if (>= (load i) n)
               (break)
-              (let [slot
-                      (index (load (field (field controller runs) data))
-                             (load i))]
-                (if (str-eq (load (field slot run-id)) run-id)
+              (let [command (al-get [Json] (load (field controller pending)) (load i))]
+                (if (str-eq (command-string command "run_id") run-id)
                     (do
-                      (agent-run-cancel! (field slot handle))
+                      (let [(mut removed) command]
+                        (json-put-string! (mut removed) "run_id" "")
+                        (al-set! [Json]
+                                 (mut (field controller pending))
+                                 (load i)
+                                 (load removed)))
                       (store! cancelled true)
                       (break))
                     (store! i (+ (load i) 1))))))
-    (if (load cancelled) 0 -1)))
+    (load cancelled)))
 
-(defn runtime-controller-join-all! [(controller (ptr RuntimeRunController))] (-> i64)
+(defn runtime-controller-cancel-active-locked! [(controller (ptr RuntimeRunController))] (-> i64)
   (let [(mut i) 0
         n (al-len [ActiveRuntimeRun] (load (field controller runs)))]
     (loop (if (>= (load i) n)
@@ -243,15 +344,119 @@
                       (index (load (field (field controller runs) data))
                              (load i))]
                 (agent-run-cancel! (field slot handle))
-                (agent-run-join (mut (field slot handle)))
                 (store! i (+ (load i) 1)))))
-    (al-clear! [ActiveRuntimeRun] (mut (field controller runs)))
+    (authorization-mailbox-notify! (load (field controller mailbox)))
     0))
+
+(defn runtime-controller-scheduler-worker [(opaque (ptr i8))] (-> (ptr i8))
+  (let [controller (cast (ptr RuntimeRunController) opaque)
+        (mut done) false]
+    (loop (if (load done)
+              (break)
+              (do
+                (runtime-controller-lock! controller)
+                (if (= (atomic-load (load (field controller stopping))) 1)
+                    (do
+                      (runtime-controller-cancel-active-locked! controller)
+                      (al-clear! [Json] (mut (field controller pending)))
+                      (store! (field controller pending-next) 0)
+                      (runtime-controller-reap! controller)
+                      (when (= (al-len [ActiveRuntimeRun]
+                                       (load (field controller runs)))
+                               0)
+                        (store! done true)
+                        0))
+                    (runtime-controller-drain-locked! controller))
+                (runtime-controller-unlock! controller)
+                (when (not (load done)) (sleep-ms 10) 0))))
+    (cast (ptr i8) 0)))
+
+(defn runtime-controller-start-scheduler! [(controller (ptr RuntimeRunController))] (-> i64)
+  (runtime-controller-lock! controller)
+  (let [result
+          (if (load (field controller scheduler-started))
+              0
+              (let [spawn-code
+                      (thread-spawn (field controller scheduler)
+                                    (fnptr-of runtime-controller-scheduler-worker)
+                                    (cast (ptr i8) controller))]
+                (if (= (cast i64 spawn-code) 0)
+                    (do
+                      (store! (field controller scheduler-started) true)
+                      0)
+                    -1)))]
+    (runtime-controller-unlock! controller)
+    result))
+
+(defn runtime-controller-enqueue! [(controller (ptr RuntimeRunController))
+                                   (command Json)] (-> i64)
+  (if (= (atomic-load (load (field controller stopping))) 1)
+      -1
+      (if (!= (runtime-controller-start-scheduler! controller) 0)
+          -1
+          (do
+            (runtime-controller-lock! controller)
+            (let [result (runtime-controller-enqueue-locked! controller command)]
+              (runtime-controller-unlock! controller)
+              result)))))
+
+(defn runtime-controller-cancel! [(controller (ptr RuntimeRunController))
+                                  (run-id (slice u8))] (-> i64)
+  (runtime-controller-lock! controller)
+  (runtime-controller-reap! controller)
+  (let [(mut i) 0
+        n (al-len [ActiveRuntimeRun] (load (field controller runs)))
+        (mut cancelled) false
+        (mut was-pending) false]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [slot
+                      (index (load (field (field controller runs) data))
+                             (load i))]
+                (if (str-eq (load (field slot run-id)) run-id)
+                    (do
+                      (agent-run-cancel! (field slot handle))
+                      (authorization-mailbox-notify! (load (field controller mailbox)))
+                      (store! cancelled true)
+                      (break))
+                    (store! i (+ (load i) 1))))))
+    (when (not (load cancelled))
+      (store! was-pending
+              (runtime-controller-cancel-pending-locked! controller run-id))
+      (store! cancelled (load was-pending))
+      0)
+    (runtime-controller-unlock! controller)
+    ;; A removed queued run has no worker capable of emitting run.cancelled.
+    ;; The service uses this nonzero result to durably terminalize it.
+    (cond (load was-pending) 1
+          (load cancelled) 0
+          :else -1)))
+
+(defn runtime-controller-join-all! [(controller (ptr RuntimeRunController))] (-> i64)
+  (atomic-store (load (field controller stopping)) 1)
+  (authorization-mailbox-notify! (load (field controller mailbox)))
+  (if (load (field controller scheduler-started))
+      (cast i64 (thread-join (field controller scheduler)))
+      (do
+        (runtime-controller-lock! controller)
+        (runtime-controller-cancel-active-locked! controller)
+        (let [(mut i) 0
+              n (al-len [ActiveRuntimeRun] (load (field controller runs)))]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (let [slot
+                            (index (load (field (field controller runs) data))
+                                   (load i))]
+                      (agent-run-join (mut (field slot handle)))
+                      (store! i (+ (load i) 1)))))
+          (al-clear! [ActiveRuntimeRun] (mut (field controller runs))))
+        (runtime-controller-unlock! controller)))
+  0)
 
 (impl RunController RuntimeRunController
   (start-durable-run [(self (ptr RuntimeRunController)) (command Json)]
                      (-> i64)
-                     (runtime-controller-start! self command))
+                     (runtime-controller-enqueue! self command))
   (cancel-durable-run [(self (ptr RuntimeRunController))
                        (run-id (slice u8))]
                       (-> i64)

@@ -7,6 +7,7 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
+(import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-interactive-authorizer" :use *)
 (import "harness-run-state" :use *)
@@ -22,6 +23,7 @@
    (journal-path (slice u8))
    (journal (ptr EventJournal))
    (emitter (ptr EventEmitter))
+   (mailbox (ptr AuthorizationMailbox))
    (controller (dyn RunController))])
 
 (defstruct ServiceResponse [(status i64) (body Json)])
@@ -295,10 +297,12 @@
                                                                    500
                                                                    "journal_write_failed"
                                                                    "authorization decision was not durable")
-                                                    (service-authorization-response service
-                                                                                    run-id
-                                                                                    authorization-id
-                                                                                    202))))))))))))
+                                                    (do
+                                                      (authorization-mailbox-notify! (load (field service mailbox)))
+                                                      (service-authorization-response service
+                                                                                      run-id
+                                                                                      authorization-id
+                                                                                      202)))))))))))))
 
 (defn run-created-before? [(events (ref (ArrayList Json)))
                            (before i64)

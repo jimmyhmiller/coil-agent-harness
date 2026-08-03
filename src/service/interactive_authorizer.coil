@@ -7,6 +7,7 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
+(import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
@@ -28,9 +29,9 @@
    (provider (slice u8))
    (model (slice u8))
    (cancellation (ptr CancellationToken))
+   (mailbox (ptr AuthorizationMailbox))
    (run-deadline-monotonic-ms i64)
-   (authorization-timeout-ms i64)
-   (poll-interval-ms i64)])
+   (authorization-timeout-ms i64)])
 
 (defn authorization-event? [(event Json)
                             (run-id (slice u8))
@@ -144,7 +145,13 @@
               (load (field self provider))
               (load (field self model))
               (JsonString reason))
+  (authorization-mailbox-notify! (load (field self mailbox)))
   (Reject reason))
+
+(defn interactive-wait-timeout [(deadline i64)] (-> i64)
+  (if (> deadline 0)
+      (deadline-remaining-ms deadline 0)
+      60000))
 
 (defn interactive-authorize [(self (ptr InteractiveAuthorizer))
                              (spec (ptr ToolSpec))
@@ -172,32 +179,37 @@
                         (authorization-request-payload allocator spec call))
             0)
           (block :decision
-                 (loop (if (cancellation-requested? (load (field self cancellation)))
+                 (loop (let [mailbox (load (field self mailbox))]
+                         (when (= mailbox (cast (ptr AuthorizationMailbox) 0))
                            (return-from :decision
-                                        (interactive-expire! self
-                                                             authorization-id
-                                                             "authorization cancelled"))
-                           (if (and (> deadline 0)
-                                    (= (deadline-remaining-ms deadline 0) 0))
+                                        (Reject "authorization mailbox unavailable")))
+                         (let [observed (authorization-mailbox-generation mailbox)
+                               recovery
+                                 (event-journal-recover allocator
+                                                        (load (field self journal-path)))]
+                           (when (not (load (field recovery ok)))
+                             (return-from :decision
+                                          (Reject "authorization journal unavailable")))
+                           (match (authorization-decision (field recovery events)
+                                                          run-id
+                                                          authorization-id)
+                             (AuthorizationAllowed []
+                                                   (return-from :decision (Authorize)))
+                             (AuthorizationRejected [reason]
+                                                    (return-from :decision (Reject reason)))
+                             (AuthorizationPending [] 0))
+                           (when (cancellation-requested? (load (field self cancellation)))
+                             (return-from :decision
+                                          (interactive-expire! self
+                                                               authorization-id
+                                                               "authorization cancelled")))
+                           (let [wait-ms (interactive-wait-timeout deadline)]
+                             (when (= wait-ms 0)
                                (return-from :decision
                                             (interactive-expire! self
                                                                  authorization-id
-                                                                 "authorization timed out"))
-                               (let [recovery
-                                       (event-journal-recover allocator
-                                                              (load (field self journal-path)))]
-                                 (if (not (load (field recovery ok)))
-                                     (return-from :decision
-                                                  (Reject "authorization journal unavailable"))
-                                     (match (authorization-decision (field recovery events)
-                                                                    run-id
-                                                                    authorization-id)
-                                       (AuthorizationAllowed []
-                                                             (return-from :decision (Authorize)))
-                                       (AuthorizationRejected [reason]
-                                                              (return-from :decision (Reject reason)))
-                                       (AuthorizationPending []
-                                                             (sleep-ms (load (field self poll-interval-ms)))))))))))))))
+                                                                 "authorization timed out")))
+                             (authorization-mailbox-wait mailbox observed wait-ms))))))))))
 
 (impl ToolAuthorizer InteractiveAuthorizer
   (authorize-tool [(self (ptr InteractiveAuthorizer))

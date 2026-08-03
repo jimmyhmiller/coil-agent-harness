@@ -8,6 +8,7 @@
 (import "harness-http-listener" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
+(import "harness-shutdown-signal" :use *)
 (import "provider-common" :use *)
 
 (defn write-service-response! [(allocator (ptr Allocator))
@@ -81,4 +82,23 @@
   (loop (when (!= (serve-run-service-once allocator listener service auth-token) 0)
           (break)
           0))
+  0)
+
+(defn serve-run-service-until-shutdown [(allocator (ptr Allocator))
+                                        (listener (ptr HttpListener))
+                                        (service (ptr RunService))
+                                        (auth-token (slice u8))
+                                        (shutdown (ptr ShutdownSignal))] (-> i64)
+  (loop (if (shutdown-signal-requested? shutdown)
+            (break)
+            (let [ready (http-listener-wait-readable listener 100)]
+              (cond (= ready 0) 0
+                    (< ready 0) (break)
+                    (!= (serve-run-service-once allocator
+                                                listener
+                                                service
+                                                auth-token)
+                        0)
+                      (break)
+                    :else 0))))
   0)

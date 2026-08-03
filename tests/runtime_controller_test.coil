@@ -2,11 +2,13 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
 (import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
+(import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
 (import "harness-run-service" :use *)
@@ -30,6 +32,60 @@
                    (store! (field response output-text) "done")
                    (ModelOk (load response)))))
 
+(defstruct ControllerFakeProviderFactory
+  [(provider (ptr ControllerFakeProvider))])
+
+(impl RuntimeProviderFactory ControllerFakeProviderFactory
+  (resolve-runtime-provider [(self (ptr ControllerFakeProviderFactory))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))]
+                            (-> (Option (dyn ModelProvider)))
+                            (if (str-eq provider-name "fake")
+                                (Some (load (field self provider)))
+                                (None [(dyn ModelProvider)]))))
+
+(defstruct QueuedProviderState
+  [(calls (ptr i64))
+   (active (ptr i64))
+   (max-active (ptr i64))])
+
+(defstruct QueuedFakeProvider
+  [(state (ptr QueuedProviderState))])
+
+(impl ModelProvider QueuedFakeProvider
+  (provider-name [(self (ptr QueuedFakeProvider))] (-> (slice u8)) "queued-fake")
+  (execute-model [(self (ptr QueuedFakeProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (let [state (load (field self state))
+                       concurrent (+ (atomic-add (load (field state active)) 1) 1)]
+                   (when (> concurrent (atomic-load (load (field state max-active))))
+                     (atomic-store (load (field state max-active)) concurrent)
+                     0)
+                   (atomic-add (load (field state calls)) 1)
+                   (sleep-ms 40)
+                   (atomic-add (load (field state active)) -1)
+                   (let [(mut response) (response-empty allocator)]
+                     (store! (field response provider) "queued-fake")
+                     (store! (field response model) (load (field request model)))
+                     (store! (field response response-id) "queued-response")
+                     (store! (field response output-text) "done")
+                     (ModelOk (load response))))))
+
+(defstruct QueuedProviderFactory
+  [(provider (ptr QueuedFakeProvider))])
+
+(impl RuntimeProviderFactory QueuedProviderFactory
+  (resolve-runtime-provider [(self (ptr QueuedProviderFactory))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))]
+                            (-> (Option (dyn ModelProvider)))
+                            (if (str-eq provider-name "queued-fake")
+                                (Some (load (field self provider)))
+                                (None [(dyn ModelProvider)]))))
+
 (defn controller-command [(allocator (ptr Allocator))] (-> Json)
   (let [(mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
@@ -48,17 +104,32 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
+               mailbox (alloc/stack AuthorizationMailbox)
                registry (box allocator ToolRegistry (tool-registry-new allocator))
-               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))]
+               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
+               provider-factory
+                 (box allocator
+                      ControllerFakeProviderFactory
+                      (let [factory (alloc/stack ControllerFakeProviderFactory)]
+                        (store! (field factory provider) provider)
+                        (load factory)))]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new journal sequence))
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (let [controller
                    (box allocator
                         RuntimeRunController
-                        (runtime-controller-new allocator registry emitter path))
+                        (runtime-controller-new allocator
+                                                registry
+                                                provider-factory
+                                                emitter
+                                                mailbox
+                                                path))
                  command (controller-command allocator)
                  request (runtime-model-request controller command)]
              (assert (str-eq (load (field request run-id)) "controller-run"))
@@ -88,12 +159,12 @@
              (assert-eq (al-len [ActiveRuntimeRun]
                                 (load (field controller runs)))
                         0)
-             (assert-eq (runtime-controller-start! controller
-                                                   (let [(mut unknown) command]
-                                                     (json-put-string! (mut unknown)
-                                                                       "provider"
-                                                                       "unknown")
-                                                     (load unknown)))
+             (assert-eq (runtime-controller-launch! controller
+                                                    (let [(mut unknown) command]
+                                                      (json-put-string! (mut unknown)
+                                                                        "provider"
+                                                                        "unknown")
+                                                      (load unknown)))
                         -1))
            (let [recovery (event-journal-recover allocator path)]
              (assert (load (field recovery ok)))
@@ -104,4 +175,85 @@
              (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 1)
                                              "event")
                              "run.completed")))
+           (authorization-mailbox-close! allocator mailbox)
+           (event-journal-close! journal)))
+
+(deftest drains-durable-runs-in-fifo-order-within-the-capacity-limit
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-runtime-queue.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               mailbox (alloc/stack AuthorizationMailbox)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               state (alloc/stack QueuedProviderState)]
+           (store! (field state calls) (box allocator i64 0))
+           (store! (field state active) (box allocator i64 0))
+           (store! (field state max-active) (box allocator i64 0))
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
+           (let [provider
+                   (box allocator
+                        QueuedFakeProvider
+                        (let [value (alloc/stack QueuedFakeProvider)]
+                          (store! (field value state) state)
+                          (load value)))
+                 factory
+                   (box allocator
+                        QueuedProviderFactory
+                        (let [value (alloc/stack QueuedProviderFactory)]
+                          (store! (field value provider) provider)
+                          (load value)))
+                 controller
+                   (box allocator
+                        RuntimeRunController
+                        (runtime-controller-new allocator
+                                                registry
+                                                factory
+                                                emitter
+                                                mailbox
+                                                path))
+                 (mut first) (controller-command allocator)
+                 (mut second) (controller-command allocator)
+                 (mut cancelled) (controller-command allocator)]
+             (store! (field controller max-active-runs) 0)
+             (json-put-string! (mut cancelled) "run_id" "queued-run-cancelled")
+             (json-put-string! (mut cancelled) "provider" "queued-fake")
+             (assert-eq (start-durable-run controller (load cancelled)) 0)
+             (assert-eq (cancel-durable-run controller "queued-run-cancelled") 1)
+             (store! (field controller max-active-runs) 1)
+             (json-put-string! (mut first) "run_id" "queued-run-one")
+             (json-put-string! (mut first) "provider" "queued-fake")
+             (json-put-string! (mut second) "run_id" "queued-run-two")
+             (json-put-string! (mut second) "provider" "queued-fake")
+             (assert-eq (start-durable-run controller (load first)) 0)
+             (assert-eq (start-durable-run controller (load second)) 0)
+             (let [(mut attempt) 0]
+               (loop (if (or (and (= (atomic-load (load (field state calls))) 2)
+                                  (= (atomic-load (load (field state active))) 0))
+                             (>= (load attempt) 300))
+                         (break)
+                         (do
+                           (sleep-ms 5)
+                           (store! attempt (+ (load attempt) 1))))))
+             (sleep-ms 20)
+             (runtime-controller-join-all! controller)
+             (assert-eq (atomic-load (load (field state calls))) 2)
+             (assert-eq (atomic-load (load (field state max-active))) 1)
+             (let [recovery (event-journal-recover allocator path)]
+               (assert (load (field recovery ok)))
+               (assert-eq (al-len [Json] (load (field recovery events))) 4)
+               (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 0)
+                                               "run_id")
+                               "queued-run-one"))
+               (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 2)
+                                               "run_id")
+                               "queued-run-two"))))
+           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))

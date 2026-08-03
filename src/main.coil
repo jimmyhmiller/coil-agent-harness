@@ -18,6 +18,7 @@
 (import "harness-filesystem-tools" :use *)
 (import "harness-run-service" :use *)
 (import "harness-runtime-controller" :use *)
+(import "harness-shutdown-signal" :use *)
 (import "harness-service-http-server" :use *)
 (import "codex-app-server" :use *)
 (import "deepseek-anthropic" :use *)
@@ -25,6 +26,7 @@
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
+(import "harness-authorization-mailbox" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
   (let [writer (alloc/stack io/Writer)]
@@ -219,6 +221,7 @@
   (let [allocator (malloc-allocator)
         auth-token (cli-auth-token allocator)
         journal (alloc/stack EventJournal)
+        mailbox (alloc/stack AuthorizationMailbox)
         listener (alloc/stack HttpListener)]
     (block :serve
            (when (= (slice-len [u8] auth-token) 0)
@@ -245,6 +248,14 @@
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :serve 65))
+               (match (authorization-mailbox-open allocator)
+                 (AuthorizationMailboxOpenFailed [message]
+                                                 (do
+                                                   (write-line 2 message)
+                                                   (event-journal-close! journal)
+                                                   (return-from :serve 70)))
+                 (AuthorizationMailboxOpened [opened]
+                                             (store! mailbox opened)))
                (let [sequence
                        (box allocator
                             i64
@@ -257,12 +268,18 @@
                        (box allocator
                             ToolRegistry
                             (tool-registry-new allocator))
+                     provider-factory
+                       (box allocator
+                            DefaultRuntimeProviderFactory
+                            (zeroed DefaultRuntimeProviderFactory))
                      controller
                        (box allocator
                             RuntimeRunController
                             (runtime-controller-new allocator
                                                     registry
+                                                    provider-factory
                                                     emitter
+                                                    mailbox
                                                     journal-path))
                      service (alloc/stack RunService)]
                  (tool-register! registry (echo-definition allocator))
@@ -271,17 +288,20 @@
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
+                 (store! (field service mailbox) mailbox)
                  (store! (field service controller) controller)
                  (match (http-listener-open port)
                    (ListenerOpenFailed [message]
                                        (do
                                          (write-line 2 message)
+                                         (authorization-mailbox-close! allocator mailbox)
                                          (event-journal-close! journal)
                                          (return-from :serve 69)))
                    (ListenerOpened [opened] (store! listener opened)))
                  (when (< (service-recover-runs! service) 0)
                    (write-line 2 "could not recover durable runs")
                    (http-listener-close! listener)
+                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (return-from :serve 65))
                  (write-line 2
@@ -290,9 +310,17 @@
                                               (json-stringify allocator
                                                               (json-integer allocator
                                                                             (load (field listener port))))))
-                 (serve-run-service allocator listener service auth-token)
+                 (let [shutdown (alloc/stack ShutdownSignal)]
+                   (store! shutdown (shutdown-signal-new))
+                   (shutdown-signal-install! shutdown)
+                   (serve-run-service-until-shutdown allocator
+                                                     listener
+                                                     service
+                                                     auth-token
+                                                     shutdown))
                  (runtime-controller-join-all! controller)
                  (http-listener-close! listener)
+                 (authorization-mailbox-close! allocator mailbox)
                  (event-journal-close! journal)
                  0))))))
 
