@@ -1,0 +1,142 @@
+(module harness.nesting-depth)
+
+(import "coil.primitive" :as primitive)
+
+;; Expression-depth report for authored Coil code. This checker runs before macro
+;; expansion, so it measures the surface forms exactly as written. Every list or
+;; vector in a function body contributes one level; signatures are excluded.
+
+(defn nd-list-depth [(form Code) (depth i64)] (-> i64)
+  (if (primitive/code-list? form)
+      (let [here (+ depth 1)]
+        (nd-children-depth form 0 (primitive/code-count form) here here))
+      depth))
+
+(defn nd-children-depth [(form Code)
+                         (i i64)
+                         (n i64)
+                         (depth i64)
+                         (maximum i64)] (-> i64)
+  (if (>= i n)
+      maximum
+      (let [child-depth (nd-list-depth (primitive/code-nth form i) depth)]
+        (nd-children-depth form
+                           (+ i 1)
+                           n
+                           depth
+                           (if (> child-depth maximum) child-depth maximum)))))
+
+(defn nd-head-is? [(form Code) (name Code)] (-> bool)
+  (and (primitive/code-list? form)
+       (and (> (primitive/code-count form) 0)
+            (primitive/code-eq (primitive/code-nth form 0) name))))
+
+(defn nd-arrow-index [(form Code) (i i64) (n i64)] (-> i64)
+  (if (>= i n)
+      -1
+      (if (nd-head-is? (primitive/code-nth form i) `->)
+          i
+          (nd-arrow-index form (+ i 1) n))))
+
+(defn nd-function-depth [(form Code)] (-> i64)
+  (let [n (primitive/code-count form)
+        arrow (nd-arrow-index form 0 n)]
+    (if (< arrow 0)
+        0
+        (nd-function-bodies form (+ arrow 1) n 0))))
+
+(defn nd-function-bodies [(form Code) (i i64) (n i64) (maximum i64)] (-> i64)
+  (if (>= i n)
+      maximum
+      (let [body-depth (nd-list-depth (primitive/code-nth form i) 0)]
+        (nd-function-bodies form
+                            (+ i 1)
+                            n
+                            (if (> body-depth maximum) body-depth maximum)))))
+
+(defn nd-form-depth [(module-name (slice u8)) (form Code)] (-> i64)
+  (if (and (primitive/code-from-user? form) (nd-head-is? form `defn))
+      (let [depth (nd-function-depth form)
+            name (primitive/code-sym (primitive/code-nth form 1))]
+        (do
+          (nd-warn-depth form depth)
+          depth))
+      0))
+
+;; Checker diagnostics are the visible output channel for before-expand programs.
+;; Keep messages literal so their source locations point at the measured function.
+(defn nd-warn-depth [(form Code) (depth i64)] (-> i64)
+  (cond (= depth 0) (primitive/warn form "expression nesting depth 0")
+        (= depth 1) (primitive/warn form "expression nesting depth 1")
+        (= depth 2) (primitive/warn form "expression nesting depth 2")
+        (= depth 3) (primitive/warn form "expression nesting depth 3")
+        (= depth 4) (primitive/warn form "expression nesting depth 4")
+        (= depth 5) (primitive/warn form "expression nesting depth 5")
+        (= depth 6) (primitive/warn form "expression nesting depth 6")
+        (= depth 7) (primitive/warn form "expression nesting depth 7")
+        (= depth 8) (primitive/warn form "expression nesting depth 8")
+        (= depth 9) (primitive/warn form "expression nesting depth 9")
+        (= depth 10) (primitive/warn form "expression nesting depth 10")
+        (= depth 11) (primitive/warn form "expression nesting depth 11")
+        (= depth 12) (primitive/warn form "expression nesting depth 12")
+        (= depth 13) (primitive/warn form "expression nesting depth 13")
+        (= depth 14) (primitive/warn form "expression nesting depth 14")
+        (= depth 15) (primitive/warn form "expression nesting depth 15")
+        (= depth 16) (primitive/warn form "expression nesting depth 16")
+        (= depth 17) (primitive/warn form "expression nesting depth 17")
+        (= depth 18) (primitive/warn form "expression nesting depth 18")
+        (= depth 19) (primitive/warn form "expression nesting depth 19")
+        (= depth 20) (primitive/warn form "expression nesting depth 20")
+        (= depth 21) (primitive/warn form "expression nesting depth 21")
+        (= depth 22) (primitive/warn form "expression nesting depth 22")
+        (= depth 23) (primitive/warn form "expression nesting depth 23")
+        (= depth 24) (primitive/warn form "expression nesting depth 24")
+        :else (primitive/warn form "expression nesting depth exceeds 24"))
+  0)
+
+(defn nd-module-forms [(module-form Code)
+                       (module-name (slice u8))
+                       (i i64)
+                       (n i64)
+                       (maximum i64)] (-> i64)
+  (if (>= i n)
+      maximum
+      (let [depth (nd-form-depth module-name (primitive/code-nth module-form i))]
+        (nd-module-forms module-form
+                         module-name
+                         (+ i 1)
+                         n
+                         (if (> depth maximum) depth maximum)))))
+
+(defn nd-user-module? [(module-form Code)] (-> bool)
+  (and (> (primitive/code-count module-form) 1)
+       (and (primitive/code-from-user? (primitive/code-nth module-form 1))
+            (not (primitive/code-eq (primitive/code-nth module-form 0)
+                                    `harness.nesting-depth)))))
+
+(defn nd-module-depth [(module-form Code)] (-> i64)
+  (if (nd-user-module? module-form)
+      (let [depth
+              (nd-module-forms module-form
+                               (primitive/code-sym (primitive/code-nth module-form 0))
+                               1
+                               (primitive/code-count module-form)
+                               0)
+            name (primitive/code-sym (primitive/code-nth module-form 0))]
+        depth)
+      0))
+
+(defn nd-modules [(modules Code) (i i64) (n i64) (maximum i64)] (-> i64)
+  (if (>= i n)
+      maximum
+      (let [depth (nd-module-depth (primitive/code-nth modules i))]
+        (nd-modules modules
+                    (+ i 1)
+                    n
+                    (if (> depth maximum) depth maximum)))))
+
+(defn report-nesting-depth [(modules Code)] (-> Code)
+  (let [maximum (nd-modules modules 0 (primitive/code-count modules) 0)]
+    `0))
+
+(checker report-nesting-depth :phase before-expand)

@@ -40,6 +40,12 @@ formatting, lint, every entry/test target graph, and all tests. The standalone
 size-check script enforces the repository's 4,000-line guard. Neither command spends
 model credits.
 
+The configured nesting metaprogram prints authored expression depth by function,
+module, and program. Run `coil lint src/main.coil --use harness.nesting-depth` for
+one application-graph report (file-mode lint requires the explicit `--use`).
+It runs before macro expansion and measures the surface syntax exactly as written;
+see `tools/nesting_depth.coil` for the metric.
+
 ## Credentials
 
 Provider credentials are read only inside provider adapters:

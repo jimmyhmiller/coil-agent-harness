@@ -1,6 +1,6 @@
 (module harness-json-test)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
 (import "harness-json" :use *)

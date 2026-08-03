@@ -28,6 +28,7 @@ build0/
 zig-out/
 *.svg
 debug_output.txt
+lint.txt
 *.dylib
 *.bin
 *.a

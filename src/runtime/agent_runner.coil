@@ -1,6 +1,6 @@
 (module harness-agent-runner)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
 (import "coil.match" :use *)
@@ -49,7 +49,7 @@
               payload))
 
 (defn runner-budget-failure [] (-> ModelResult)
-  (let [failure (stack ModelFailure)]
+  (let [failure (alloc/stack ModelFailure)]
     (store! (field failure kind) (ConfigurationFailure))
     (store! (field failure provider) "runtime")
     (store! (field failure status-code) 0)
@@ -103,7 +103,7 @@
                                            (box allocator
                                                 (ArrayList ToolCall)
                                                 (load (field response-value tool-calls)))
-                                         execution (stack ToolExecutionRequest)]
+                                         execution (alloc/stack ToolExecutionRequest)]
                                      (store! (field execution run-id) (load (field current run-id)))
                                      (store! (field execution provider) (provider-name provider))
                                      (store! (field execution model) (load (field current model)))
@@ -161,7 +161,7 @@
                             (policy AgentRunPolicy)] (-> AgentRunHandle)
   (let [job (box allocator AgentRunJob (zeroed AgentRunJob))
         completed (box allocator i64 0)
-        handle (stack AgentRunHandle)]
+        handle (alloc/stack AgentRunHandle)]
     (store! (field job allocator) allocator)
     (store! (field job provider) provider)
     (store! (field job request) request)

@@ -1,6 +1,6 @@
 (module harness-provider-contract-test)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
@@ -25,7 +25,7 @@
   (let [parsed
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false}")
-        definition (stack ToolDefinition)
+        definition (alloc/stack ToolDefinition)
         implementation (box allocator UnusedTool (zeroed UnusedTool))]
     (store! (field (field definition spec) name) "city_fact")
     (store! (field (field definition spec) description) "Return one city fact")
@@ -41,7 +41,7 @@
   (let [messages (box allocator (ArrayList Message) (al-new [Message] allocator))
         (mut registry-value) (tool-registry-new allocator)
         request (box allocator ModelRequest (zeroed ModelRequest))
-        message (stack Message)]
+        message (alloc/stack Message)]
     (store! (field message role) (UserRole))
     (store! (field message content) "Use the tool twice.")
     (al-push! [Message] messages (load message))
@@ -99,7 +99,7 @@
                  (json-parse allocator
                              "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"reasoning_content\":\"opaque reasoning\",\"tool_calls\":[]}}]}")
                results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
-               result (stack ToolResult)]
+               result (alloc/stack ToolResult)]
            (store! (field result call-id) "call-1")
            (store! (field result status) (ToolSucceeded))
            (store! (field result output) (JsonString "ok"))
@@ -156,3 +156,16 @@
            (assert (match (json-string-at interrupt "method")
                      (Some [value] (str-eq value "turn/interrupt"))
                      (None [] false)))))
+
+(deftest codex-app-server-thread-id-contract
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"result\":{\"thread\":{\"id\":\"thread-1\"}}}")
+               missing (json-parse allocator "{\"result\":{}}")]
+           (assert (match (codex-thread-id (load (field parsed value)))
+                     (Ok [thread-id] (str-eq thread-id "thread-1"))
+                     (Err [message] false)))
+           (assert (match (codex-thread-id (load (field missing value)))
+                     (Ok [thread-id] false)
+                     (Err [message] (str-eq message "thread/start omitted thread id"))))))

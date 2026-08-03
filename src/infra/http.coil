@@ -1,6 +1,6 @@
 (module harness-http)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.http.client" :as client)
 (import "coil.result" :use *)
@@ -47,7 +47,7 @@
               (let [line (al-get [(slice u8)] (load lines) (load i))
                     colon (header-colon line)]
                 (when (> colon 0)
-                  (let [header (stack client/Header)
+                  (let [header (alloc/stack client/Header)
                         value-start
                           (if (and (< (+ colon 1) (slice-len [u8] line))
                                    (= (cast i64 (slice-get [u8] line (+ colon 1))) 32))
@@ -63,8 +63,8 @@
 ;; Adapt the harness's existing POST shape to Coil's supported HTTP client.
 (defn http-post [(allocator (ptr Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
   (let [headers (request-headers allocator (load (field request headers)))
-        native-request (stack client/Request)
-        result (stack HttpResponse)]
+        native-request (alloc/stack client/Request)
+        result (alloc/stack HttpResponse)]
     (store! (field result transport-code) 0)
     (store! (field result status-code) 0)
     (store! (field result body) "")

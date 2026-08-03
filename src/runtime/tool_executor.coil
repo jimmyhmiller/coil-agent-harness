@@ -1,6 +1,6 @@
 (module harness-tool-executor)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.thread" :use *)
@@ -180,7 +180,7 @@
                                                       call
                                                       (JsonString reason))))
                                 (Authorize []
-                                           (let [job (stack ToolJob)]
+                                           (let [job (alloc/stack ToolJob)]
                                              (store! (field job run-id) (load (field request run-id)))
                                              (store! (field job provider) (load (field request provider)))
                                              (store! (field job model) (load (field request model)))
@@ -256,6 +256,6 @@
                               (store! j (+ (load j) 1)))))
                   (al-free! [ActiveThread] (mut active))
                   (store! start (+ (load start) batch-size))))))
-    (let [batch (stack ToolExecutionBatch)]
+    (let [batch (alloc/stack ToolExecutionBatch)]
       (store! (field batch results) (load results))
       (load batch))))

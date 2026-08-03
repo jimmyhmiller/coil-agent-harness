@@ -1,6 +1,6 @@
 (module harness-json-schema)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -14,14 +14,14 @@
    (message (slice u8))])
 
 (defn schema-valid [] (-> SchemaValidation)
-  (let [result (stack SchemaValidation)]
+  (let [result (alloc/stack SchemaValidation)]
     (store! (field result ok) true)
     (store! (field result path) "$")
     (store! (field result message) "")
     (load result)))
 
 (defn schema-invalid [(path (slice u8)) (message (slice u8))] (-> SchemaValidation)
-  (let [result (stack SchemaValidation)]
+  (let [result (alloc/stack SchemaValidation)]
     (store! (field result ok) false)
     (store! (field result path) path)
     (store! (field result message) message)

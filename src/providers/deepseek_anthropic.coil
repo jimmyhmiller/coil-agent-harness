@@ -1,6 +1,6 @@
 (module deepseek-anthropic)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -19,7 +19,7 @@
    (credential ApiCredential)])
 
 (defn deepseek-anthropic-context-default [] (-> DeepSeekAnthropicContext)
-  (let [context (stack DeepSeekAnthropicContext)]
+  (let [context (alloc/stack DeepSeekAnthropicContext)]
     (store! (field context endpoint) "https://api.deepseek.com/anthropic/v1/messages")
     (store! (field (field context credential) primary-env) c"DEEPSEEK_API_KEY")
     (store! (field (field context credential) fallback-env) c"DEEPSEEK_KEY")
@@ -143,7 +143,7 @@
     (load body)))
 
 (defn deepseek-anthropic-usage [(root Json)] (-> ModelUsage)
-  (let [usage (stack ModelUsage)
+  (let [usage (alloc/stack ModelUsage)
         wire (json-get root "usage")]
     (store! (field usage input-tokens)
             (json-number-i64 (json-get wire "input_tokens")))
@@ -187,7 +187,7 @@
                                   (None [] ""))
                               input (json-get block "input")
                               arguments (json-stringify allocator input)
-                              call (stack ToolCall)]
+                              call (alloc/stack ToolCall)]
                           (store! (field call id) id)
                           (store! (field call name) name)
                           (store! (field call arguments) input)
@@ -231,7 +231,7 @@
           (al-push! [(slice u8)] headers api-header)
           (let [wire (deepseek-anthropic-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (stack HttpRequest)]
+                http-request (alloc/stack HttpRequest)]
             (store! (field http-request url) (load (field context endpoint)))
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)

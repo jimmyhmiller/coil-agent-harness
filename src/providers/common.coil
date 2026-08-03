@@ -1,6 +1,6 @@
 (module provider-common)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
@@ -149,7 +149,7 @@
   (zeroed ModelUsage))
 
 (defn response-empty [(allocator (ptr Allocator))] (-> ModelResponse)
-  (let [response (stack ModelResponse)]
+  (let [response (alloc/stack ModelResponse)]
     (store! (field response provider) "")
     (store! (field response model) "")
     (store! (field response response-id) "")
@@ -162,7 +162,7 @@
 (defn model-failure [(provider (slice u8))
                      (status i64)
                      (message (slice u8))] (-> ModelResult)
-  (let [failure (stack ModelFailure)]
+  (let [failure (alloc/stack ModelFailure)]
     (store! (field failure kind)
             (cond (= status 0) (TransportFailure)
                   (or (= status 401) (= status 403)) (AuthenticationFailure)
@@ -186,7 +186,7 @@
                         (id (slice u8))
                         (name (slice u8))
                         (raw-arguments (slice u8))] (-> ToolCall)
-  (let [call (stack ToolCall)
+  (let [call (alloc/stack ToolCall)
         parsed (json-parse allocator raw-arguments)]
     (store! (field call id) id)
     (store! (field call name) name)

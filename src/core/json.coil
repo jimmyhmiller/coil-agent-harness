@@ -1,6 +1,7 @@
 (module harness-json)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -211,19 +212,19 @@
   (cond (<= codepoint 127) (sb-push-byte! (mut buffer) (cast u8 codepoint))
         (<= codepoint 2047)
           (do
-            (sb-push-byte! (mut buffer) (cast u8 (ior 192 (ishr codepoint 6))))
-            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand codepoint 63)))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 192 (primitive/ishr codepoint 6))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand codepoint 63)))))
         (<= codepoint 65535)
           (do
-            (sb-push-byte! (mut buffer) (cast u8 (ior 224 (ishr codepoint 12))))
-            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand (ishr codepoint 6) 63))))
-            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand codepoint 63)))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 224 (primitive/ishr codepoint 12))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand (primitive/ishr codepoint 6) 63))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand codepoint 63)))))
         :else
           (do
-            (sb-push-byte! (mut buffer) (cast u8 (ior 240 (ishr codepoint 18))))
-            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand (ishr codepoint 12) 63))))
-            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand (ishr codepoint 6) 63))))
-            (sb-push-byte! (mut buffer) (cast u8 (ior 128 (iand codepoint 63))))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 240 (primitive/ishr codepoint 18))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand (primitive/ishr codepoint 12) 63))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand (primitive/ishr codepoint 6) 63))))
+            (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand codepoint 63))))))
   0)
 
 (defn parser-string [(parser (ptr JsonParser))] (-> (slice u8))
@@ -401,8 +402,8 @@
 
 ;; Parse exactly one JSON value. Trailing non-whitespace bytes are rejected.
 (defn json-parse [(allocator (ptr Allocator)) (source (slice u8))] (-> JsonParseResult)
-  (let [parser (stack JsonParser)
-        result (stack JsonParseResult)]
+  (let [parser (alloc/stack JsonParser)
+        result (alloc/stack JsonParseResult)]
     (store! (field parser source) source)
     (store! (field parser position) 0)
     (store! (field parser allocator) allocator)

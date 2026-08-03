@@ -1,6 +1,6 @@
 (module harness-tool)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -81,7 +81,7 @@
                   (Authorize)))
 
 (defn tool-registry-new [(allocator (ptr Allocator))] (-> ToolRegistry)
-  (let [registry (stack ToolRegistry)]
+  (let [registry (alloc/stack ToolRegistry)]
     (store! (field registry definitions) (al-new [ToolDefinition] allocator))
     (load registry)))
 
@@ -117,7 +117,7 @@
     (if (load found) (Some (load result)) (None [ToolDefinition]))))
 
 (defn tool-result-empty [(call-id (slice u8)) (status ToolStatus)] (-> ToolResult)
-  (let [result (stack ToolResult)]
+  (let [result (alloc/stack ToolResult)]
     (store! (field result call-id) call-id)
     (store! (field result status) status)
     (store! (field result output) (JsonNull))

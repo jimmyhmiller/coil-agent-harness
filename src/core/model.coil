@@ -1,6 +1,6 @@
 (module harness-model)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "harness-json" :use *)
 (import "harness-tool" :use *)

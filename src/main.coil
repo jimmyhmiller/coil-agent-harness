@@ -1,6 +1,6 @@
 (module harness-main)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.io" :as io)
 (import "coil.match" :use *)
@@ -20,7 +20,7 @@
 (import "harness-agent-runner" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
-  (let [writer (stack io/Writer)]
+  (let [writer (alloc/stack io/Writer)]
     (match (io/write-all (io/fd-writer writer fd)
                          (cast (ptr i8) (slice-data [u8] value))
                          (slice-len [u8] value))
@@ -105,7 +105,7 @@
     (load schema)))
 
 (defn echo-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
-  (let [definition (stack ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)
         implementation (box allocator EchoTool (zeroed EchoTool))]
     (store! (field (field definition spec) name) "echo")
     (store! (field (field definition spec) description)
@@ -123,9 +123,9 @@
                     (prompt (slice u8))
                     (force-tool bool)
                     (registry (ptr ToolRegistry))] (-> ModelRequest)
-  (let [request (stack ModelRequest)
+  (let [request (alloc/stack ModelRequest)
         messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        message (stack Message)]
+        message (alloc/stack Message)]
     (store! (field message role) (UserRole))
     (store! (field message content) prompt)
     (al-push! [Message] messages (load message))
@@ -163,9 +163,9 @@
                ModelRequest
                (make-request allocator model prompt force-tool registry))
         sequence (box allocator i64 1)
-        sink (stack CliEventSink)
-        authorizer (stack AllowAllAuthorizer)
-        policy (stack AgentRunPolicy)]
+        sink (alloc/stack CliEventSink)
+        authorizer (alloc/stack AllowAllAuthorizer)
+        policy (alloc/stack AgentRunPolicy)]
     (let [emitter (box allocator EventEmitter (event-emitter-new sink sequence))]
       (store! (field policy max-model-turns) 8)
       (store! (field policy max-parallel-tools) 8)

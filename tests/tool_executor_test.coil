@@ -1,6 +1,6 @@
 (module harness-tool-executor-test)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
 (import "coil.match" :use *)
@@ -55,7 +55,7 @@
   (let [schema-result
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
-        definition (stack ToolDefinition)]
+        definition (alloc/stack ToolDefinition)]
     (store! (field (field definition spec) name) "probe")
     (store! (field (field definition spec) description) "Parallelism probe")
     (store! (field (field definition spec) input-schema) (load (field schema-result value)))
@@ -67,7 +67,7 @@
     (load definition)))
 
 (defn executor-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
-  (let [call (stack ToolCall)]
+  (let [call (alloc/stack ToolCall)]
     (store! (field call id) id)
     (store! (field call name) "probe")
     (store! (field call arguments) (json-object allocator))
@@ -83,10 +83,10 @@
                probe (box allocator ParallelProbe (zeroed ParallelProbe))
                registry (box allocator ToolRegistry (tool-registry-new allocator))
                calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
-               sink (stack CountingEventSink)
-               authorizer (stack AllowAllAuthorizer)
-               emitter (stack EventEmitter)
-               execution (stack ToolExecutionRequest)]
+               sink (alloc/stack CountingEventSink)
+               authorizer (alloc/stack AllowAllAuthorizer)
+               emitter (alloc/stack EventEmitter)
+               execution (alloc/stack ToolExecutionRequest)]
            (store! (field probe active) active)
            (store! (field probe maximum) maximum)
            (let [(mut registry-value) (load registry)]

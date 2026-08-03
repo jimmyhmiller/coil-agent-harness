@@ -1,6 +1,6 @@
 (module openai-responses)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -19,7 +19,7 @@
    (credential ApiCredential)])
 
 (defn openai-context-default [] (-> OpenAIResponsesContext)
-  (let [context (stack OpenAIResponsesContext)]
+  (let [context (alloc/stack OpenAIResponsesContext)]
     (store! (field context endpoint) "https://api.openai.com/v1/responses")
     (store! (field (field context credential) primary-env) c"OPENAI_API_KEY")
     (store! (field (field context credential) fallback-env) c"OPENAI_KEY")
@@ -97,7 +97,7 @@
     (load body)))
 
 (defn openai-usage [(root Json)] (-> ModelUsage)
-  (let [usage (stack ModelUsage)
+  (let [usage (alloc/stack ModelUsage)
         wire (json-get root "usage")]
     (store! (field usage input-tokens)
             (json-number-i64 (json-get wire "input_tokens")))
@@ -191,7 +191,7 @@
           (al-push! [(slice u8)] headers authorization)
           (let [wire (openai-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (stack HttpRequest)]
+                http-request (alloc/stack HttpRequest)]
             (store! (field http-request url) (load (field context endpoint)))
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)

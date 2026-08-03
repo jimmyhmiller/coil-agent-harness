@@ -1,6 +1,6 @@
 (module codex-app-server)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.io" :as io)
 (import "coil.match" :use *)
@@ -10,6 +10,7 @@
 (import "coil.str" :use *)
 (import "coil.subprocess" :as subprocess)
 (import "coil.time" :as time)
+(import "coil.try" :use *)
 (import "harness-event" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
@@ -23,7 +24,7 @@
    (approval-policy (slice u8))])
 
 (defn codex-context [(cwd (slice u8))] (-> CodexAppServerContext)
-  (let [context (stack CodexAppServerContext)]
+  (let [context (alloc/stack CodexAppServerContext)]
     (store! (field context cwd) cwd)
     (store! (field context sandbox) "workspace-write")
     (store! (field context approval-policy) "never")
@@ -46,9 +47,9 @@
    (error (slice u8))])
 
 (defn codex-spawn [(allocator (ptr Allocator))] (-> CodexSpawnResult)
-  (let [result (stack CodexSpawnResult)
-        child (stack subprocess/Child)
-        args (stack (array (slice u8) 3))]
+  (let [result (alloc/stack CodexSpawnResult)
+        child (alloc/stack subprocess/Child)
+        args (alloc/stack (array (slice u8) 3))]
     (store! (field result code) 0)
     (store! (field result error) "")
     (store! (index args 0) "app-server")
@@ -165,7 +166,7 @@
                   (process (ptr subprocess/Child))
                   (message Json)] (-> i64)
   (let [line (json-stringify allocator message)
-        writer (stack io/Writer)]
+        writer (alloc/stack io/Writer)]
     (match (subprocess/child-stdin-writer writer process)
       (None [] -1)
       (Some [output]
@@ -176,8 +177,8 @@
 (defn codex-read [(allocator (ptr Allocator))
                   (process (ptr subprocess/Child))
                   (timeout-ms i64)] (-> CodexRead)
-  (let [result (stack CodexRead)
-        reader (stack io/Reader)]
+  (let [result (alloc/stack CodexRead)
+        reader (alloc/stack io/Reader)]
     (store! (field result ok) false)
     (store! (field result eof) false)
     (store! (field result message) (JsonNull))
@@ -271,7 +272,7 @@
                            (emitter (ptr EventEmitter))
                            (request (ptr ModelRequest))
                            (wanted-id i64)] (-> CodexWait)
-  (let [result (stack CodexWait)
+  (let [result (alloc/stack CodexWait)
         (mut done) false]
     (store! (field result ok) false)
     (store! (field result message) (JsonNull))
@@ -372,6 +373,96 @@
             (model-failure "codex-app-server" 0 (load (field started error)))
             (codex-turn-loop allocator process emitter request thread-id)))))
 
+;; Send one request and wait for its matching response. Keeping write and read
+;; failure together prevents a failed write from surfacing later as a read timeout.
+(defn codex-call [(allocator (ptr Allocator))
+                  (process (ptr subprocess/Child))
+                  (emitter (ptr EventEmitter))
+                  (request (ptr ModelRequest))
+                  (message Json)
+                  (wanted-id i64)
+                  (send-error (slice u8))] (-> (Result Json (slice u8)))
+  (if (!= (codex-send allocator process message) 0)
+      (Err send-error)
+      (let [response (codex-wait-response allocator process emitter request wanted-id)]
+        (if (load (field response ok))
+            (Ok (load (field response message)))
+            (Err (load (field response error)))))))
+
+(defn codex-notify-initialized [(allocator (ptr Allocator))
+                                (process (ptr subprocess/Child))] (-> (Result i64 (slice u8)))
+  (if (= (codex-send allocator
+                     process
+                     (codex-initialized-notification allocator))
+         0)
+      (Ok 0)
+      (Err "could not send initialized notification")))
+
+(defn codex-thread-id [(message Json)] (-> (Result (slice u8) (slice u8)))
+  (let [thread-id
+          (match (json-string-at (json-get (json-get message "result") "thread") "id")
+            (Some [value] value)
+            (None [] ""))]
+    (if (> (slice-len [u8] thread-id) 0)
+        (Ok thread-id)
+        (Err "thread/start omitted thread id"))))
+
+;; The fixed App Server handshake is intentionally linear. Each failed operation
+;; short-circuits with the message for that operation; process ownership stays with
+;; codex-execute, which closes it exactly once.
+(defn codex-open-thread [(context (ptr CodexAppServerContext))
+                         (request (ptr ModelRequest))
+                         (emitter (ptr EventEmitter))
+                         (allocator (ptr Allocator))
+                         (process (ptr subprocess/Child))] (-> (Result (slice u8) (slice u8)))
+  (try (try! (codex-call allocator
+                         process
+                         emitter
+                         request
+                         (codex-initialize-request allocator)
+                         1
+                         "could not initialize Codex app-server"))
+       (try! (codex-notify-initialized allocator process))
+       (let [started
+               (try! (codex-call allocator
+                                 process
+                                 emitter
+                                 request
+                                 (codex-thread-start-request allocator context request)
+                                 2
+                                 "could not send thread/start"))]
+         (codex-thread-id started))))
+
+(defn codex-run-session [(context (ptr CodexAppServerContext))
+                         (request (ptr ModelRequest))
+                         (emitter (ptr EventEmitter))
+                         (allocator (ptr Allocator))
+                         (process (ptr subprocess/Child))] (-> ModelResult)
+  (match (codex-open-thread context request emitter allocator process)
+    (Err [message] (model-failure "codex-app-server" 0 message))
+    (Ok [thread-id]
+        (codex-start-and-run-turn allocator process emitter request thread-id))))
+
+;; Translate the terminal result into exactly one request lifecycle event.
+(defn codex-finish [(emitter (ptr EventEmitter))
+                    (request (ptr ModelRequest))
+                    (result ModelResult)] (-> ModelResult)
+  (match result
+    (ModelOk [response]
+             (let [completed response]
+               (codex-emit emitter
+                           request
+                           (ModelRequestCompleted)
+                           (JsonString (load (field completed response-id))))
+               (ModelOk completed)))
+    (ModelErr [failure]
+              (let [failed failure]
+                (codex-emit emitter
+                            request
+                            (ModelRequestFailed)
+                            (JsonString (load (field failed message))))
+                (ModelErr failed)))))
+
 (defn codex-execute [(context (ptr CodexAppServerContext))
                      (request (ptr ModelRequest))
                      (emitter (ptr EventEmitter))
@@ -381,87 +472,14 @@
         (model-failure "codex-app-server" 0 (load (field spawn-result error)))
         (let [(mut process) (load (field spawn-result process))]
           (codex-emit emitter request (ModelRequestStarted) (JsonNull))
-          (if (!= (codex-send allocator
-                              (mut process)
-                              (codex-initialize-request allocator))
-                  0)
-              (do
-                (codex-close (mut process))
-                (codex-emit emitter
-                            request
-                            (ModelRequestFailed)
-                            (JsonString "could not initialize Codex app-server"))
-                (model-failure "codex-app-server"
-                               0
-                               "could not initialize Codex app-server"))
-              (let [initialized (codex-wait-response allocator (mut process) emitter request 1)]
-                (if (not (load (field initialized ok)))
-                    (do
-                      (codex-close (mut process))
-                      (codex-emit emitter
-                                  request
-                                  (ModelRequestFailed)
-                                  (JsonString (load (field initialized error))))
-                      (model-failure "codex-app-server"
-                                     0
-                                     (load (field initialized error))))
-                    (do
-                      (codex-send allocator
-                                  (mut process)
-                                  (codex-initialized-notification allocator))
-                      (codex-send allocator
-                                  (mut process)
-                                  (codex-thread-start-request allocator context request))
-                      (let [started (codex-wait-response allocator (mut process) emitter request 2)]
-                        (if (not (load (field started ok)))
-                            (do
-                              (codex-close (mut process))
-                              (codex-emit emitter
-                                          request
-                                          (ModelRequestFailed)
-                                          (JsonString (load (field started error))))
-                              (model-failure "codex-app-server"
-                                             0
-                                             (load (field started error))))
-                            (let [thread-id
-                                    (match (json-string-at (json-get (json-get (load (field started message)) "result")
-                                                                     "thread")
-                                                           "id")
-                                      (Some [value] value)
-                                      (None [] ""))]
-                              (if (= (slice-len [u8] thread-id) 0)
-                                  (do
-                                    (codex-close (mut process))
-                                    (codex-emit emitter
-                                                request
-                                                (ModelRequestFailed)
-                                                (JsonString "thread/start omitted thread id"))
-                                    (model-failure "codex-app-server"
-                                                   0
-                                                   "thread/start omitted thread id"))
-                                  (do
-                                    (let [turn-result
-                                            (codex-start-and-run-turn allocator
-                                                                      (mut process)
-                                                                      emitter
-                                                                      request
-                                                                      thread-id)]
-                                      (codex-close (mut process))
-                                      (match turn-result
-                                        (ModelOk [response]
-                                                 (do
-                                                   (codex-emit emitter
-                                                               request
-                                                               (ModelRequestCompleted)
-                                                               (JsonString thread-id))
-                                                   (ModelOk response)))
-                                        (ModelErr [failure]
-                                                  (let [failed failure]
-                                                    (codex-emit emitter
-                                                                request
-                                                                (ModelRequestFailed)
-                                                                (JsonString (load (field failed message))))
-                                                    (ModelErr failed))))))))))))))))))
+          (let [result
+                  (codex-run-session context
+                                     request
+                                     emitter
+                                     allocator
+                                     (mut process))]
+            (codex-close (mut process))
+            (codex-finish emitter request result))))))
 
 (impl ModelProvider CodexAppServerContext
   (provider-name [(self (ptr CodexAppServerContext))]

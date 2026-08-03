@@ -1,6 +1,6 @@
 (module harness-agent-runner-test)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
 (import "coil.match" :use *)
@@ -36,7 +36,7 @@
   (let [parsed
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
-        definition (stack ToolDefinition)
+        definition (alloc/stack ToolDefinition)
         implementation (box allocator FakeTool (zeroed FakeTool))]
     (store! (field (field definition spec) name) "fake")
     (store! (field (field definition spec) description) "fake")
@@ -50,7 +50,7 @@
     (load definition)))
 
 (defn fake-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
-  (let [call (stack ToolCall)]
+  (let [call (alloc/stack ToolCall)]
     (store! (field call id) id)
     (store! (field call name) "fake")
     (store! (field call arguments) (json-object allocator))
@@ -114,10 +114,10 @@
                registry (box allocator ToolRegistry (tool-registry-new allocator))
                messages (box allocator (ArrayList Message) (al-new [Message] allocator))
                request (box allocator ModelRequest (zeroed ModelRequest))
-               sink (stack CountingEventSink)
+               sink (alloc/stack CountingEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (stack AgentRunPolicy)
-               authorizer (stack AllowAllAuthorizer)]
+               policy (alloc/stack AgentRunPolicy)
+               authorizer (alloc/stack AllowAllAuthorizer)]
            (store! (field state calls) calls)
            (store! (field state observed-continuation) observed)
            (tool-register! registry (fake-definition allocator))

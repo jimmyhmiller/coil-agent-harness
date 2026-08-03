@@ -1,8 +1,11 @@
 [package]
 name = "harness"
 entry = "src/main.coil"
-source-roots = ["src", "tests"]
+source-roots = ["src", "tests", "tools"]
 
 [test]
 roots = ["tests"]
 suffixes = ["_test.coil"]
+
+[lint]
+rules = ["harness.nesting-depth"]

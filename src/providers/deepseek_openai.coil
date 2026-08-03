@@ -1,6 +1,6 @@
 (module deepseek-openai)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -20,7 +20,7 @@
    (credential ApiCredential)])
 
 (defn deepseek-openai-context-default [] (-> DeepSeekOpenAIContext)
-  (let [context (stack DeepSeekOpenAIContext)]
+  (let [context (alloc/stack DeepSeekOpenAIContext)]
     (store! (field context endpoint) "https://api.deepseek.com/chat/completions")
     (store! (field context strict-endpoint) "https://api.deepseek.com/beta/chat/completions")
     (store! (field (field context credential) primary-env) c"DEEPSEEK_API_KEY")
@@ -120,7 +120,7 @@
     (load body)))
 
 (defn deepseek-openai-usage [(root Json)] (-> ModelUsage)
-  (let [usage (stack ModelUsage)
+  (let [usage (alloc/stack ModelUsage)
         wire (json-get root "usage")]
     (store! (field usage input-tokens)
             (json-number-i64 (json-get wire "prompt_tokens")))
@@ -203,7 +203,7 @@
           (al-push! [(slice u8)] headers authorization)
           (let [wire (deepseek-openai-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (stack HttpRequest)]
+                http-request (alloc/stack HttpRequest)]
             (store! (field http-request url) endpoint)
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)
