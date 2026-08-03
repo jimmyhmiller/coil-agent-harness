@@ -23,6 +23,26 @@
    (read-count i64)
    (close-count i64)])
 
+(defstruct CodexEventCounts
+  [(total i64)
+   (completed i64)
+   (failed i64)])
+
+(impl EventSink CodexEventCounts
+  (publish-event [(self (ptr CodexEventCounts)) (event (ptr Event))]
+                 (-> i64)
+                 (do
+                   (store! (field self total) (+ (load (field self total)) 1))
+                   (match-else (load (field event kind))
+                               (ModelRequestCompleted []
+                                                      (store! (field self completed)
+                                                              (+ (load (field self completed)) 1)))
+                               (ModelRequestFailed []
+                                                   (store! (field self failed)
+                                                           (+ (load (field self failed)) 1)))
+                               (_ 0))
+                   0)))
+
 (impl CodexTransport FakeCodexTransport
   (codex-transport-send [(self (ptr FakeCodexTransport))
                          (allocator (ptr Allocator))
@@ -249,3 +269,34 @@
                      (Err [message] (str-eq message "send failed"))))
            (assert-eq (load (field failed send-count)) 1)
            (assert-eq (load (field failed read-count)) 0)))
+
+(deftest codex-connection-closes-and-emits-one-terminal-failure
+         (let [allocator (malloc-allocator)
+               context (alloc/stack CodexAppServerContext)
+               request (test-request allocator)
+               transport (box allocator FakeCodexTransport (zeroed FakeCodexTransport))
+               connection (box allocator CodexConnection (zeroed CodexConnection))
+               counts (box allocator CodexEventCounts (zeroed CodexEventCounts))
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new counts sequence))]
+           (store! context (codex-context "."))
+           (store! (field transport send-code) -1)
+           (store! (field connection transport) transport)
+           (let [result
+                   (codex-execute-connection context
+                                             request
+                                             emitter
+                                             allocator
+                                             connection)]
+             (assert (match result
+                       (ModelOk [response] false)
+                       (ModelErr [failure]
+                                 (let [failed failure]
+                                   (str-eq (load (field failed message))
+                                           "could not initialize Codex app-server"))))))
+           (assert-eq (load (field transport send-count)) 1)
+           (assert-eq (load (field transport read-count)) 0)
+           (assert-eq (load (field transport close-count)) 1)
+           (assert-eq (load (field counts total)) 2)
+           (assert-eq (load (field counts completed)) 0)
+           (assert-eq (load (field counts failed)) 1)))

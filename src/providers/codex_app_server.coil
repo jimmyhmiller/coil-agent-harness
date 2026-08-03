@@ -516,6 +516,19 @@
                             (JsonString (load (field failed message))))
                 (ModelErr failed)))))
 
+;; Own one connected transport for exactly one model request. This seam keeps spawn
+;; policy outside protocol tests while making close and terminal-event invariants
+;; deterministic under an in-memory transport.
+(defn codex-execute-connection [(context (ptr CodexAppServerContext))
+                                (request (ptr ModelRequest))
+                                (emitter (ptr EventEmitter))
+                                (allocator (ptr Allocator))
+                                (connection (ptr CodexConnection))] (-> ModelResult)
+  (codex-emit emitter request (ModelRequestStarted) (JsonNull))
+  (let [result (codex-run-session context request emitter allocator connection)]
+    (codex-close connection)
+    (codex-finish emitter request result)))
+
 (defn codex-execute [(context (ptr CodexAppServerContext))
                      (request (ptr ModelRequest))
                      (emitter (ptr EventEmitter))
@@ -529,15 +542,11 @@
                      (load (field spawn-result process)))
               connection (box allocator CodexConnection (zeroed CodexConnection))]
           (store! (field connection transport) process)
-          (codex-emit emitter request (ModelRequestStarted) (JsonNull))
-          (let [result
-                  (codex-run-session context
-                                     request
-                                     emitter
-                                     allocator
-                                     connection)]
-            (codex-close connection)
-            (codex-finish emitter request result))))))
+          (codex-execute-connection context
+                                    request
+                                    emitter
+                                    allocator
+                                    connection)))))
 
 (impl ModelProvider CodexAppServerContext
   (provider-name [(self (ptr CodexAppServerContext))]
