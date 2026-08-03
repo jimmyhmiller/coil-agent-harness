@@ -215,11 +215,23 @@
                                                        true))
                                                (None [] true))
                                            (str-eq kind "response.completed")
-                                             (do
-                                               (store! (field self response)
-                                                       (json-get wire "response"))
-                                               (store! (field self completed) true)
-                                               true)
+                                             (let [owned
+                                                     (concat-or-empty (load (field self allocator))
+                                                                      ""
+                                                                      data)
+                                                   retained
+                                                     (json-parse (load (field self allocator))
+                                                                 owned)]
+                                               (if (load (field retained ok))
+                                                   (do
+                                                     (store! (field self response)
+                                                             (json-get (load (field retained value))
+                                                                       "response"))
+                                                     (store! (field self completed) true)
+                                                     true)
+                                                   (do
+                                                     (store! (field self failed) true)
+                                                     false)))
                                            (str-eq kind "response.failed") (do (store! (field self failed) true) false)
                                            :else true))))))))
 

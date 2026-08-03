@@ -177,13 +177,13 @@
            (store! decoder (sse-decoder-new allocator state 4096))
            (assert (sse-decoder-feed! decoder
                                       "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\nevent: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-stream\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{}}}\n\n"))
+           (sse-decoder-free! decoder)
            (assert-eq (load (field sink deltas)) 1)
            (assert (load (field sink valid)))
            (assert (load (field state completed)))
            (assert (match (json-string-at (load (field state response)) "id")
                      (Some [value] (str-eq value "resp-stream"))
-                     (None [] false)))
-           (sse-decoder-free! decoder)))
+                     (None [] false)))))
 
 (deftest openai-parses-parallel-function-calls
          (let [allocator (malloc-allocator)
@@ -218,10 +218,68 @@
            (let [wire (deepseek-openai-request-json allocator request)
                  messages (json-get wire "messages")
                  assistant (json-array-get messages 1)]
+             (assert (match (json-bool-value (json-get wire "stream"))
+                       (Some [value] value)
+                       (None [] false)))
+             (assert (match (json-bool-value (json-get (json-get wire "stream_options")
+                                                       "include_usage"))
+                       (Some [value] value)
+                       (None [] false)))
              (assert-eq (json-array-length messages) 3)
              (assert (match (json-string-at assistant "reasoning_content")
                        (Some [value] (str-eq value "opaque reasoning"))
                        (None [] false))))))
+
+(deftest deepseek-openai-stream-reconstructs-reasoning-tools-and-usage
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               sink (alloc/stack DeltaEventSink)
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               state (alloc/stack DeepSeekOpenAIStreamState)
+               decoder (alloc/stack SseDecoder)]
+           (store! (field sink deltas) 0)
+           (store! (field sink valid) true)
+           (store! (field state allocator) allocator)
+           (store! (field state request) request)
+           (store! (field state emitter) emitter)
+           (store! (field state response-id) "")
+           (store! (field state model) "")
+           (store! (field state content) (sb-new allocator))
+           (store! (field state reasoning) (sb-new allocator))
+           (store! (field state tools) (al-new [DeepSeekStreamTool] allocator))
+           (store! (field state usage) (zeroed ModelUsage))
+           (store! (field state completed) false)
+           (store! (field state failed) false)
+           (store! decoder (sse-decoder-new allocator state 8192))
+           (assert (sse-decoder-feed! decoder
+                                      "data: {\"id\":\"chat-1\",\"model\":\"deepseek-test\",\"choices\":[{\"delta\":{\"reasoning_content\":\"think \",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"city_fact\",\"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n"))
+           (assert (sse-decoder-feed! decoder
+                                      "data: {\"id\":\"chat-1\",\"model\":\"deepseek-test\",\"choices\":[{\"delta\":{\"reasoning_content\":\"more\",\"content\":\"hi\",\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Oslo\\\"}\"}}]}}]}\n\n"))
+           (assert (sse-decoder-feed! decoder
+                                      "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"prompt_cache_hit_tokens\":2}}\n\n"))
+           (assert-eq (al-len [u8] (load (field decoder buffer))) 0)
+           (assert-eq (load (field (field state usage) input-tokens)) 7)
+           (assert (sse-decoder-feed! decoder "data: [DONE]\n\n"))
+           (assert (load (field state completed)))
+           (assert-eq (load (field sink deltas)) 1)
+           (assert (load (field sink valid)))
+           (let [response (deepseek-stream-response state)]
+             (assert (str-eq (load (field response output-text)) "hi"))
+             (assert-eq (load (field (field response usage) input-tokens)) 7)
+             (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 1)
+             (let [call (al-get [ToolCall] (load (field response tool-calls)) 0)
+                   message
+                     (json-get (json-array-get (json-get (load (field response raw-output)) "choices")
+                                               0)
+                               "message")]
+               (assert (match (json-string-at (load (field call arguments)) "city")
+                         (Some [value] (str-eq value "Oslo"))
+                         (None [] false)))
+               (assert (match (json-string-at message "reasoning_content")
+                         (Some [value] (str-eq value "think more"))
+                         (None [] false)))))
+           (sse-decoder-free! decoder)))
 
 (deftest deepseek-anthropic-wire-contract
          (let [allocator (malloc-allocator)

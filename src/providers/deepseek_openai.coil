@@ -11,6 +11,7 @@
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
 (import "harness-http" :use *)
+(import "harness-sse" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
@@ -116,7 +117,10 @@
                         (tool-choice-chat allocator
                                           (load (field request tool-choice))))
       0)
-    (json-put-bool! (mut body) "stream" false)
+    (json-put-bool! (mut body) "stream" true)
+    (let [(mut stream-options) (json-object allocator)]
+      (json-put-bool! (mut stream-options) "include_usage" true)
+      (json-object-put! (mut body) "stream_options" (load stream-options)))
     (load body)))
 
 (defn deepseek-openai-usage [(root Json)] (-> ModelUsage)
@@ -183,6 +187,174 @@
               (load (field request model))
               payload))
 
+(defstruct DeepSeekStreamTool
+  [(id (slice u8))
+   (name (slice u8))
+   (arguments StrBuf)])
+
+(defstruct DeepSeekOpenAIStreamState
+  [(allocator (ptr Allocator))
+   (request (ptr ModelRequest))
+   (emitter (ptr EventEmitter))
+   (response-id (slice u8))
+   (model (slice u8))
+   (content StrBuf)
+   (reasoning StrBuf)
+   (tools (ArrayList DeepSeekStreamTool))
+   (usage ModelUsage)
+   (completed bool)
+   (failed bool)])
+
+(defn deepseek-stream-tool! [(state (ptr DeepSeekOpenAIStreamState))
+                             (index-value i64)] (-> (ptr DeepSeekStreamTool))
+  (loop (if (> (al-len [DeepSeekStreamTool] (load (field state tools))) index-value)
+            (break)
+            (let [tool (alloc/stack DeepSeekStreamTool)]
+              (store! (field tool id) "")
+              (store! (field tool name) "")
+              (store! (field tool arguments)
+                      (sb-new (load (field state allocator))))
+              (al-push! [DeepSeekStreamTool]
+                        (mut (field state tools))
+                        (load tool)))))
+  (index (load (field (field state tools) data)) index-value))
+
+(defn deepseek-stream-tool-delta! [(state (ptr DeepSeekOpenAIStreamState))
+                                   (wire Json)] (-> i64)
+  (let [slot (deepseek-stream-tool! state (json-number-i64 (json-get wire "index")))
+        function (json-get wire "function")]
+    (match (json-string-at wire "id")
+      (Some [value]
+            (store! (field slot id)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at function "name")
+      (Some [value]
+            (store! (field slot name)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at function "arguments")
+      (Some [value] (sb-push-str! (mut (field slot arguments)) value))
+      (None [] 0))))
+
+(defn deepseek-stream-chunk! [(state (ptr DeepSeekOpenAIStreamState))
+                              (wire Json)] (-> bool)
+  (do
+    (match (json-string-at wire "id")
+      (Some [value]
+            (store! (field state response-id)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at wire "model")
+      (Some [value]
+            (store! (field state model)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (let [choices (json-get wire "choices")]
+      (if (= (json-array-length choices) 0)
+          (let [usage (json-get wire "usage")]
+            (store! (field (field state usage) input-tokens)
+                    (json-number-i64 (json-get usage "prompt_tokens")))
+            (store! (field (field state usage) output-tokens)
+                    (json-number-i64 (json-get usage "completion_tokens")))
+            (store! (field (field state usage) reasoning-tokens)
+                    (json-number-i64 (json-get (json-get usage "completion_tokens_details")
+                                               "reasoning_tokens")))
+            (store! (field (field state usage) cached-input-tokens)
+                    (json-number-i64 (json-get usage "prompt_cache_hit_tokens"))))
+          (let [delta (json-get (json-array-get choices 0) "delta")]
+            (match (json-string-at delta "reasoning_content")
+              (Some [value] (sb-push-str! (mut (field state reasoning)) value))
+              (None [] 0))
+            (match (json-string-at delta "content")
+              (Some [value]
+                    (do
+                      (sb-push-str! (mut (field state content)) value)
+                      (deepseek-openai-event (load (field state emitter))
+                                             (load (field state request))
+                                             (ModelResponseDelta)
+                                             (JsonString value))))
+              (None [] 0))
+            (let [tool-deltas (json-get delta "tool_calls")
+                  (mut i) 0
+                  n (json-array-length tool-deltas)]
+              (loop (if (>= (load i) n)
+                        (break)
+                        (do
+                          (deepseek-stream-tool-delta! state
+                                                       (json-array-get tool-deltas (load i)))
+                          (store! i (+ (load i) 1))))))))
+      true)))
+
+(impl SseEventSink DeepSeekOpenAIStreamState
+  (consume-sse-event [(self (ptr DeepSeekOpenAIStreamState))
+                      (event-name (slice u8))
+                      (data (slice u8))]
+                     (-> bool)
+                     (if (model-request-cancelled? (load (field self request)))
+                         false
+                         (if (str-eq data "[DONE]")
+                             (do (store! (field self completed) true) true)
+                             (let [parsed (json-parse (load (field self allocator)) data)]
+                               (if (load (field parsed ok))
+                                   (deepseek-stream-chunk! self
+                                                           (load (field parsed value)))
+                                   (do (store! (field self failed) true) false)))))))
+
+(defn deepseek-stream-response [(state (ptr DeepSeekOpenAIStreamState))] (-> ModelResponse)
+  (let [allocator (load (field state allocator))
+        (mut root) (json-object allocator)
+        (mut choices) (json-array allocator)
+        (mut choice) (json-object allocator)
+        (mut message) (json-object allocator)
+        (mut calls) (json-array allocator)
+        count (al-len [DeepSeekStreamTool] (load (field state tools)))
+        (mut i) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [tool
+                      (al-get [DeepSeekStreamTool]
+                              (load (field state tools))
+                              (load i))
+                    (mut wire) (json-object allocator)
+                    (mut function) (json-object allocator)]
+                (json-put-string! (mut wire) "id" (load (field tool id)))
+                (json-put-string! (mut wire) "type" "function")
+                (json-put-string! (mut function) "name" (load (field tool name)))
+                (json-put-string! (mut function)
+                                  "arguments"
+                                  (sb-str (load (field tool arguments))))
+                (json-object-put! (mut wire) "function" (load function))
+                (json-array-push! (mut calls) (load wire))
+                (store! i (+ (load i) 1)))))
+    (json-put-string! (mut root) "id" (load (field state response-id)))
+    (json-put-string! (mut root) "model" (load (field state model)))
+    (json-put-string! (mut message) "role" "assistant")
+    (json-put-string! (mut message) "content" (sb-str (load (field state content))))
+    (json-put-string! (mut message)
+                      "reasoning_content"
+                      (sb-str (load (field state reasoning))))
+    (json-object-put! (mut message) "tool_calls" (load calls))
+    (json-object-put! (mut choice) "message" (load message))
+    (json-array-push! (mut choices) (load choice))
+    (json-object-put! (mut root) "choices" (load choices))
+    (let [(mut usage) (json-object allocator)]
+      (json-object-put! (mut usage)
+                        "prompt_tokens"
+                        (json-integer allocator
+                                      (load (field (field state usage) input-tokens))))
+      (json-object-put! (mut usage)
+                        "completion_tokens"
+                        (json-integer allocator
+                                      (load (field (field state usage) output-tokens))))
+      (json-object-put! (mut usage)
+                        "prompt_cache_hit_tokens"
+                        (json-integer allocator
+                                      (load (field (field state usage)
+                                                   cached-input-tokens))))
+      (json-object-put! (mut root) "usage" (load usage)))
+    (deepseek-openai-parse-response allocator (load root))))
+
 (defn deepseek-openai-execute [(context (ptr DeepSeekOpenAIContext))
                                (request (ptr ModelRequest))
                                (emitter (ptr EventEmitter))
@@ -245,6 +417,75 @@
                                                        (JsonString (load (field response response-id))))
                                 (ModelOk response)))))))))))))
 
+(defn deepseek-openai-execute-stream [(context (ptr DeepSeekOpenAIContext))
+                                      (request (ptr ModelRequest))
+                                      (emitter (ptr EventEmitter))
+                                      (allocator (ptr Allocator))] (-> ModelResult)
+  (let [key (api-key allocator (load (field context credential)))]
+    (if (= (slice-len [u8] key) 0)
+        (model-failure "deepseek-openai" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
+        (let [headers
+                (box allocator
+                     (ArrayList (slice u8))
+                     (al-new [(slice u8)] allocator))
+              authorization (concat-or-empty allocator "Authorization: Bearer " key)
+              endpoint
+                (if (registry-needs-strict? (load (field request tools)))
+                    (load (field context strict-endpoint))
+                    (load (field context endpoint)))
+              state (alloc/stack DeepSeekOpenAIStreamState)
+              decoder (alloc/stack SseDecoder)
+              http-request (alloc/stack HttpRequest)]
+          (al-push! [(slice u8)] headers "Content-Type: application/json")
+          (al-push! [(slice u8)] headers "Accept: text/event-stream")
+          (al-push! [(slice u8)] headers authorization)
+          (store! (field state allocator) allocator)
+          (store! (field state request) request)
+          (store! (field state emitter) emitter)
+          (store! (field state response-id) "")
+          (store! (field state model) "")
+          (store! (field state content) (sb-new allocator))
+          (store! (field state reasoning) (sb-new allocator))
+          (store! (field state tools) (al-new [DeepSeekStreamTool] allocator))
+          (store! (field state usage) (zeroed ModelUsage))
+          (store! (field state completed) false)
+          (store! (field state failed) false)
+          (store! decoder (sse-decoder-new allocator state 1048576))
+          (store! (field http-request url) endpoint)
+          (store! (field http-request headers) headers)
+          (store! (field http-request body)
+                  (json-stringify allocator
+                                  (deepseek-openai-request-json allocator request)))
+          (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+          (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
+          (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
+          (deepseek-openai-event emitter request (ModelRequestStarted) (JsonNull))
+          (let [http (http-post-stream allocator http-request)
+                status (load (field http status-code))]
+            (sse-decoder-free! decoder)
+            (if (or (!= (load (field http transport-code)) 0)
+                    (< status 200)
+                    (>= status 300)
+                    (load (field state failed))
+                    (not (load (field state completed))))
+                (let [message
+                        (if (load (field state failed))
+                            "DeepSeek stream failed"
+                            (if (or (< status 200) (>= status 300))
+                                "DeepSeek streaming request returned an error"
+                                (load (field http error))))]
+                  (deepseek-openai-event emitter
+                                         request
+                                         (ModelRequestFailed)
+                                         (JsonString message))
+                  (model-failure "deepseek-openai" status message))
+                (let [response (deepseek-stream-response state)]
+                  (deepseek-openai-event emitter
+                                         request
+                                         (ModelRequestCompleted)
+                                         (JsonString (load (field response response-id))))
+                  (ModelOk response))))))))
+
 (impl ModelProvider DeepSeekOpenAIContext
   (provider-name [(self (ptr DeepSeekOpenAIContext))]
                  (-> (slice u8))
@@ -255,4 +496,4 @@
                   (emitter (ptr EventEmitter))
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
-                 (deepseek-openai-execute self request emitter allocator)))
+                 (deepseek-openai-execute-stream self request emitter allocator)))
