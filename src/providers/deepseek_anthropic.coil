@@ -235,7 +235,7 @@
             (store! (field http-request url) (load (field context endpoint)))
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)
-            (store! (field http-request timeout-ms) (load (field request timeout-ms)))
+            (store! (field http-request timeout-ms) (model-request-remaining-ms request))
             (store! (field (field http-request chunks) context) (cast (ptr i8) 0))
             (store! (field (field http-request chunks) consume) (fnptr-of discard-http-chunk))
             (deepseek-anthropic-event emitter request (ModelRequestStarted) (JsonNull))

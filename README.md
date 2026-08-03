@@ -109,6 +109,11 @@ steps, each represented by lifecycle events.
   authoritative and consumers should order records by it.
 - Background handles require the request, provider context, emitter, and allocator to
   remain alive until `agent-run-join` returns.
+- Runs carry one atomic cancellation token and one absolute monotonic deadline.
+  Background callers can request cancellation with `agent-run-cancel!`; a late model
+  success cannot override cancellation or timeout. Tool handlers receive a
+  `ToolExecutionContext` and overruns are returned as tool failures. In-process tools
+  are cooperative and cannot be safely preempted by the hosted thread API.
 
 ## Next architectural slice
 

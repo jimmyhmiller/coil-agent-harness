@@ -9,11 +9,16 @@
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
+(import "harness-system" :use *)
 (import "harness-tool" :use *)
 
 (const TOOL_LAYOUT_RESPONSES 0)
 (const TOOL_LAYOUT_CHAT 1)
 (const TOOL_LAYOUT_ANTHROPIC 2)
+
+(defn model-request-remaining-ms [(request (ptr ModelRequest))] (-> i64)
+  (deadline-remaining-ms (load (field request deadline-monotonic-ms))
+                         (load (field request timeout-ms))))
 
 (defstruct ApiCredential
   [(primary-env (ptr i8))

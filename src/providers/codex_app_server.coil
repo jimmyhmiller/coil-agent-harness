@@ -332,7 +332,7 @@
     (store! (field result error) "")
     (loop (if (load done)
               (break)
-              (let [read-result (codex-read allocator process (load (field request timeout-ms)))]
+              (let [read-result (codex-read allocator process (model-request-remaining-ms request))]
                 (if (not (load (field read-result ok)))
                     (do
                       (store! (field result error)
@@ -367,7 +367,7 @@
         (mut failure) ""]
     (loop (if (or (load completed) (> (slice-len [u8] (load failure)) 0))
               (break)
-              (let [read-result (codex-read allocator process (load (field request timeout-ms)))]
+              (let [read-result (codex-read allocator process (model-request-remaining-ms request))]
                 (if (not (load (field read-result ok)))
                     (store! failure
                             (if (load (field read-result eof))

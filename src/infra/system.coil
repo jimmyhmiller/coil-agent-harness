@@ -9,6 +9,27 @@
     (Ok [value] value)
     (Err [failure] 0)))
 
+(defn monotonic-now-ms [] (-> i64)
+  (match (time/monotonic-now-ms)
+    (Ok [value] value)
+    (Err [failure] 0)))
+
+(defn deadline-from-timeout [(timeout-ms i64)] (-> i64)
+  (let [now (monotonic-now-ms)]
+    (if (or (<= now 0) (<= timeout-ms 0))
+        0
+        (if (> timeout-ms (- 9223372036854775807 now))
+            9223372036854775807
+            (+ now timeout-ms)))))
+
+(defn deadline-remaining-ms [(deadline-ms i64) (fallback-ms i64)] (-> i64)
+  (if (<= deadline-ms 0)
+      fallback-ms
+      (let [now (monotonic-now-ms)]
+        (if (<= now 0)
+            fallback-ms
+            (if (>= now deadline-ms) 0 (- deadline-ms now))))))
+
 (defn sleep-ms [(milliseconds i64)] (-> i64)
   (match (time/duration-millis milliseconds)
     (Err [failure] -1)

@@ -2,6 +2,7 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
 (import "coil.slice" :use *)
@@ -14,6 +15,25 @@
   (ReadOnly [])
   (Reversible [])
   (Destructive []))
+
+(defstruct CancellationToken [(requested i64)])
+
+(defn cancellation-token-new [(allocator (ptr Allocator))] (-> (ptr CancellationToken))
+  (box allocator CancellationToken (zeroed CancellationToken)))
+
+(defn cancellation-request! [(token (ptr CancellationToken))] (-> i64)
+  (if (= token (cast (ptr CancellationToken) 0))
+      0
+      (atomic-store (field token requested) 1)))
+
+(defn cancellation-requested? [(token (ptr CancellationToken))] (-> bool)
+  (and (!= token (cast (ptr CancellationToken) 0))
+       (= (atomic-load (field token requested)) 1)))
+
+(defstruct ToolExecutionContext
+  [(cancellation (ptr CancellationToken))
+   (run-deadline-monotonic-ms i64)
+   (tool-deadline-monotonic-ms i64)])
 
 (defstruct ToolSpec
   [(name (slice u8))
@@ -47,6 +67,7 @@
 (deftrait ToolImplementation [Self]
   (execute-tool [(self (ptr Self))
                  (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)))
 

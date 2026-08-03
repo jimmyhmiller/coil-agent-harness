@@ -57,6 +57,23 @@
     (store! (field failure retryable) false)
     (ModelErr (load failure))))
 
+(defn runner-stop-failure [(kind ModelFailureKind)
+                           (message (slice u8))] (-> ModelResult)
+  (let [failure (alloc/stack ModelFailure)]
+    (store! (field failure kind) kind)
+    (store! (field failure provider) "runtime")
+    (store! (field failure status-code) 0)
+    (store! (field failure message) message)
+    (store! (field failure retryable) false)
+    (ModelErr (load failure))))
+
+(defn request-deadline-expired? [(request (ptr ModelRequest))] (-> bool)
+  (let [deadline (load (field request deadline-monotonic-ms))]
+    (and (> deadline 0) (= (deadline-remaining-ms deadline 0) 0))))
+
+(defn request-cancelled? [(request (ptr ModelRequest))] (-> bool)
+  (cancellation-requested? (load (field request cancellation))))
+
 ;; Run the model/tool loop until the model produces no function calls, a provider
 ;; fails, or the explicit turn budget is exhausted. Provider continuations retain
 ;; opaque prior output so reasoning/signature fields are never lost.
@@ -70,66 +87,112 @@
         (mut turn) 0
         (mut finished) false
         (mut final) (runner-budget-failure)]
+    (when (= (load (field current cancellation))
+             (cast (ptr CancellationToken) 0))
+      (store! (field current cancellation) (cancellation-token-new allocator))
+      0)
+    (when (= (load (field current deadline-monotonic-ms)) 0)
+      (store! (field current deadline-monotonic-ms)
+              (deadline-from-timeout (load (field current timeout-ms))))
+      0)
     (runner-event emitter current (RunStarted) (JsonNull))
     (loop (if (or (load finished)
                   (>= (load turn) (load (field policy max-model-turns))))
               (break)
-              (do
-                (store! turn (+ (load turn) 1))
-                (let [model-result (execute-model provider current emitter allocator)]
-                  (match model-result
-                    (ModelErr [failure]
-                              (let [failure-value failure]
-                                (store! final (ModelErr failure))
+              (if (request-cancelled? current)
+                  (do
+                    (store! final
+                            (runner-stop-failure (CancelledFailure)
+                                                 "agent run cancelled"))
+                    (store! finished true)
+                    (runner-event emitter current (RunCancelled) (JsonNull)))
+                  (if (request-deadline-expired? current)
+                      (do
+                        (store! final
+                                (runner-stop-failure (TimeoutFailure)
+                                                     "agent run deadline exceeded"))
+                        (store! finished true)
+                        (runner-event emitter
+                                      current
+                                      (RunFailed)
+                                      (JsonString "agent run deadline exceeded")))
+                      (do
+                        (store! turn (+ (load turn) 1))
+                        (let [model-result (execute-model provider current emitter allocator)]
+                          (if (request-cancelled? current)
+                              (do
+                                (store! final
+                                        (runner-stop-failure (CancelledFailure)
+                                                             "agent run cancelled"))
                                 (store! finished true)
-                                (runner-event emitter
-                                              current
-                                              (RunFailed)
-                                              (JsonString (load (field failure-value message))))))
-                    (ModelOk [response]
-                             (let [response-value response
-                                   call-count
-                                     (al-len [ToolCall]
-                                             (load (field response-value tool-calls)))]
-                               (if (= call-count 0)
-                                   (do
-                                     (store! final (ModelOk response))
-                                     (store! finished true)
-                                     (runner-event emitter
-                                                   current
-                                                   (RunCompleted)
-                                                   (JsonString (load (field response-value response-id)))))
-                                   (let [calls
-                                           (box allocator
-                                                (ArrayList ToolCall)
-                                                (load (field response-value tool-calls)))
-                                         execution (alloc/stack ToolExecutionRequest)]
-                                     (store! (field execution run-id) (load (field current run-id)))
-                                     (store! (field execution provider) (provider-name provider))
-                                     (store! (field execution model) (load (field current model)))
-                                     (store! (field execution registry) (load (field current tools)))
-                                     (store! (field execution authorizer) authorizer)
-                                     (store! (field execution calls) calls)
-                                     (store! (field execution emitter) emitter)
-                                     (store! (field execution max-parallel)
-                                             (load (field policy max-parallel-tools)))
-                                     (let [batch (execute-tools-parallel allocator execution)
-                                           results
-                                             (box allocator
-                                                  (ArrayList ToolResult)
-                                                  (load (field batch results)))]
-                                       (store! (field (field current continuation) present) true)
-                                       (store! (field (field current continuation)
-                                                      previous-response-id)
-                                               (load (field response-value response-id)))
-                                       (store! (field (field current continuation) previous-output)
-                                               (load (field response-value raw-output)))
-                                       (store! (field (field current continuation) tool-results)
-                                               results)
-                                       ; Required/forced selection is an initial-turn constraint.
-                                       ; Continuing with it would force an endless tool loop after
-                                       ; the requested result has already been supplied.
-                                       (store! (field current tool-choice) (ToolsAuto))))))))))))
+                                (runner-event emitter current (RunCancelled) (JsonNull)))
+                              (if (request-deadline-expired? current)
+                                  (do
+                                    (store! final
+                                            (runner-stop-failure (TimeoutFailure)
+                                                                 "agent run deadline exceeded"))
+                                    (store! finished true)
+                                    (runner-event emitter
+                                                  current
+                                                  (RunFailed)
+                                                  (JsonString "agent run deadline exceeded")))
+                                  (match model-result
+                                    (ModelErr [failure]
+                                              (let [failure-value failure]
+                                                (store! final (ModelErr failure))
+                                                (store! finished true)
+                                                (runner-event emitter
+                                                              current
+                                                              (RunFailed)
+                                                              (JsonString (load (field failure-value message))))))
+                                    (ModelOk [response]
+                                             (let [response-value response
+                                                   call-count
+                                                     (al-len [ToolCall]
+                                                             (load (field response-value tool-calls)))]
+                                               (if (= call-count 0)
+                                                   (do
+                                                     (store! final (ModelOk response))
+                                                     (store! finished true)
+                                                     (runner-event emitter
+                                                                   current
+                                                                   (RunCompleted)
+                                                                   (JsonString (load (field response-value response-id)))))
+                                                   (let [calls
+                                                           (box allocator
+                                                                (ArrayList ToolCall)
+                                                                (load (field response-value tool-calls)))
+                                                         execution (alloc/stack ToolExecutionRequest)]
+                                                     (store! (field execution run-id) (load (field current run-id)))
+                                                     (store! (field execution provider) (provider-name provider))
+                                                     (store! (field execution model) (load (field current model)))
+                                                     (store! (field execution registry) (load (field current tools)))
+                                                     (store! (field execution authorizer) authorizer)
+                                                     (store! (field execution calls) calls)
+                                                     (store! (field execution emitter) emitter)
+                                                     (store! (field execution cancellation)
+                                                             (load (field current cancellation)))
+                                                     (store! (field execution run-deadline-monotonic-ms)
+                                                             (load (field current deadline-monotonic-ms)))
+                                                     (store! (field execution max-parallel)
+                                                             (load (field policy max-parallel-tools)))
+                                                     (let [batch (execute-tools-parallel allocator execution)
+                                                           results
+                                                             (box allocator
+                                                                  (ArrayList ToolResult)
+                                                                  (load (field batch results)))]
+                                                       (store! (field (field current continuation) present) true)
+                                                       (store! (field (field current continuation)
+                                                                      previous-response-id)
+                                                               (load (field response-value response-id)))
+                                                       (store! (field (field current continuation) previous-output)
+                                                               (load (field response-value raw-output)))
+                                                       (store! (field (field current continuation) tool-results)
+                                                               results)
+                                                       ; Required/forced selection is an initial-turn constraint.
+                                                       ; Continuing with it would force an endless tool loop after
+                                                       ; the requested result has already been supplied.
+                                                       (store! (field current tool-choice) (ToolsAuto))))))))))))))))
     (when (not (load finished))
       (runner-event emitter
                     current
@@ -162,6 +225,10 @@
   (let [job (box allocator AgentRunJob (zeroed AgentRunJob))
         completed (box allocator i64 0)
         handle (alloc/stack AgentRunHandle)]
+    (when (= (load (field request cancellation))
+             (cast (ptr CancellationToken) 0))
+      (store! (field request cancellation) (cancellation-token-new allocator))
+      0)
     (store! (field job allocator) allocator)
     (store! (field job provider) provider)
     (store! (field job request) request)
@@ -182,6 +249,11 @@
 (defn agent-run-finished? [(handle (ptr AgentRunHandle))] (-> bool)
   (or (not (load (field handle spawned)))
       (= (atomic-load (load (field (load (field handle job)) completed))) 1)))
+
+(defn agent-run-cancel! [(handle (ptr AgentRunHandle))] (-> i64)
+  (let [job (load (field handle job))
+        request (load (field job request))]
+    (cancellation-request! (load (field request cancellation)))))
 
 ;; Join exactly once and return the terminal result. A second join is harmless and
 ;; returns the stored result. A spawn failure is reported as a configuration failure.

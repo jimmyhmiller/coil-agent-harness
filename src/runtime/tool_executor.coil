@@ -3,6 +3,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.slice" :use *)
 (import "coil.thread" :use *)
 (import "harness-event" :use *)
 (import "harness-json" :use *)
@@ -18,6 +19,8 @@
    (authorizer (dyn ToolAuthorizer))
    (calls (ptr (ArrayList ToolCall)))
    (emitter (ptr EventEmitter))
+   (cancellation (ptr CancellationToken))
+   (run-deadline-monotonic-ms i64)
    (max-parallel i64)])
 
 (defstruct ToolExecutionBatch [(results (ArrayList ToolResult))])
@@ -28,9 +31,18 @@
    (model (slice u8))
    (call ToolCall)
    (definition ToolDefinition)
+   (context ToolExecutionContext)
    (results-data (ptr ToolResult))
    (result-index i64)
    (emitter (ptr EventEmitter))])
+
+(defn tool-context-stop-reason [(context (ptr ToolExecutionContext))] (-> (slice u8))
+  (if (cancellation-requested? (load (field context cancellation)))
+      "tool execution cancelled"
+      (let [deadline (load (field context tool-deadline-monotonic-ms))]
+        (if (and (> deadline 0) (= (deadline-remaining-ms deadline 0) 0))
+            "tool deadline exceeded"
+            ""))))
 
 (defstruct ActiveThread [(thread Thread) (spawned bool)])
 
@@ -66,11 +78,22 @@
                 (load (field job model))
                 (load call)
                 (JsonString (load (field call name))))
-    (let [(mut executed)
-            (execute-tool (load (field definition implementation))
-                          call
-                          (malloc-allocator))
+    (let [stop-before (tool-context-stop-reason (field job context))
+          (mut executed)
+            (if (> (slice-len [u8] stop-before) 0)
+                (let [(mut stopped) (tool-result-empty (load (field call id)) (ToolErrored))]
+                  (store! (field stopped error) stop-before)
+                  (load stopped))
+                (execute-tool (load (field definition implementation))
+                              call
+                              (field job context)
+                              (malloc-allocator)))
           finished (now-ms)]
+      (let [stop-after (tool-context-stop-reason (field job context))]
+        (when (> (slice-len [u8] stop-after) 0)
+          (store! (field executed status) (ToolErrored))
+          (store! (field executed error) stop-after)
+          0))
       (store! (field executed call-id) (load (field call id)))
       (store! (field executed started-at-ms) started)
       (store! (field executed finished-at-ms) finished)
@@ -186,6 +209,26 @@
                                              (store! (field job model) (load (field request model)))
                                              (store! (field job call) call)
                                              (store! (field job definition) selected)
+                                             (store! (field (field job context) cancellation)
+                                                     (load (field request cancellation)))
+                                             (store! (field (field job context)
+                                                            run-deadline-monotonic-ms)
+                                                     (load (field request
+                                                                  run-deadline-monotonic-ms)))
+                                             (let [tool-timeout
+                                                     (load (field (field selected spec)
+                                                                  timeout-ms))
+                                                   tool-deadline (deadline-from-timeout tool-timeout)
+                                                   run-deadline
+                                                     (load (field request
+                                                                  run-deadline-monotonic-ms))]
+                                               (store! (field (field job context)
+                                                              tool-deadline-monotonic-ms)
+                                                       (if (and (> run-deadline 0)
+                                                                (or (= tool-deadline 0)
+                                                                    (< run-deadline tool-deadline)))
+                                                           run-deadline
+                                                           tool-deadline)))
                                              (store! (field job results-data) (load (field results data)))
                                              (store! (field job result-index) (load i))
                                              (store! (field job emitter) (load (field request emitter)))

@@ -86,6 +86,7 @@
 (impl ToolImplementation EchoTool
   (execute-tool [(self (ptr EchoTool))
                  (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
                 (execute-echo self call allocator)))
@@ -145,6 +146,8 @@
             (if force-tool (ReasoningNone) (ReasoningMedium)))
     (store! (field request max-output-tokens) 2048)
     (store! (field request timeout-ms) 120000)
+    (store! (field request deadline-monotonic-ms) 0)
+    (store! (field request cancellation) (cast (ptr CancellationToken) 0))
     (store! (field (field request continuation) present) false)
     (store! (field (field request continuation) previous-response-id) "")
     (store! (field (field request continuation) previous-output) (JsonNull))

@@ -72,6 +72,7 @@
 (impl ToolImplementation UnusedTool
   (execute-tool [(self (ptr UnusedTool))
                  (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
                 (tool-result-empty (load (field call id)) (ToolSucceeded))))

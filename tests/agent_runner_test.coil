@@ -11,12 +11,31 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
+(import "harness-system" :use *)
 
 (defstruct FakeProviderState
   [(calls (ptr i64))
    (observed-continuation (ptr i64))])
 
 (defstruct FakeTool [])
+
+(defstruct SlowProvider [(delay-ms i64)])
+
+(impl ModelProvider SlowProvider
+  (provider-name [(self (ptr SlowProvider))] (-> (slice u8)) "slow")
+  (execute-model [(self (ptr SlowProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (do
+                   (sleep-ms (load (field self delay-ms)))
+                   (let [(mut response) (response-empty allocator)]
+                     (store! (field response provider) "slow")
+                     (store! (field response model) (load (field request model)))
+                     (store! (field response response-id) "slow-response")
+                     (store! (field response output-text) "too late")
+                     (ModelOk (load response))))))
 
 (defn execute-fake-tool [(self (ptr FakeTool))
                          (call (ptr ToolCall))
@@ -28,6 +47,7 @@
 (impl ToolImplementation FakeTool
   (execute-tool [(self (ptr FakeTool))
                  (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
                 (execute-fake-tool self call allocator)))
@@ -153,3 +173,76 @@
                                 (let [final response]
                                   (str-eq (load (field final output-text)) "done")))
                        (ModelErr [failure] false))))))
+
+(deftest background-run-cancellation-wins-over-a-late-model-response
+         (let [allocator (malloc-allocator)
+               provider (box allocator SlowProvider (zeroed SlowProvider))
+               request (box allocator ModelRequest (zeroed ModelRequest))
+               events (box allocator i64 0)
+               sequence (box allocator i64 1)
+               sink (alloc/stack CountingEventSink)
+               emitter (box allocator EventEmitter (zeroed EventEmitter))
+               authorizer (alloc/stack AllowAllAuthorizer)
+               policy (alloc/stack AgentRunPolicy)]
+           (store! (field provider delay-ms) 30)
+           (store! (field request run-id) "cancel-test")
+           (store! (field request operation-id) "model")
+           (store! (field request model) "slow-model")
+           (store! (field request timeout-ms) 1000)
+           (store! (field sink count) events)
+           (store! emitter (event-emitter-new sink sequence))
+           (store! (field policy max-model-turns) 1)
+           (store! (field policy max-parallel-tools) 1)
+           (let [(mut handle)
+                   (run-agent-background allocator
+                                         provider
+                                         request
+                                         authorizer
+                                         emitter
+                                         (load policy))]
+             (sleep-ms 5)
+             (agent-run-cancel! handle)
+             (let [result (agent-run-join (mut handle))]
+               (assert (match result
+                         (ModelOk [response] false)
+                         (ModelErr [failure]
+                                   (let [failed failure]
+                                     (match-else (load (field failed kind))
+                                                 (CancelledFailure [] true)
+                                                 (_ false))))))
+               (assert-eq (atomic-load events) 2)))))
+
+(deftest run-deadline-wins-over-a-late-model-response
+         (let [allocator (malloc-allocator)
+               provider (box allocator SlowProvider (zeroed SlowProvider))
+               request (box allocator ModelRequest (zeroed ModelRequest))
+               events (box allocator i64 0)
+               sequence (box allocator i64 1)
+               sink (alloc/stack CountingEventSink)
+               emitter (box allocator EventEmitter (zeroed EventEmitter))
+               authorizer (alloc/stack AllowAllAuthorizer)
+               policy (alloc/stack AgentRunPolicy)]
+           (store! (field provider delay-ms) 20)
+           (store! (field request run-id) "deadline-test")
+           (store! (field request operation-id) "model")
+           (store! (field request model) "slow-model")
+           (store! (field request timeout-ms) 5)
+           (store! (field sink count) events)
+           (store! emitter (event-emitter-new sink sequence))
+           (store! (field policy max-model-turns) 1)
+           (store! (field policy max-parallel-tools) 1)
+           (let [result
+                   (run-agent allocator
+                              provider
+                              request
+                              authorizer
+                              emitter
+                              (load policy))]
+             (assert (match result
+                       (ModelOk [response] false)
+                       (ModelErr [failure]
+                                 (let [failed failure]
+                                   (match-else (load (field failed kind))
+                                               (TimeoutFailure [] true)
+                                               (_ false))))))
+             (assert-eq (atomic-load events) 2))))

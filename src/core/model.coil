@@ -50,7 +50,12 @@
    (reasoning ReasoningEffort)
    (max-output-tokens i64)
    (timeout-ms i64)
+   (deadline-monotonic-ms i64)
+   (cancellation (ptr CancellationToken))
    (continuation ModelContinuation)])
+
+(defn model-request-cancelled? [(request (ptr ModelRequest))] (-> bool)
+  (cancellation-requested? (load (field request cancellation))))
 
 (defstruct ModelUsage
   [(input-tokens i64)
@@ -74,6 +79,7 @@
   (RateLimitFailure [])
   (ProviderFailure [])
   (ProtocolFailure [])
+  (TimeoutFailure [])
   (CancelledFailure []))
 
 (defstruct ModelFailure
