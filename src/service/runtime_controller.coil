@@ -12,6 +12,7 @@
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "harness-agent-runner" :use *)
+(import "harness-allocation-domain" :use *)
 (import "harness-authorization-mailbox" :use *)
 (import "harness-event" :use *)
 (import "harness-interactive-authorizer" :use *)
@@ -25,7 +26,12 @@
 
 (defstruct ActiveRuntimeRun
   [(run-id (slice u8))
-   (handle AgentRunHandle)])
+   (handle AgentRunHandle)
+   (allocation-domain (ptr AllocationDomain))])
+
+(defstruct PendingRuntimeRun
+  [(command Json)
+   (allocation-domain (ptr AllocationDomain))])
 
 (deftrait RuntimeProviderFactory [Self]
   (resolve-runtime-provider [(self (ptr Self))
@@ -71,7 +77,7 @@
    (mailbox (ptr AuthorizationMailbox))
    (journal-path (slice u8))
    (runs (ArrayList ActiveRuntimeRun))
-   (pending (ArrayList Json))
+   (pending (ArrayList PendingRuntimeRun))
    (pending-next i64)
    (state-lock (ptr i64))
    (stopping (ptr i64))
@@ -95,7 +101,7 @@
     (store! (field controller mailbox) mailbox)
     (store! (field controller journal-path) journal-path)
     (store! (field controller runs) (al-new [ActiveRuntimeRun] allocator))
-    (store! (field controller pending) (al-new [Json] allocator))
+    (store! (field controller pending) (al-new [PendingRuntimeRun] allocator))
     (store! (field controller pending-next) 0)
     (store! (field controller state-lock) (box allocator i64 0))
     (store! (field controller stopping) (box allocator i64 0))
@@ -116,7 +122,9 @@
 
 (defn runtime-command-timeout [(command Json)] (-> i64)
   (let [value (json-number-i64 (json-get command "timeout_ms"))]
-    (if (> value 0) value 120000)))
+    (cond (<= value 0) 120000
+          (> value 120000) 120000
+          :else value)))
 
 (defn runtime-command-instructions [(command Json)] (-> (slice u8))
   (let [value (command-string command "instructions")]
@@ -125,9 +133,9 @@
         "Be concise. Use tools when they are required by the request.")))
 
 (defn runtime-model-request [(controller (ptr RuntimeRunController))
-                             (command Json)] (-> (ptr ModelRequest))
-  (let [allocator (load (field controller allocator))
-        request (box allocator ModelRequest (zeroed ModelRequest))
+                             (command Json)
+                             (allocator (ptr Allocator))] (-> (ptr ModelRequest))
+  (let [request (box allocator ModelRequest (zeroed ModelRequest))
         messages (box allocator (ArrayList Message) (al-new [Message] allocator))
         message (alloc/stack Message)]
     (store! (field message role) (UserRole))
@@ -156,9 +164,9 @@
 
 (defn runtime-authorizer [(controller (ptr RuntimeRunController))
                           (command Json)
-                          (request (ptr ModelRequest))] (-> (ptr InteractiveAuthorizer))
-  (let [allocator (load (field controller allocator))
-        authorizer (box allocator InteractiveAuthorizer (zeroed InteractiveAuthorizer))]
+                          (request (ptr ModelRequest))
+                          (allocator (ptr Allocator))] (-> (ptr InteractiveAuthorizer))
+  (let [authorizer (box allocator InteractiveAuthorizer (zeroed InteractiveAuthorizer))]
     (store! (field authorizer allocator) allocator)
     (store! (field authorizer journal-path)
             (load (field controller journal-path)))
@@ -192,6 +200,8 @@
                                        (load (field controller runs)))
                                1)]
                       (agent-run-join (mut (field slot handle)))
+                      (allocation-domain-close! (load (field controller allocator))
+                                                (load (field slot allocation-domain)))
                       (when (!= (load i) last-index)
                         (store! slot
                                 (al-get [ActiveRuntimeRun]
@@ -222,15 +232,37 @@
 (defn runtime-controller-start-provider! [(controller (ptr RuntimeRunController))
                                           (command Json)
                                           (provider (dyn ModelProvider))] (-> i64)
+  (let [domain (allocation-domain-open (load (field controller allocator)))]
+    (if (not (allocation-domain-valid? domain))
+        (do
+          (allocation-domain-close! (load (field controller allocator)) domain)
+          -1)
+        (let [result
+                (runtime-controller-start-provider-in-domain! controller
+                                                              command
+                                                              provider
+                                                              domain)]
+          (when (!= result 0)
+            (allocation-domain-close! (load (field controller allocator)) domain)
+            0)
+          result))))
+
+(defn runtime-controller-start-provider-in-domain! [(controller (ptr RuntimeRunController))
+                                                    (command Json)
+                                                    (provider (dyn ModelProvider))
+                                                    (domain (ptr AllocationDomain))] (-> i64)
   (if (runtime-controller-active? controller (command-string command "run_id"))
-      0
+      (do
+        (allocation-domain-close! (load (field controller allocator)) domain)
+        0)
       (if (>= (al-len [ActiveRuntimeRun] (load (field controller runs)))
               (load (field controller max-active-runs)))
           -1
-          (let [request (runtime-model-request controller command)
-                authorizer (runtime-authorizer controller command request)
+          (let [run-allocator (allocation-domain-allocator domain)
+                request (runtime-model-request controller command run-allocator)
+                authorizer (runtime-authorizer controller command request run-allocator)
                 handle
-                  (run-agent-background (load (field controller allocator))
+                  (run-agent-background run-allocator
                                         provider
                                         request
                                         authorizer
@@ -241,32 +273,53 @@
                 (let [active (alloc/stack ActiveRuntimeRun)]
                   (store! (field active run-id) (load (field request run-id)))
                   (store! (field active handle) handle)
+                  (store! (field active allocation-domain) domain)
                   (al-push! [ActiveRuntimeRun]
                             (mut (field controller runs))
                             (load active))
                   0))))))
 
+(defn runtime-controller-launch-domain! [(controller (ptr RuntimeRunController))
+                                         (command Json)
+                                         (domain (ptr AllocationDomain))] (-> i64)
+  (let [owner (load (field controller allocator))
+        allocator (allocation-domain-allocator domain)
+        provider-name (command-string command "provider")]
+    (if (not (allocation-domain-valid? domain))
+        -1
+        (match (resolve-runtime-provider (load (field controller provider-factory))
+                                         allocator
+                                         provider-name)
+          (Some [provider]
+                (runtime-controller-start-provider-in-domain! controller
+                                                              command
+                                                              provider
+                                                              domain))
+          (None [] -1)))))
+
 (defn runtime-controller-launch! [(controller (ptr RuntimeRunController))
                                   (command Json)] (-> i64)
   (runtime-controller-reap! controller)
-  (let [allocator (load (field controller allocator))
-        provider-name (command-string command "provider")]
-    (match (resolve-runtime-provider (load (field controller provider-factory))
-                                     allocator
-                                     provider-name)
-      (Some [provider]
-            (runtime-controller-start-provider! controller command provider))
-      (None [] -1))))
+  (let [domain (allocation-domain-open (load (field controller allocator)))
+        result (runtime-controller-launch-domain! controller command domain)]
+    (when (!= result 0)
+      (allocation-domain-close! (load (field controller allocator)) domain)
+      0)
+    result))
 
 (defn runtime-controller-pending? [(controller (ptr RuntimeRunController))
                                    (run-id (slice u8))] (-> bool)
   (let [(mut i) (load (field controller pending-next))
-        n (al-len [Json] (load (field controller pending)))
+        n (al-len [PendingRuntimeRun] (load (field controller pending)))
         (mut found) false]
     (loop (if (>= (load i) n)
               (break)
-              (let [command (al-get [Json] (load (field controller pending)) (load i))]
-                (if (str-eq (command-string command "run_id") run-id)
+              (let [pending
+                      (al-get [PendingRuntimeRun]
+                              (load (field controller pending))
+                              (load i))]
+                (if (str-eq (command-string (load (field pending command)) "run_id")
+                            run-id)
                     (do (store! found true) (break))
                     (store! i (+ (load i) 1))))))
     (load found)))
@@ -277,9 +330,19 @@
     (if (or (runtime-controller-active? controller run-id)
             (runtime-controller-pending? controller run-id))
         0
-        (do
-          (al-push! [Json] (mut (field controller pending)) command)
-          0))))
+        (let [domain (allocation-domain-open (load (field controller allocator)))]
+          (if (not (allocation-domain-valid? domain))
+              (do
+                (allocation-domain-close! (load (field controller allocator)) domain)
+                -1)
+              (let [pending (alloc/stack PendingRuntimeRun)]
+                (store! (field pending command)
+                        (json-clone (allocation-domain-allocator domain) command))
+                (store! (field pending allocation-domain) domain)
+                (al-push! [PendingRuntimeRun]
+                          (mut (field controller pending))
+                          (load pending))
+                0))))))
 
 (defn runtime-controller-fail-launch! [(controller (ptr RuntimeRunController))
                                        (command Json)] (-> i64)
@@ -295,21 +358,30 @@
 
 (defn runtime-controller-drain-locked! [(controller (ptr RuntimeRunController))] (-> i64)
   (runtime-controller-reap! controller)
-  (let [count (al-len [Json] (load (field controller pending)))]
+  (let [count (al-len [PendingRuntimeRun] (load (field controller pending)))]
     (loop (if (or (>= (load (field controller pending-next)) count)
                   (>= (al-len [ActiveRuntimeRun] (load (field controller runs)))
                       (load (field controller max-active-runs))))
               (break)
               (let [index (load (field controller pending-next))
-                    command (al-get [Json] (load (field controller pending)) index)]
+                    pending
+                      (al-get [PendingRuntimeRun]
+                              (load (field controller pending))
+                              index)
+                    command (load (field pending command))]
                 (store! (field controller pending-next) (+ index 1))
                 (when (> (str-len (command-string command "run_id")) 0)
-                  (when (!= (runtime-controller-launch! controller command) 0)
+                  (when (!= (runtime-controller-launch-domain! controller
+                                                               command
+                                                               (load (field pending allocation-domain)))
+                            0)
                     (runtime-controller-fail-launch! controller command)
+                    (allocation-domain-close! (load (field controller allocator))
+                                              (load (field pending allocation-domain)))
                     0)
                   0))))
     (when (>= (load (field controller pending-next)) count)
-      (al-clear! [Json] (mut (field controller pending)))
+      (al-clear! [PendingRuntimeRun] (mut (field controller pending)))
       (store! (field controller pending-next) 0)
       0)
     0))
@@ -317,16 +389,24 @@
 (defn runtime-controller-cancel-pending-locked! [(controller (ptr RuntimeRunController))
                                                  (run-id (slice u8))] (-> bool)
   (let [(mut i) (load (field controller pending-next))
-        n (al-len [Json] (load (field controller pending)))
+        n (al-len [PendingRuntimeRun] (load (field controller pending)))
         (mut cancelled) false]
     (loop (if (>= (load i) n)
               (break)
-              (let [command (al-get [Json] (load (field controller pending)) (load i))]
+              (let [pending
+                      (al-get [PendingRuntimeRun]
+                              (load (field controller pending))
+                              (load i))
+                    command (load (field pending command))]
                 (if (str-eq (command-string command "run_id") run-id)
                     (do
-                      (let [(mut removed) command]
-                        (json-put-string! (mut removed) "run_id" "")
-                        (al-set! [Json]
+                      (allocation-domain-close! (load (field controller allocator))
+                                                (load (field pending allocation-domain)))
+                      (let [removed (alloc/stack PendingRuntimeRun)]
+                        (store! (field removed command) (JsonNull))
+                        (store! (field removed allocation-domain)
+                                (cast (ptr AllocationDomain) 0))
+                        (al-set! [PendingRuntimeRun]
                                  (mut (field controller pending))
                                  (load i)
                                  (load removed)))
@@ -348,6 +428,25 @@
     (authorization-mailbox-notify! (load (field controller mailbox)))
     0))
 
+(defn runtime-controller-close-pending-locked! [(controller (ptr RuntimeRunController))] (-> i64)
+  (let [(mut i) (load (field controller pending-next))
+        n (al-len [PendingRuntimeRun] (load (field controller pending)))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [pending
+                      (al-get [PendingRuntimeRun]
+                              (load (field controller pending))
+                              (load i))
+                    domain (load (field pending allocation-domain))]
+                (when (!= domain (cast (ptr AllocationDomain) 0))
+                  (allocation-domain-close! (load (field controller allocator))
+                                            domain)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (al-clear! [PendingRuntimeRun] (mut (field controller pending)))
+    (store! (field controller pending-next) 0)
+    0))
+
 (defn runtime-controller-scheduler-worker [(opaque (ptr i8))] (-> (ptr i8))
   (let [controller (cast (ptr RuntimeRunController) opaque)
         (mut done) false]
@@ -358,8 +457,7 @@
                 (if (= (atomic-load (load (field controller stopping))) 1)
                     (do
                       (runtime-controller-cancel-active-locked! controller)
-                      (al-clear! [Json] (mut (field controller pending)))
-                      (store! (field controller pending-next) 0)
+                      (runtime-controller-close-pending-locked! controller)
                       (runtime-controller-reap! controller)
                       (when (= (al-len [ActiveRuntimeRun]
                                        (load (field controller runs)))
@@ -401,36 +499,77 @@
               result)))))
 
 (defn runtime-controller-cancel! [(controller (ptr RuntimeRunController))
-                                  (run-id (slice u8))] (-> i64)
+                                  (command Json)] (-> RunCancellationResult)
   (runtime-controller-lock! controller)
   (runtime-controller-reap! controller)
-  (let [(mut i) 0
+  (let [run-id (command-string command "run_id")
+        (mut i) 0
         n (al-len [ActiveRuntimeRun] (load (field controller runs)))
-        (mut cancelled) false
-        (mut was-pending) false]
+        (mut result) (RunCancellationTerminalOrMissing)]
     (loop (if (>= (load i) n)
               (break)
               (let [slot
                       (index (load (field (field controller runs) data))
                              (load i))]
                 (if (str-eq (load (field slot run-id)) run-id)
-                    (do
-                      (agent-run-cancel! (field slot handle))
-                      (authorization-mailbox-notify! (load (field controller mailbox)))
-                      (store! cancelled true)
+                    (let [reserve-code (agent-run-reserve-cancellation! (field slot handle))]
+                      (cond (= reserve-code 0)
+                              (if (< (emit-event (load (field controller emitter))
+                                                 (now-ms)
+                                                 (RunCancellationRequested)
+                                                 run-id
+                                                 run-id
+                                                 ""
+                                                 (command-string command "provider")
+                                                 (command-string command "model")
+                                                 command)
+                                     0)
+                                  (do
+                                    (agent-run-abort-cancellation! (field slot handle))
+                                    (store! result (RunCancellationFailed)))
+                                  (do
+                                    (agent-run-confirm-cancellation! (field slot handle))
+                                    (authorization-mailbox-notify! (load (field controller mailbox)))
+                                    (store! result (RunCancellationAccepted))))
+                            (= reserve-code 1) (store! result (RunCancellationAccepted))
+                            :else (store! result (RunCancellationTerminalOrMissing)))
                       (break))
                     (store! i (+ (load i) 1))))))
-    (when (not (load cancelled))
-      (store! was-pending
-              (runtime-controller-cancel-pending-locked! controller run-id))
-      (store! cancelled (load was-pending))
-      0)
+    (when (match (load result)
+            (RunCancellationTerminalOrMissing [] true)
+            (RunCancellationAccepted [] false)
+            (RunCancellationFailed [] false))
+      (when (runtime-controller-pending? controller run-id)
+        (let [requested
+                (emit-event (load (field controller emitter))
+                            (now-ms)
+                            (RunCancellationRequested)
+                            run-id
+                            run-id
+                            ""
+                            (command-string command "provider")
+                            (command-string command "model")
+                            command)]
+          (if (< requested 0)
+              (store! result (RunCancellationFailed))
+              (let [cancelled
+                      (emit-event (load (field controller emitter))
+                                  (now-ms)
+                                  (RunCancelled)
+                                  run-id
+                                  run-id
+                                  ""
+                                  (command-string command "provider")
+                                  (command-string command "model")
+                                  (JsonString "queued run cancelled"))]
+                (if (< cancelled 0)
+                    (store! result (RunCancellationFailed))
+                    (do
+                      (runtime-controller-cancel-pending-locked! controller run-id)
+                      (store! result (RunCancellationAccepted)))))))
+        0))
     (runtime-controller-unlock! controller)
-    ;; A removed queued run has no worker capable of emitting run.cancelled.
-    ;; The service uses this nonzero result to durably terminalize it.
-    (cond (load was-pending) 1
-          (load cancelled) 0
-          :else -1)))
+    (load result)))
 
 (defn runtime-controller-join-all! [(controller (ptr RuntimeRunController))] (-> i64)
   (atomic-store (load (field controller stopping)) 1)
@@ -448,6 +587,8 @@
                             (index (load (field (field controller runs) data))
                                    (load i))]
                       (agent-run-join (mut (field slot handle)))
+                      (allocation-domain-close! (load (field controller allocator))
+                                                (load (field slot allocation-domain)))
                       (store! i (+ (load i) 1)))))
           (al-clear! [ActiveRuntimeRun] (mut (field controller runs))))
         (runtime-controller-unlock! controller)))
@@ -458,6 +599,6 @@
                      (-> i64)
                      (runtime-controller-enqueue! self command))
   (cancel-durable-run [(self (ptr RuntimeRunController))
-                       (run-id (slice u8))]
-                      (-> i64)
-                      (runtime-controller-cancel! self run-id)))
+                       (command Json)]
+                      (-> RunCancellationResult)
+                      (runtime-controller-cancel! self command)))

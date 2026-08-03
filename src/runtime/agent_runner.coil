@@ -16,6 +16,12 @@
   [(max-model-turns i64)
    (max-parallel-tools i64)])
 
+(const RUN_LIFECYCLE_QUEUED 0)
+(const RUN_LIFECYCLE_RUNNING 1)
+(const RUN_LIFECYCLE_CANCEL_RESERVED 2)
+(const RUN_LIFECYCLE_CANCELLING 3)
+(const RUN_LIFECYCLE_TERMINAL 4)
+
 ;; Caller-owned request/provider dependencies must outlive the handle. The job itself
 ;; is allocator-owned and its completion flag is safe to poll from another thread.
 (defstruct AgentRunJob
@@ -26,7 +32,34 @@
    (emitter (ptr EventEmitter))
    (policy AgentRunPolicy)
    (result ModelResult)
+   (lifecycle (ptr i64))
    (completed (ptr i64))])
+
+(defn runner-terminal-event [(emitter (ptr EventEmitter))
+                             (request (ptr ModelRequest))
+                             (lifecycle (ptr i64))
+                             (kind EventKind)
+                             (payload Json)] (-> i64)
+  (block :terminal
+         (loop (let [state (atomic-load lifecycle)]
+                 (cond (= state RUN_LIFECYCLE_CANCEL_RESERVED) 0
+                       (= state RUN_LIFECYCLE_RUNNING)
+                         (when (= (atomic-cas lifecycle
+                                              RUN_LIFECYCLE_RUNNING
+                                              RUN_LIFECYCLE_TERMINAL)
+                                  RUN_LIFECYCLE_RUNNING)
+                           (return-from :terminal
+                                        (runner-event emitter request kind payload))
+                           0)
+                       (= state RUN_LIFECYCLE_CANCELLING)
+                         (when (= (atomic-cas lifecycle
+                                              RUN_LIFECYCLE_CANCELLING
+                                              RUN_LIFECYCLE_TERMINAL)
+                                  RUN_LIFECYCLE_CANCELLING)
+                           (return-from :terminal
+                                        (runner-event emitter request (RunCancelled) (JsonNull)))
+                           0)
+                       :else (return-from :terminal 0))))))
 
 (defstruct AgentRunHandle
   [(thread Thread)
@@ -84,6 +117,10 @@
                  (emitter (ptr EventEmitter))
                  (policy AgentRunPolicy)] (-> ModelResult)
   (let [current (box allocator ModelRequest (load request))
+        lifecycle
+          (if (= (load (field request run-lifecycle)) (cast (ptr i64) 0))
+              (box allocator i64 RUN_LIFECYCLE_QUEUED)
+              (load (field request run-lifecycle)))
         (mut turn) 0
         (mut finished) false
         (mut final) (runner-budget-failure)]
@@ -91,10 +128,12 @@
              (cast (ptr CancellationToken) 0))
       (store! (field current cancellation) (cancellation-token-new allocator))
       0)
+    (store! (field current run-lifecycle) lifecycle)
     (when (= (load (field current deadline-monotonic-ms)) 0)
       (store! (field current deadline-monotonic-ms)
               (deadline-from-timeout (load (field current timeout-ms))))
       0)
+    (atomic-cas lifecycle RUN_LIFECYCLE_QUEUED RUN_LIFECYCLE_RUNNING)
     (runner-event emitter current (RunStarted) (JsonNull))
     (loop (if (or (load finished)
                   (>= (load turn) (load (field policy max-model-turns))))
@@ -105,17 +144,22 @@
                             (runner-stop-failure (CancelledFailure)
                                                  "agent run cancelled"))
                     (store! finished true)
-                    (runner-event emitter current (RunCancelled) (JsonNull)))
+                    (runner-terminal-event emitter
+                                           current
+                                           lifecycle
+                                           (RunCancelled)
+                                           (JsonNull)))
                   (if (request-deadline-expired? current)
                       (do
                         (store! final
                                 (runner-stop-failure (TimeoutFailure)
                                                      "agent run deadline exceeded"))
                         (store! finished true)
-                        (runner-event emitter
-                                      current
-                                      (RunFailed)
-                                      (JsonString "agent run deadline exceeded")))
+                        (runner-terminal-event emitter
+                                               current
+                                               lifecycle
+                                               (RunFailed)
+                                               (JsonString "agent run deadline exceeded")))
                       (do
                         (store! turn (+ (load turn) 1))
                         (let [model-result (execute-model provider current emitter allocator)]
@@ -125,26 +169,32 @@
                                         (runner-stop-failure (CancelledFailure)
                                                              "agent run cancelled"))
                                 (store! finished true)
-                                (runner-event emitter current (RunCancelled) (JsonNull)))
+                                (runner-terminal-event emitter
+                                                       current
+                                                       lifecycle
+                                                       (RunCancelled)
+                                                       (JsonNull)))
                               (if (request-deadline-expired? current)
                                   (do
                                     (store! final
                                             (runner-stop-failure (TimeoutFailure)
                                                                  "agent run deadline exceeded"))
                                     (store! finished true)
-                                    (runner-event emitter
-                                                  current
-                                                  (RunFailed)
-                                                  (JsonString "agent run deadline exceeded")))
+                                    (runner-terminal-event emitter
+                                                           current
+                                                           lifecycle
+                                                           (RunFailed)
+                                                           (JsonString "agent run deadline exceeded")))
                                   (match model-result
                                     (ModelErr [failure]
                                               (let [failure-value failure]
                                                 (store! final (ModelErr failure))
                                                 (store! finished true)
-                                                (runner-event emitter
-                                                              current
-                                                              (RunFailed)
-                                                              (JsonString (load (field failure-value message))))))
+                                                (runner-terminal-event emitter
+                                                                       current
+                                                                       lifecycle
+                                                                       (RunFailed)
+                                                                       (JsonString (load (field failure-value message))))))
                                     (ModelOk [response]
                                              (let [response-value response
                                                    call-count
@@ -154,10 +204,12 @@
                                                    (do
                                                      (store! final (ModelOk response))
                                                      (store! finished true)
-                                                     (runner-event emitter
-                                                                   current
-                                                                   (RunCompleted)
-                                                                   (JsonString (load (field response-value response-id)))))
+                                                     (runner-terminal-event emitter
+                                                                            current
+                                                                            lifecycle
+                                                                            (RunCompleted)
+                                                                            (JsonString (load (field response-value
+                                                                                                     response-id)))))
                                                    (let [calls
                                                            (box allocator
                                                                 (ArrayList ToolCall)
@@ -196,10 +248,11 @@
                                                        ; the requested result has already been supplied.
                                                        (store! (field current tool-choice) (ToolsAuto))))))))))))))))
     (when (not (load finished))
-      (runner-event emitter
-                    current
-                    (RunFailed)
-                    (JsonString "model turn budget exhausted"))
+      (runner-terminal-event emitter
+                             current
+                             lifecycle
+                             (RunFailed)
+                             (JsonString "model turn budget exhausted"))
       0)
     (load final)))
 
@@ -238,6 +291,11 @@
     (store! (field job emitter) emitter)
     (store! (field job policy) policy)
     (store! (field job result) (runner-budget-failure))
+    (store! (field job lifecycle)
+            (if (= (load (field request run-lifecycle)) (cast (ptr i64) 0))
+                (box allocator i64 RUN_LIFECYCLE_QUEUED)
+                (load (field request run-lifecycle))))
+    (store! (field request run-lifecycle) (load (field job lifecycle)))
     (store! (field job completed) completed)
     (store! (field handle job) job)
     (store! (field handle spawned)
@@ -256,6 +314,40 @@
   (let [job (load (field handle job))
         request (load (field job request))]
     (cancellation-request! (load (field request cancellation)))))
+
+;; Reserve cancellation against terminal publication. While reserved, the worker
+;; cannot publish a terminal event; the controller durably publishes the request
+;; and then calls `agent-run-confirm-cancellation!`.
+(defn agent-run-reserve-cancellation! [(handle (ptr AgentRunHandle))] (-> i64)
+  (let [lifecycle (load (field (load (field handle job)) lifecycle))]
+    (block :reserve
+           (loop (let [state (atomic-load lifecycle)]
+                   (cond (= state RUN_LIFECYCLE_QUEUED) 0
+                         (= state RUN_LIFECYCLE_RUNNING)
+                           (when (= (atomic-cas lifecycle
+                                                RUN_LIFECYCLE_RUNNING
+                                                RUN_LIFECYCLE_CANCEL_RESERVED)
+                                    RUN_LIFECYCLE_RUNNING)
+                             (return-from :reserve 0)
+                             0)
+                         (= state RUN_LIFECYCLE_CANCEL_RESERVED) (return-from :reserve 1)
+                         (= state RUN_LIFECYCLE_CANCELLING) (return-from :reserve 1)
+                         :else (return-from :reserve -1)))))))
+
+(defn agent-run-confirm-cancellation! [(handle (ptr AgentRunHandle))] (-> i64)
+  (let [job (load (field handle job))
+        request (load (field job request))]
+    (cancellation-request! (load (field request cancellation)))
+    (atomic-cas (load (field job lifecycle))
+                RUN_LIFECYCLE_CANCEL_RESERVED
+                RUN_LIFECYCLE_CANCELLING)
+    0))
+
+(defn agent-run-abort-cancellation! [(handle (ptr AgentRunHandle))] (-> i64)
+  (atomic-cas (load (field (load (field handle job)) lifecycle))
+              RUN_LIFECYCLE_CANCEL_RESERVED
+              RUN_LIFECYCLE_RUNNING)
+  0)
 
 ;; Join exactly once and return the terminal result. A second join is harmless and
 ;; returns the stored result. A spawn failure is reported as a configuration failure.

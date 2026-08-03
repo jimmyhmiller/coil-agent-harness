@@ -1,43 +1,45 @@
 (module harness-shutdown-signal)
 
 (import "coil.alloc" :as alloc :use *)
-(import "coil.atomic" :use *)
 
-(extern signal
-        :cc
-        c
-        [i32 (fnptr c [i32] i64)]
-        (-> (fnptr c [i32] i64)))
-
-(const HARNESS_SIGINT 2)
-(const HARNESS_SIGTERM 15)
+(extern harness_shutdown_open :cc c [] (-> (ptr i8)))
+(extern harness_shutdown_install :cc c [(ptr i8)] (-> i64))
+(extern harness_shutdown_request :cc c [(ptr i8)] (-> i64))
+(extern harness_shutdown_requested :cc c [(ptr i8)] (-> i64))
+(extern harness_shutdown_wait_listener :cc c [(ptr i8) i32 i32] (-> i64))
+(extern harness_shutdown_close :cc c [(ptr i8)] (-> i64))
 
 (defstruct ShutdownSignal
-  [(requested (ptr i64))])
-
-;; Signal handlers cannot safely allocate or take locks. This process-global
-;; cell lets the handler perform one atomic store; the server observes it from
-;; its bounded poll loop.
-(defn shutdown-signal-cell [] (-> (ptr i64))
-  (alloc/static i64))
-
-(defn shutdown-signal-handle [(signal-number i32)] (-> i64)
-  (atomic-store (shutdown-signal-cell) 1))
+  [(handle (ptr i8))])
 
 (defn shutdown-signal-new [] (-> ShutdownSignal)
   (let [shutdown (alloc/stack ShutdownSignal)]
-    (atomic-store (shutdown-signal-cell) 0)
-    (store! (field shutdown requested) (shutdown-signal-cell))
+    (store! (field shutdown handle) (harness_shutdown_open))
     (load shutdown)))
 
+(defn shutdown-signal-valid? [(shutdown (ptr ShutdownSignal))] (-> bool)
+  (!= (load (field shutdown handle)) (cast (ptr i8) 0)))
+
 (defn shutdown-signal-install! [(shutdown (ptr ShutdownSignal))] (-> i64)
-  (atomic-store (load (field shutdown requested)) 0)
-  (signal HARNESS_SIGINT (fnptr-of shutdown-signal-handle))
-  (signal HARNESS_SIGTERM (fnptr-of shutdown-signal-handle))
-  0)
+  (harness_shutdown_install (load (field shutdown handle))))
 
 (defn shutdown-signal-request! [(shutdown (ptr ShutdownSignal))] (-> i64)
-  (atomic-store (load (field shutdown requested)) 1))
+  (harness_shutdown_request (load (field shutdown handle))))
 
 (defn shutdown-signal-requested? [(shutdown (ptr ShutdownSignal))] (-> bool)
-  (= (atomic-load (load (field shutdown requested))) 1))
+  (= (harness_shutdown_requested (load (field shutdown handle))) 1))
+
+(defn shutdown-signal-wait-listener [(shutdown (ptr ShutdownSignal))
+                                     (listener-fd i64)
+                                     (timeout-ms i64)] (-> i64)
+  (harness_shutdown_wait_listener (load (field shutdown handle))
+                                  (cast i32 listener-fd)
+                                  (cast i32 timeout-ms)))
+
+(defn shutdown-signal-close! [(shutdown (ptr ShutdownSignal))] (-> i64)
+  (let [handle (load (field shutdown handle))]
+    (if (= handle (cast (ptr i8) 0))
+        0
+        (do
+          (store! (field shutdown handle) (cast (ptr i8) 0))
+          (harness_shutdown_close handle)))))

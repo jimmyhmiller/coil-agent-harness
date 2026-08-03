@@ -300,6 +300,7 @@
                    (ListenerOpened [opened] (store! listener opened)))
                  (when (< (service-recover-runs! service) 0)
                    (write-line 2 "could not recover durable runs")
+                   (runtime-controller-join-all! controller)
                    (http-listener-close! listener)
                    (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
@@ -310,19 +311,26 @@
                                               (json-stringify allocator
                                                               (json-integer allocator
                                                                             (load (field listener port))))))
-                 (let [shutdown (alloc/stack ShutdownSignal)]
+                 (let [shutdown (alloc/stack ShutdownSignal)
+                       (mut server-code) 0]
                    (store! shutdown (shutdown-signal-new))
-                   (shutdown-signal-install! shutdown)
-                   (serve-run-service-until-shutdown allocator
-                                                     listener
-                                                     service
-                                                     auth-token
-                                                     shutdown))
-                 (runtime-controller-join-all! controller)
-                 (http-listener-close! listener)
-                 (authorization-mailbox-close! allocator mailbox)
-                 (event-journal-close! journal)
-                 0))))))
+                   (if (or (not (shutdown-signal-valid? shutdown))
+                           (!= (shutdown-signal-install! shutdown) 0))
+                       (do
+                         (write-line 2 "could not install shutdown signal handlers")
+                         (store! server-code -1))
+                       (store! server-code
+                               (serve-run-service-until-shutdown allocator
+                                                                 listener
+                                                                 service
+                                                                 auth-token
+                                                                 shutdown)))
+                   (shutdown-signal-close! shutdown)
+                   (runtime-controller-join-all! controller)
+                   (http-listener-close! listener)
+                   (authorization-mailbox-close! allocator mailbox)
+                   (event-journal-close! journal)
+                   (if (= (load server-code) 0) 0 74))))))))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [count (cast i64 argc)]

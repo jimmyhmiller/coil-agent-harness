@@ -15,18 +15,11 @@
 (extern setsockopt :cc c [i32 i32 i32 (ptr i8) u32] (-> i32))
 (extern bind :cc c [i32 (ptr i8) u32] (-> i32))
 (extern listen :cc c [i32 i32] (-> i32))
-(extern accept :cc c [i32 (ptr i8) (ptr u32)] (-> i32))
+(extern harness_accept_with_timeout :cc c [i32 i32] (-> i64))
 (extern getsockname :cc c [i32 (ptr i8) (ptr u32)] (-> i32))
-(extern poll :cc c [(ptr HarnessPollFd) u64 i32] (-> i32))
 
 (const HARNESS_AF_INET 2)
 (const HARNESS_SOCK_STREAM 1)
-(const HARNESS_POLL_IN 1)
-
-(defstruct HarnessPollFd
-  [(fd i32)
-   (events i16)
-   (returned-events i16)])
 
 (defn listener-socket-options [] (-> Code)
   (if (primitive/code-eq (primitive/target-os) `linux)
@@ -111,22 +104,7 @@
     0))
 
 (defn http-listener-accept [(listener (ptr HttpListener))] (-> i64)
-  (cast i64
-        (accept (cast i32 (load (field listener fd)))
-                (cast (ptr i8) 0)
-                (cast (ptr u32) 0))))
-
-;; Return 1 when accept will not block, 0 on timeout, and -1 on poll failure.
-(defn http-listener-wait-readable [(listener (ptr HttpListener))
-                                   (timeout-ms i64)] (-> i64)
-  (let [descriptor (alloc/stack HarnessPollFd)]
-    (store! (field descriptor fd) (cast i32 (load (field listener fd))))
-    (store! (field descriptor events) (cast i16 HARNESS_POLL_IN))
-    (store! (field descriptor returned-events) (cast i16 0))
-    (let [result (poll descriptor (cast u64 1) (cast i32 timeout-ms))]
-      (cond (> (cast i64 result) 0) 1
-            (= (cast i64 result) 0) 0
-            :else -1))))
+  (harness_accept_with_timeout (cast i32 (load (field listener fd))) 1000))
 
 (defn push-http-crlf! [(buffer (mut StrBuf))] (-> i64)
   (sb-push-byte! (mut buffer) (cast u8 13))

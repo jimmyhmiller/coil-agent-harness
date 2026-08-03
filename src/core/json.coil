@@ -43,6 +43,51 @@
   (JsonObject (box allocator (ArrayList (slice u8)) (al-new [(slice u8)] allocator))
               (box allocator (ArrayList Json) (al-new [Json] allocator))))
 
+(defn json-copy-string [(allocator (ptr Allocator))
+                        (value (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) value)
+    (sb-str (load buffer))))
+
+(defn json-clone [(allocator (ptr Allocator)) (value Json)] (-> Json)
+  (match value
+    (JsonNull [] (JsonNull))
+    (JsonBool [boolean] (JsonBool boolean))
+    (JsonNumber [raw] (JsonNumber (json-copy-string allocator raw)))
+    (JsonString [text] (JsonString (json-copy-string allocator text)))
+    (JsonArray [items]
+               (let [(mut cloned) (json-array allocator)
+                     (mut i) 0
+                     n (al-len [Json] (load items))]
+                 (loop (if (>= (load i) n)
+                           (break)
+                           (do
+                             (json-array-push! (mut cloned)
+                                               (json-clone allocator
+                                                           (al-get [Json]
+                                                                   (load items)
+                                                                   (load i))))
+                             (store! i (+ (load i) 1)))))
+                 (load cloned)))
+    (JsonObject [keys values]
+                (let [(mut cloned) (json-object allocator)
+                      (mut i) 0
+                      n (al-len [(slice u8)] (load keys))]
+                  (loop (if (>= (load i) n)
+                            (break)
+                            (do
+                              (json-object-put! (mut cloned)
+                                                (json-copy-string allocator
+                                                                  (al-get [(slice u8)]
+                                                                          (load keys)
+                                                                          (load i)))
+                                                (json-clone allocator
+                                                            (al-get [Json]
+                                                                    (load values)
+                                                                    (load i))))
+                              (store! i (+ (load i) 1)))))
+                  (load cloned)))))
+
 ;; Append a value to an array. Returns false when `array` is not an array.
 (defn json-array-push! [(array (mut Json)) (value Json)] (-> bool)
   (match-else (load array)

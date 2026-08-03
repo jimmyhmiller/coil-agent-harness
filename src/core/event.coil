@@ -56,7 +56,8 @@
 ;; model and tool workers may publish concurrently.
 (defstruct EventEmitter
   [(sink (dyn EventSink))
-   (next-sequence (ptr i64))])
+   (next-sequence (ptr i64))
+   (publish-lock i64)])
 
 ;; Create an emitter over caller-owned sequence storage. The sequence cell must
 ;; outlive every worker that uses the emitter.
@@ -64,7 +65,17 @@
   (let [emitter (alloc/stack EventEmitter)]
     (store! (field emitter sink) sink)
     (store! (field emitter next-sequence) next-sequence)
+    (store! (field emitter publish-lock) 0)
     (load emitter)))
+
+(defn event-emitter-lock! [(emitter (ptr EventEmitter))] (-> i64)
+  (loop (if (= (atomic-cas (field emitter publish-lock) 0 1) 0)
+            (break)
+            0))
+  0)
+
+(defn event-emitter-unlock! [(emitter (ptr EventEmitter))] (-> i64)
+  (atomic-store (field emitter publish-lock) 0))
 
 ;; Publish one event and return its assigned sequence number.
 (defn emit-event [(emitter (ptr EventEmitter))
@@ -76,6 +87,7 @@
                   (provider (slice u8))
                   (model (slice u8))
                   (payload Json)] (-> i64)
+  (event-emitter-lock! emitter)
   (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
         event (alloc/stack Event)
         sink (field emitter sink)]
@@ -89,8 +101,9 @@
     (store! (field event provider) provider)
     (store! (field event model) model)
     (store! (field event payload) payload)
-    (publish-event (load sink) event)
-    sequence))
+    (let [publish-code (publish-event (load sink) event)]
+      (event-emitter-unlock! emitter)
+      (if (= publish-code 0) sequence -1))))
 
 ;; Stable wire name for an event category.
 (defn event-kind-name [(kind EventKind)] (-> (slice u8))

@@ -52,6 +52,7 @@
    (timeout-ms i64)
    (deadline-monotonic-ms i64)
    (cancellation (ptr CancellationToken))
+   (run-lifecycle (ptr i64))
    (continuation ModelContinuation)])
 
 (defn model-request-cancelled? [(request (ptr ModelRequest))] (-> bool)

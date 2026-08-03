@@ -7,11 +7,13 @@
 (import "coil.match" :use *)
 (import "coil.str" :use *)
 (import "harness-event" :use *)
+(import "harness-allocation-domain" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
 (import "harness-run-service" :use *)
+(import "harness-run-state" :use *)
 (import "harness-runtime-controller" :use *)
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
@@ -131,7 +133,7 @@
                                                 mailbox
                                                 path))
                  command (controller-command allocator)
-                 request (runtime-model-request controller command)]
+                 request (runtime-model-request controller command allocator)]
              (assert (str-eq (load (field request run-id)) "controller-run"))
              (assert (str-eq (load (field request instructions)) "test instructions"))
              (assert-eq (load (field request timeout-ms)) 5000)
@@ -180,6 +182,7 @@
 
 (deftest drains-durable-runs-in-fifo-order-within-the-capacity-limit
          (let [allocator (malloc-allocator)
+               domains-before (allocation-domain-live-count)
                path "/tmp/coil-agent-harness-runtime-queue.jsonl"
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
@@ -221,17 +224,39 @@
                                                 path))
                  (mut first) (controller-command allocator)
                  (mut second) (controller-command allocator)
+                 (mut raced) (controller-command allocator)
                  (mut cancelled) (controller-command allocator)]
              (store! (field controller max-active-runs) 0)
              (json-put-string! (mut cancelled) "run_id" "queued-run-cancelled")
              (json-put-string! (mut cancelled) "provider" "queued-fake")
              (assert-eq (start-durable-run controller (load cancelled)) 0)
-             (assert-eq (cancel-durable-run controller "queued-run-cancelled") 1)
-             (store! (field controller max-active-runs) 1)
+             (assert (match (cancel-durable-run controller (load cancelled))
+                       (RunCancellationAccepted [] true)
+                       (RunCancellationTerminalOrMissing [] false)
+                       (RunCancellationFailed [] false)))
+             (store! (field controller max-active-runs) 2)
              (json-put-string! (mut first) "run_id" "queued-run-one")
              (json-put-string! (mut first) "provider" "queued-fake")
              (json-put-string! (mut second) "run_id" "queued-run-two")
              (json-put-string! (mut second) "provider" "queued-fake")
+             (emit-event emitter
+                         0
+                         (RunCreated)
+                         "queued-run-one"
+                         "queued-run-one"
+                         ""
+                         "queued-fake"
+                         "fake-model"
+                         (load first))
+             (emit-event emitter
+                         0
+                         (RunCreated)
+                         "queued-run-two"
+                         "queued-run-two"
+                         ""
+                         "queued-fake"
+                         "fake-model"
+                         (load second))
              (assert-eq (start-durable-run controller (load first)) 0)
              (assert-eq (start-durable-run controller (load second)) 0)
              (let [(mut attempt) 0]
@@ -243,17 +268,48 @@
                            (sleep-ms 5)
                            (store! attempt (+ (load attempt) 1))))))
              (sleep-ms 20)
+             (store! (field controller max-active-runs) 1)
+             (json-put-string! (mut raced) "run_id" "completion-cancellation-race")
+             (json-put-string! (mut raced) "provider" "queued-fake")
+             (emit-event emitter
+                         0
+                         (RunCreated)
+                         "completion-cancellation-race"
+                         "completion-cancellation-race"
+                         ""
+                         "queued-fake"
+                         "fake-model"
+                         (load raced))
+             (assert-eq (start-durable-run controller (load raced)) 0)
+             (let [(mut attempt) 0]
+               (loop (if (or (= (atomic-load (load (field state calls))) 3)
+                             (>= (load attempt) 200))
+                         (break)
+                         (do
+                           (sleep-ms 1)
+                           (store! attempt (+ (load attempt) 1))))))
+             (sleep-ms 20)
+             (assert (match (cancel-durable-run controller (load raced))
+                       (RunCancellationAccepted [] true)
+                       (RunCancellationTerminalOrMissing [] true)
+                       (RunCancellationFailed [] false)))
+             (sleep-ms 40)
              (runtime-controller-join-all! controller)
-             (assert-eq (atomic-load (load (field state calls))) 2)
-             (assert-eq (atomic-load (load (field state max-active))) 1)
+             (assert-eq (atomic-load (load (field state calls))) 3)
+             (assert-eq (atomic-load (load (field state max-active))) 2)
              (let [recovery (event-journal-recover allocator path)]
                (assert (load (field recovery ok)))
-               (assert-eq (al-len [Json] (load (field recovery events))) 4)
-               (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 0)
-                                               "run_id")
-                               "queued-run-one"))
-               (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 2)
-                                               "run_id")
-                               "queued-run-two"))))
+               (let [first-view (project-run (field recovery events) "queued-run-one")
+                     second-view (project-run (field recovery events) "queued-run-two")
+                     race-view
+                       (project-run (field recovery events)
+                                    "completion-cancellation-race")]
+                 (assert (load (field first-view valid)))
+                 (assert (load (field first-view terminal)))
+                 (assert (load (field second-view valid)))
+                 (assert (load (field second-view terminal)))
+                 (assert (load (field race-view valid)))
+                 (assert (load (field race-view terminal))))))
+           (assert-eq (allocation-domain-live-count) domains-before)
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))

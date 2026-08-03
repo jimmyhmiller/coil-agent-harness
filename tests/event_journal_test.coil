@@ -6,9 +6,32 @@
 (import "coil.match" :use *)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
+(import "coil.thread" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
+
+(defstruct ConcurrentEventJob
+  [(emitter (ptr EventEmitter))
+   (count i64)])
+
+(defn concurrent-event-worker [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr ConcurrentEventJob) opaque)
+        (mut i) 0]
+    (loop (if (>= (load i) (load (field job count)))
+              (break)
+              (do
+                (emit-event (load (field job emitter))
+                            (load i)
+                            (CodexNotification)
+                            "concurrent-run"
+                            "concurrent-operation"
+                            ""
+                            "test"
+                            "test"
+                            (JsonNull))
+                (store! i (+ (load i) 1)))))
+    (cast (ptr i8) 0)))
 
 (deftest persists-ordered-events-and-recovers-past-a-torn-tail
          (let [allocator (malloc-allocator)
@@ -65,3 +88,40 @@
              (assert (not (load (field recovery ok))))
              (assert (str-eq (load (field recovery error))
                              "event journal contains invalid JSON")))))
+
+(deftest serializes-sequence-assignment-with-concurrent-publication
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-journal-concurrent.jsonl"
+               sequence (box allocator i64 1)
+               journal (alloc/stack EventJournal)
+               emitter (alloc/stack EventEmitter)
+               first-job (alloc/stack ConcurrentEventJob)
+               second-job (alloc/stack ConcurrentEventJob)
+               first-thread (alloc/stack Thread)
+               second-thread (alloc/stack Thread)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path false)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (store! (field first-job emitter) emitter)
+           (store! (field first-job count) 200)
+           (store! (field second-job emitter) emitter)
+           (store! (field second-job count) 200)
+           (assert-eq (cast i64
+                            (thread-spawn first-thread
+                                          (fnptr-of concurrent-event-worker)
+                                          (cast (ptr i8) first-job)))
+                      0)
+           (assert-eq (cast i64
+                            (thread-spawn second-thread
+                                          (fnptr-of concurrent-event-worker)
+                                          (cast (ptr i8) second-job)))
+                      0)
+           (thread-join first-thread)
+           (thread-join second-thread)
+           (event-journal-close! journal)
+           (let [recovery (event-journal-recover allocator path)]
+             (assert (load (field recovery ok)))
+             (assert-eq (load (field recovery last-sequence)) 400)
+             (assert-eq (al-len [Json] (load (field recovery events))) 400))))

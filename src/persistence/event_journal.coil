@@ -12,6 +12,7 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-event" :use *)
+(import "harness-allocation-domain" :use *)
 (import "harness-json" :use *)
 (import "provider-common" :use *)
 
@@ -108,23 +109,31 @@
   (= (atomic-load (load (field journal failed))) 1))
 
 (defn event-journal-publish [(journal (ptr EventJournal)) (event (ptr Event))] (-> i64)
-  (let [allocator (load (field journal allocator))
-        encoded (json-stringify allocator (event-to-json allocator event))]
-    (journal-lock! (load (field journal lock)))
-    (let [writer (alloc/stack io/Writer)
-          fd (load (field journal fd))
-          (mut result) -1]
-      (if (< fd 0)
+  (let [owner (load (field journal allocator))
+        domain (allocation-domain-open owner)]
+    (if (not (allocation-domain-valid? domain))
+        (do
+          (allocation-domain-close! owner domain)
           (atomic-store (load (field journal failed)) 1)
-          (match (io/write-line (io/fd-writer writer fd) encoded)
-            (Err [failure] (atomic-store (load (field journal failed)) 1))
-            (Ok [written]
-                (if (and (load (field journal sync-each-event))
-                         (!= (cast i64 (fsync (cast i32 fd))) 0))
-                    (atomic-store (load (field journal failed)) 1)
-                    (store! result 0)))))
-      (journal-unlock! (load (field journal lock)))
-      (load result))))
+          -1)
+        (let [allocator (allocation-domain-allocator domain)
+              encoded (json-stringify allocator (event-to-json allocator event))]
+          (journal-lock! (load (field journal lock)))
+          (let [writer (alloc/stack io/Writer)
+                fd (load (field journal fd))
+                (mut result) -1]
+            (if (< fd 0)
+                (atomic-store (load (field journal failed)) 1)
+                (match (io/write-line (io/fd-writer writer fd) encoded)
+                  (Err [failure] (atomic-store (load (field journal failed)) 1))
+                  (Ok [written]
+                      (if (and (load (field journal sync-each-event))
+                               (!= (cast i64 (fsync (cast i32 fd))) 0))
+                          (atomic-store (load (field journal failed)) 1)
+                          (store! result 0)))))
+            (journal-unlock! (load (field journal lock)))
+            (allocation-domain-close! owner domain)
+            (load result))))))
 
 (impl EventSink EventJournal
   (publish-event [(self (ptr EventJournal)) (event (ptr Event))]

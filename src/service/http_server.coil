@@ -5,6 +5,7 @@
 (import "coil.os" :as os)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
+(import "harness-allocation-domain" :use *)
 (import "harness-http-listener" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
@@ -26,25 +27,34 @@
                                 (request-value http/Request)] (-> i64)
   (let [expected (concat-or-empty allocator "Bearer " auth-token)
         supplied (http/header request-value "Authorization")
+        domain (allocation-domain-open allocator)
+        request-allocator (allocation-domain-allocator domain)
+        previous-allocator (load (field service allocator))
         (mut result) -1]
-    (if (or (= (slice-len [u8] auth-token) 0)
-            (not (str-eq supplied expected)))
-        (store! result
-                (write-service-response! allocator
-                                         client-fd
-                                         (service-error allocator
-                                                        401
-                                                        "unauthorized"
-                                                        "valid bearer authentication is required")))
-        (let [request (alloc/stack ServiceHttpRequest)]
-          (store! (field request method) (http/method request-value))
-          (store! (field request target) (http/target request-value))
-          (store! (field request body) (http/body request-value))
-          (store! result
-                  (write-service-response! allocator
-                                           client-fd
-                                           (service-handle-http service request)))))
+    (if (not (allocation-domain-valid? domain))
+        (store! result -1)
+        (do
+          (store! (field service allocator) request-allocator)
+          (if (or (= (slice-len [u8] auth-token) 0)
+                  (not (str-eq supplied expected)))
+              (store! result
+                      (write-service-response! request-allocator
+                                               client-fd
+                                               (service-error request-allocator
+                                                              401
+                                                              "unauthorized"
+                                                              "valid bearer authentication is required")))
+              (let [request (alloc/stack ServiceHttpRequest)]
+                (store! (field request method) (http/method request-value))
+                (store! (field request target) (http/target request-value))
+                (store! (field request body) (http/body request-value))
+                (store! result
+                        (write-service-response! request-allocator
+                                                 client-fd
+                                                 (service-handle-http service request)))))
+          (store! (field service allocator) previous-allocator)))
     (http/request-free request-value)
+    (allocation-domain-close! allocator domain)
     (load result)))
 
 (defn serve-run-service-once [(allocator (ptr Allocator))
@@ -89,16 +99,21 @@
                                         (service (ptr RunService))
                                         (auth-token (slice u8))
                                         (shutdown (ptr ShutdownSignal))] (-> i64)
-  (loop (if (shutdown-signal-requested? shutdown)
-            (break)
-            (let [ready (http-listener-wait-readable listener 100)]
-              (cond (= ready 0) 0
-                    (< ready 0) (break)
-                    (!= (serve-run-service-once allocator
-                                                listener
-                                                service
-                                                auth-token)
-                        0)
-                      (break)
-                    :else 0))))
-  0)
+  (let [(mut result) 0]
+    (loop (if (shutdown-signal-requested? shutdown)
+              (break)
+              (let [ready
+                      (shutdown-signal-wait-listener shutdown
+                                                     (load (field listener fd))
+                                                     100)]
+                (cond (= ready 0) 0
+                      (= ready 2) (break)
+                      (< ready 0) (do (store! result -1) (break))
+                      (!= (serve-run-service-once allocator
+                                                  listener
+                                                  service
+                                                  auth-token)
+                          0)
+                        (do (store! result -1) (break))
+                      :else 0))))
+    (load result)))

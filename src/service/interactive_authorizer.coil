@@ -136,17 +136,37 @@
 (defn interactive-expire! [(self (ptr InteractiveAuthorizer))
                            (authorization-id (slice u8))
                            (reason (slice u8))] (-> AuthorizationDecision)
-  (emit-event (load (field self emitter))
-              (now-ms)
-              (AuthorizationExpired)
-              (load (field self run-id))
-              authorization-id
-              (load (field self parent-operation-id))
-              (load (field self provider))
-              (load (field self model))
-              (JsonString reason))
-  (authorization-mailbox-notify! (load (field self mailbox)))
-  (Reject reason))
+  (let [mailbox (load (field self mailbox))
+        allocator (load (field self allocator))
+        (mut result) (Reject reason)
+        (mut expired) false]
+    (authorization-mailbox-lock! mailbox)
+    (let [recovery
+            (event-journal-recover allocator
+                                   (load (field self journal-path)))]
+      (if (not (load (field recovery ok)))
+          (store! result (Reject "authorization journal unavailable"))
+          (match (authorization-decision (field recovery events)
+                                         (load (field self run-id))
+                                         authorization-id)
+            (AuthorizationAllowed [] (store! result (Authorize)))
+            (AuthorizationRejected [decision-reason]
+                                   (store! result (Reject decision-reason)))
+            (AuthorizationPending []
+                                  (do
+                                    (emit-event (load (field self emitter))
+                                                (now-ms)
+                                                (AuthorizationExpired)
+                                                (load (field self run-id))
+                                                authorization-id
+                                                (load (field self parent-operation-id))
+                                                (load (field self provider))
+                                                (load (field self model))
+                                                (JsonString reason))
+                                    (store! expired true))))))
+    (authorization-mailbox-unlock! mailbox)
+    (when (load expired) (authorization-mailbox-notify! mailbox) 0)
+    (load result)))
 
 (defn interactive-wait-timeout [(deadline i64)] (-> i64)
   (if (> deadline 0)

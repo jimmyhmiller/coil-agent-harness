@@ -7,6 +7,8 @@
 (import "harness-shutdown-signal" :use *)
 (import "harness-system" :use *)
 
+(extern raise :cc c [i32] (-> i32))
+
 (defstruct ListenerWaitJob
   [(listener (ptr HttpListener))
    (shutdown (ptr ShutdownSignal))
@@ -19,7 +21,9 @@
               (break)
               (if (shutdown-signal-requested? (load (field job shutdown)))
                   (store! done true)
-                  (http-listener-wait-readable (load (field job listener)) 25))))
+                  (shutdown-signal-wait-listener (load (field job shutdown))
+                                                 (load (field (load (field job listener)) fd))
+                                                 25))))
     (store! (load (field job result)) 0)
     (cast (ptr i8) 0)))
 
@@ -33,6 +37,7 @@
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
            (store! shutdown (shutdown-signal-new))
+           (assert (shutdown-signal-valid? shutdown))
            (store! result -1)
            (store! (field job listener) listener)
            (store! (field job shutdown) shutdown)
@@ -46,4 +51,21 @@
            (shutdown-signal-request! shutdown)
            (thread-join worker)
            (assert-eq (load result) 0)
+           (shutdown-signal-close! shutdown)
            (http-listener-close! listener)))
+
+(deftest installed-sigterm-wakes-the-shutdown-pipe
+         (let [shutdown (alloc/stack ShutdownSignal)]
+           (store! shutdown (shutdown-signal-new))
+           (assert (shutdown-signal-valid? shutdown))
+           (assert-eq (shutdown-signal-install! shutdown) 0)
+           (assert-eq (cast i64 (raise 15)) 0)
+           (let [(mut attempt) 0]
+             (loop (if (or (shutdown-signal-requested? shutdown)
+                           (>= (load attempt) 100))
+                       (break)
+                       (do
+                         (sleep-ms 1)
+                         (store! attempt (+ (load attempt) 1))))))
+           (assert (shutdown-signal-requested? shutdown))
+           (shutdown-signal-close! shutdown)))

@@ -14,9 +14,14 @@
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
+(defsum RunCancellationResult
+  (RunCancellationAccepted [])
+  (RunCancellationTerminalOrMissing [])
+  (RunCancellationFailed []))
+
 (deftrait RunController [Self]
   (start-durable-run [(self (ptr Self)) (command Json)] (-> i64))
-  (cancel-durable-run [(self (ptr Self)) (run-id (slice u8))] (-> i64)))
+  (cancel-durable-run [(self (ptr Self)) (command Json)] (-> RunCancellationResult)))
 
 (defstruct RunService
   [(allocator (ptr Allocator))
@@ -82,32 +87,42 @@
               (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
               (if (> (journal-command-sequence (field recovery events) command-id) 0)
                   (service-run-response service (field recovery events) run-id 200)
-                  (let [provider (command-string command "provider")
-                        model (command-string command "model")]
-                    (emit-event (load (field service emitter))
-                                (now-ms)
-                                (RunCreated)
-                                run-id
-                                run-id
-                                ""
-                                provider
-                                model
-                                command)
-                    (if (event-journal-failed? (load (field service journal)))
-                        (service-error allocator 500 "journal_write_failed" "create command was not durable")
-                        (let [start-code
-                                (start-durable-run (load (field service controller))
-                                                   command)
-                              refreshed (service-recover service)]
-                          (if (!= start-code 0)
-                              (service-error allocator
-                                             503
-                                             "run_start_failed"
-                                             "run was durably queued but could not start")
-                              (service-run-response service
-                                                    (field refreshed events)
-                                                    run-id
-                                                    202)))))))))))
+                  (let [view (project-run (field recovery events) run-id)]
+                    (match-else (load (field view status))
+                                (RunNotFound []
+                                             (let [provider (command-string command "provider")
+                                                   model (command-string command "model")]
+                                               (emit-event (load (field service emitter))
+                                                           (now-ms)
+                                                           (RunCreated)
+                                                           run-id
+                                                           run-id
+                                                           ""
+                                                           provider
+                                                           model
+                                                           command)
+                                               (if (event-journal-failed? (load (field service journal)))
+                                                   (service-error allocator
+                                                                  500
+                                                                  "journal_write_failed"
+                                                                  "create command was not durable")
+                                                   (let [start-code
+                                                           (start-durable-run (load (field service controller))
+                                                                              command)
+                                                         refreshed (service-recover service)]
+                                                     (if (!= start-code 0)
+                                                         (service-error allocator
+                                                                        503
+                                                                        "run_start_failed"
+                                                                        "run was durably queued but could not start")
+                                                         (service-run-response service
+                                                                               (field refreshed events)
+                                                                               run-id
+                                                                               202))))))
+                                (_ (service-error allocator
+                                                  409
+                                                  "run_exists"
+                                                  "run_id already exists"))))))))))
 
 (defn service-cancel-run [(service (ptr RunService))
                           (command Json)] (-> ServiceResponse)
@@ -134,40 +149,33 @@
                                                                    409
                                                                    "run_terminal"
                                                                    "run is already terminal"))
-                                (_ (do
-                                     (emit-event (load (field service emitter))
-                                                 (now-ms)
-                                                 (RunCancellationRequested)
-                                                 run-id
-                                                 run-id
-                                                 ""
-                                                 (load (field view provider))
-                                                 (load (field view model))
-                                                 command)
-                                     (if (event-journal-failed? (load (field service journal)))
-                                         (service-error allocator
-                                                        500
-                                                        "journal_write_failed"
-                                                        "cancellation command was not durable")
-                                         (let [cancel-code
-                                                 (cancel-durable-run (load (field service controller))
-                                                                     run-id)]
-                                           (when (!= cancel-code 0)
-                                             (emit-event (load (field service emitter))
-                                                         (now-ms)
-                                                         (RunCancelled)
-                                                         run-id
-                                                         run-id
-                                                         ""
-                                                         (load (field view provider))
-                                                         (load (field view model))
-                                                         (JsonString "run had no active worker"))
-                                             0)
-                                           (let [refreshed (service-recover service)]
-                                             (service-run-response service
-                                                                   (field refreshed events)
-                                                                   run-id
-                                                                   202))))))))))))))
+                                (_ (match (cancel-durable-run (load (field service controller))
+                                                              command)
+                                     (RunCancellationAccepted []
+                                                              (let [refreshed (service-recover service)]
+                                                                (service-run-response service
+                                                                                      (field refreshed events)
+                                                                                      run-id
+                                                                                      202)))
+                                     (RunCancellationTerminalOrMissing []
+                                                                       (let [refreshed (service-recover service)
+                                                                             refreshed-view
+                                                                               (project-run (field refreshed events)
+                                                                                            run-id)]
+                                                                         (if (load (field refreshed-view terminal))
+                                                                             (service-error allocator
+                                                                                            409
+                                                                                            "run_terminal"
+                                                                                            "run is already terminal")
+                                                                             (service-error allocator
+                                                                                            503
+                                                                                            "run_not_active"
+                                                                                            "run has no active controller state"))))
+                                     (RunCancellationFailed []
+                                                            (service-error allocator
+                                                                           500
+                                                                           "journal_write_failed"
+                                                                           "cancellation command was not durable"))))))))))))
 
 (defn service-query-run [(service (ptr RunService))
                          (run-id (slice u8))] (-> ServiceResponse)
@@ -241,6 +249,64 @@
               (Some [value] (or (str-eq value "allow") (str-eq value "reject")))
               (None [] false)))))
 
+(defn service-commit-authorization-decision [(service (ptr RunService))
+                                             (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        mailbox (load (field service mailbox))
+        run-id (command-string command "run_id")
+        authorization-id (command-string command "authorization_id")
+        (mut response) (service-error allocator 500 "journal_recovery_failed" "authorization journal unavailable")
+        (mut decided) false]
+    (authorization-mailbox-lock! mailbox)
+    (let [recovery (service-recover service)]
+      (if (not (load (field recovery ok)))
+          (store! response
+                  (service-error allocator
+                                 500
+                                 "journal_recovery_failed"
+                                 (load (field recovery error))))
+          (match (authorization-decision (field recovery events)
+                                         run-id
+                                         authorization-id)
+            (AuthorizationAllowed []
+                                  (store! response
+                                          (service-error allocator
+                                                         409
+                                                         "authorization_decided"
+                                                         "authorization already has a decision")))
+            (AuthorizationRejected [reason]
+                                   (store! response
+                                           (service-error allocator
+                                                          409
+                                                          "authorization_decided"
+                                                          "authorization already has a decision")))
+            (AuthorizationPending []
+                                  (if (< (emit-event (load (field service emitter))
+                                                     (now-ms)
+                                                     (AuthorizationDecided)
+                                                     run-id
+                                                     authorization-id
+                                                     ""
+                                                     "service"
+                                                     ""
+                                                     command)
+                                         0)
+                                      (store! response
+                                              (service-error allocator
+                                                             500
+                                                             "journal_write_failed"
+                                                             "authorization decision was not durable"))
+                                      (do
+                                        (store! decided true)
+                                        (store! response
+                                                (service-authorization-response service
+                                                                                run-id
+                                                                                authorization-id
+                                                                                202)))))))
+      (authorization-mailbox-unlock! mailbox)
+      (when (load decided) (authorization-mailbox-notify! mailbox) 0)
+      (load response))))
+
 (defn service-decide-authorization [(service (ptr RunService))
                                     (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))]
@@ -282,27 +348,8 @@
                                                               "authorization_decided"
                                                               "authorization already has a decision"))
                         (AuthorizationPending []
-                                              (do
-                                                (emit-event (load (field service emitter))
-                                                            (now-ms)
-                                                            (AuthorizationDecided)
-                                                            run-id
-                                                            authorization-id
-                                                            ""
-                                                            "service"
-                                                            ""
-                                                            command)
-                                                (if (event-journal-failed? (load (field service journal)))
-                                                    (service-error allocator
-                                                                   500
-                                                                   "journal_write_failed"
-                                                                   "authorization decision was not durable")
-                                                    (do
-                                                      (authorization-mailbox-notify! (load (field service mailbox)))
-                                                      (service-authorization-response service
-                                                                                      run-id
-                                                                                      authorization-id
-                                                                                      202)))))))))))))
+                                              (service-commit-authorization-decision service
+                                                                                     command))))))))))
 
 (defn run-created-before? [(events (ref (ArrayList Json)))
                            (before i64)

@@ -102,7 +102,7 @@ so deployments that need isolation must place the harness in an OS sandbox or co
 src/core/       Provider-neutral JSON, events, models, tools, schema validation
 src/runtime/    Bounded model/tool loop, background handle, parallel tool executor
 src/providers/  OpenAI Responses, two DeepSeek dialects, Codex App Server
-src/infra/      Small adapters over Coil's hosted HTTP, time, and OS libraries
+src/infra/      HTTP/time adapters plus a narrow POSIX lifecycle and allocator shim
 src/persistence/ Append-only event journal and recovery
 src/service/     Durable run projection, versioned API routing, and HTTP serving
 schemas/codex/  Generated schemas for the locally installed Codex App Server protocol
@@ -133,8 +133,8 @@ steps, each represented by lifecycle events.
   pure builders for steering and interrupt requests. Its current one-shot CLI adapter
   rejects interactive server requests rather than silently approving them.
 - Parallel tool results retain model call order even when completion order differs.
-- Concurrent event writes may arrive out of order; the atomic `sequence` field is
-  authoritative and consumers should order records by it.
+- Concurrent event publication is serialized across sequence assignment and journal
+  append, so durable records are written in ascending `sequence` order.
 - Every wire event uses the same versioned envelope. Tool events carry their model
   request as `parent_operation_id`, and every run emits exactly one terminal event.
 - Background handles require the request, provider context, emitter, and allocator to
@@ -147,9 +147,8 @@ steps, each represented by lifecycle events.
 
 ## Next architectural slice
 
-The next slice should add identity-aware capabilities beyond the shared bearer token,
-replace journal polling for authorization wakeups with an in-process notification
-path, and harden graceful shutdown. Additional production tools can then grow behind
-the same provider-neutral validation, authorization, timeout, cancellation, output
-bound, and event contracts. All current provider adapters emit incremental text deltas
-with bounded synchronous backpressure.
+The next slice should add identity-aware capabilities beyond the shared bearer token
+and durable admission control across multiple harness processes. Additional production
+tools can then grow behind the same provider-neutral validation, authorization,
+timeout, cancellation, output bound, and event contracts. All current provider
+adapters emit incremental text deltas with bounded synchronous backpressure.

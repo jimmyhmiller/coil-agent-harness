@@ -22,9 +22,9 @@
                      (-> i64)
                      0)
   (cancel-durable-run [(self (ptr AuthorizationFakeController))
-                       (run-id (slice u8))]
-                      (-> i64)
-                      0))
+                       (command Json)]
+                      (-> RunCancellationResult)
+                      (RunCancellationAccepted)))
 
 (defstruct AuthorizationJob
   [(authorizer (ptr InteractiveAuthorizer))
@@ -41,7 +41,9 @@
     (cast (ptr i8) 0)))
 
 (defn wait-for-authorization-request [(allocator (ptr Allocator))
-                                      (path (slice u8))] (-> bool)
+                                      (path (slice u8))
+                                      (run-id (slice u8))
+                                      (authorization-id (slice u8))] (-> bool)
   (let [(mut attempt) 0
         (mut found) false]
     (loop (if (or (load found) (>= (load attempt) 200))
@@ -49,8 +51,8 @@
               (let [recovery (event-journal-recover allocator path)]
                 (when (and (load (field recovery ok))
                            (> (authorization-request-sequence (field recovery events)
-                                                              "run-auth"
-                                                              "call-auth")
+                                                              run-id
+                                                              authorization-id)
                               0))
                   (store! found true)
                   0)
@@ -128,7 +130,7 @@
                                           (fnptr-of authorization-worker)
                                           (cast (ptr i8) job)))
                       0)
-           (assert (wait-for-authorization-request allocator path))
+           (assert (wait-for-authorization-request allocator path "run-auth" "call-auth"))
            (let [accepted
                    (authorization-http-call service
                                             "{\"version\":1,\"command_id\":\"decision-1\",\"run_id\":\"run-auth\",\"authorization_id\":\"call-auth\",\"decision\":\"allow\",\"actor\":\"operator-1\"}")
@@ -167,10 +169,15 @@
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
                mailbox (alloc/stack AuthorizationMailbox)
+               controller (alloc/stack AuthorizationFakeController)
+               service (alloc/stack RunService)
                authorizer (alloc/stack InteractiveAuthorizer)
                spec (alloc/stack ToolSpec)
                call (alloc/stack ToolCall)
-               cancellation (cancellation-token-new allocator)]
+               cancellation (cancellation-token-new allocator)
+               decision (box allocator AuthorizationDecision (Reject "not decided"))
+               job (alloc/stack AuthorizationJob)
+               worker (alloc/stack Thread)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -179,12 +186,23 @@
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service mailbox) mailbox)
+           (store! (field service controller) controller)
            (store! (field spec name) "danger")
+           (store! (field spec description) "dangerous operation")
+           (store! (field spec input-schema) (json-object allocator))
+           (store! (field spec strict) true)
            (store! (field spec effect) (Destructive))
            (store! (field spec idempotent) false)
+           (store! (field spec timeout-ms) 1000)
            (store! (field call id) "cancelled-call")
            (store! (field call name) "danger")
            (store! (field call arguments) (JsonNull))
+           (store! (field call raw-arguments) "null")
            (store! (field authorizer allocator) allocator)
            (store! (field authorizer journal-path) path)
            (store! (field authorizer emitter) emitter)
@@ -196,10 +214,29 @@
            (store! (field authorizer mailbox) mailbox)
            (store! (field authorizer run-deadline-monotonic-ms) 0)
            (store! (field authorizer authorization-timeout-ms) 3000)
+           (store! (field job authorizer) authorizer)
+           (store! (field job spec) spec)
+           (store! (field job call) call)
+           (store! (field job decision) decision)
+           (assert-eq (cast i64
+                            (thread-spawn worker
+                                          (fnptr-of authorization-worker)
+                                          (cast (ptr i8) job)))
+                      0)
+           (assert (wait-for-authorization-request allocator
+                                                   path
+                                                   "cancelled-run"
+                                                   "cancelled-call"))
            (cancellation-request! cancellation)
-           (assert (match (interactive-authorize authorizer spec call)
-                     (Reject [reason] (str-eq reason "authorization cancelled"))
-                     (Authorize [] false)))
+           (let [parsed
+                   (json-parse allocator
+                               "{\"version\":1,\"command_id\":\"race-decision\",\"run_id\":\"cancelled-run\",\"authorization_id\":\"cancelled-call\",\"decision\":\"allow\"}")
+                 response
+                   (service-decide-authorization service
+                                                 (load (field parsed value)))]
+             (assert (or (= (load (field response status)) 202)
+                         (= (load (field response status)) 409))))
+           (thread-join worker)
            (let [recovery (event-journal-recover allocator path)]
              (assert (load (field recovery ok)))
              (assert-eq (al-len [Json] (load (field recovery events))) 2)
@@ -207,12 +244,20 @@
                                                         "cancelled-run"
                                                         "cancelled-call")
                         0))
-             (assert (match-else (authorization-decision (field recovery events)
-                                                         "cancelled-run"
-                                                         "cancelled-call")
-                                 (AuthorizationRejected [reason]
-                                                        (str-eq reason
-                                                                "authorization cancelled"))
-                                 (_ false))))
+             (match (authorization-decision (field recovery events)
+                                            "cancelled-run"
+                                            "cancelled-call")
+               (AuthorizationAllowed []
+                                     (assert (match-else (load decision)
+                                                         (Authorize [] true)
+                                                         (_ false))))
+               (AuthorizationRejected [reason]
+                                      (do
+                                        (assert (str-eq reason "authorization cancelled"))
+                                        (assert (match (load decision)
+                                                  (Reject [local-reason]
+                                                          (str-eq local-reason reason))
+                                                  (Authorize [] false)))))
+               (AuthorizationPending [] (assert false))))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))

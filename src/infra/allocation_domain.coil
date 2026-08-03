@@ -1,0 +1,73 @@
+(module harness-allocation-domain)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.result" :use *)
+
+(extern harness_allocation_domain_open :cc c [] (-> (ptr i8)))
+(extern harness_allocation_domain_alloc :cc c [(ptr i8) i64 i64] (-> (ptr i8)))
+(extern harness_allocation_domain_resize :cc c [(ptr i8) (ptr i8) i64 i64 i64] (-> (ptr i8)))
+(extern harness_allocation_domain_free :cc c [(ptr i8) (ptr i8)] (-> i64))
+(extern harness_allocation_domain_close :cc c [(ptr i8)] (-> i64))
+(extern harness_allocation_domain_live_count :cc c [] (-> i64))
+
+(defstruct AllocationDomain
+  [(handle (ptr i8))
+   (allocator Allocator)])
+
+(defn allocation-domain-alloc [(context (ptr i8))
+                               (size i64)
+                               (alignment i64)] (-> (Option (ptr i8)))
+  (let [pointer (harness_allocation_domain_alloc context size alignment)]
+    (if (= pointer (cast (ptr i8) 0)) (None) (Some pointer))))
+
+(defn allocation-domain-resize [(context (ptr i8))
+                                (pointer (ptr i8))
+                                (old-size i64)
+                                (new-size i64)
+                                (alignment i64)] (-> (Option (ptr i8)))
+  (let [resized
+          (harness_allocation_domain_resize context
+                                            pointer
+                                            old-size
+                                            new-size
+                                            alignment)]
+    (if (= resized (cast (ptr i8) 0)) (None) (Some resized))))
+
+(defn allocation-domain-free [(context (ptr i8))
+                              (pointer (ptr i8))
+                              (size i64)
+                              (alignment i64)] (-> i64)
+  (harness_allocation_domain_free context pointer))
+
+(defn allocation-domain-open [(owner (ptr Allocator))] (-> (ptr AllocationDomain))
+  (let [domain (box owner AllocationDomain (zeroed AllocationDomain))
+        handle (harness_allocation_domain_open)]
+    (store! (field domain handle) handle)
+    (when (!= handle (cast (ptr i8) 0))
+      (store! (field (field domain allocator) alloc)
+              (fnptr-of allocation-domain-alloc))
+      (store! (field (field domain allocator) resize)
+              (fnptr-of allocation-domain-resize))
+      (store! (field (field domain allocator) free)
+              (fnptr-of allocation-domain-free))
+      (store! (field (field domain allocator) ctx) handle)
+      0)
+    domain))
+
+(defn allocation-domain-valid? [(domain (ptr AllocationDomain))] (-> bool)
+  (!= (load (field domain handle)) (cast (ptr i8) 0)))
+
+(defn allocation-domain-allocator [(domain (ptr AllocationDomain))] (-> (ptr Allocator))
+  (field domain allocator))
+
+(defn allocation-domain-close! [(owner (ptr Allocator))
+                                (domain (ptr AllocationDomain))] (-> i64)
+  (let [handle (load (field domain handle))]
+    (when (!= handle (cast (ptr i8) 0))
+      (harness_allocation_domain_close handle)
+      (store! (field domain handle) (cast (ptr i8) 0))
+      0)
+    (destroy owner domain)))
+
+(defn allocation-domain-live-count [] (-> i64)
+  (harness_allocation_domain_live_count))

@@ -19,11 +19,11 @@
                      (do
                        (store! (field self starts) (+ (load (field self starts)) 1))
                        0))
-  (cancel-durable-run [(self (ptr FakeRunController)) (run-id (slice u8))]
-                      (-> i64)
+  (cancel-durable-run [(self (ptr FakeRunController)) (command Json)]
+                      (-> RunCancellationResult)
                       (do
                         (store! (field self cancels) (+ (load (field self cancels)) 1))
-                        0)))
+                        (RunCancellationAccepted))))
 
 (defn service-command [(allocator (ptr Allocator))
                        (command-id (slice u8))] (-> Json)
@@ -88,9 +88,15 @@
                                       "POST"
                                       "/v1/runs"
                                       "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+                 conflicting
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"create-2\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"different\"}")
                  queried (http-service-call service "GET" "/v1/runs/run-1" "")]
              (assert-eq (load (field created status)) 202)
              (assert-eq (load (field duplicate status)) 200)
+             (assert-eq (load (field conflicting status)) 409)
              (assert-eq (load (field queried status)) 200)
              (assert-eq (load (field controller starts)) 1)
              (assert (match (json-string-at (load (field queried body)) "status")
@@ -110,12 +116,12 @@
                                        (service-command allocator "cancel-1"))
                  after-create (service-query-events service "run-1" 1)]
              (assert-eq (load (field cancelled status)) 202)
-             (assert-eq (load (field duplicate-cancel status)) 200)
-             (assert-eq (load (field controller cancels)) 1)
+             (assert-eq (load (field duplicate-cancel status)) 202)
+             (assert-eq (load (field controller cancels)) 2)
              (assert-eq (json-array-length (json-get (load (field after-create body)) "events"))
-                        1)
+                        0)
              (assert (match (json-string-at (load (field cancelled body)) "status")
-                       (Some [value] (str-eq value "cancelling"))
+                       (Some [value] (str-eq value "queued"))
                        (None [] false))))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
