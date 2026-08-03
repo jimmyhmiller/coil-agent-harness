@@ -1,0 +1,67 @@
+(module harness-event-journal-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+
+(deftest persists-ordered-events-and-recovers-past-a-torn-tail
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-journal-recovery.jsonl"
+               sequence (box allocator i64 1)
+               journal (alloc/stack EventJournal)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (let [emitter (alloc/stack EventEmitter)]
+             (store! emitter (event-emitter-new journal sequence))
+             (assert-eq (emit-event emitter
+                                    100
+                                    (RunStarted)
+                                    "run-1"
+                                    "run-1"
+                                    ""
+                                    "fake"
+                                    "fake-model"
+                                    (JsonNull))
+                        1)
+             (assert-eq (emit-event emitter
+                                    101
+                                    (RunCompleted)
+                                    "run-1"
+                                    "run-1"
+                                    ""
+                                    "fake"
+                                    "fake-model"
+                                    (JsonString "done"))
+                        2))
+           (assert (not (event-journal-failed? journal)))
+           (event-journal-close! journal)
+           (assert (> (event-journal-append-bytes! allocator
+                                                   path
+                                                   "{\"version\":1")
+                      0))
+           (let [recovery (event-journal-recover allocator path)]
+             (assert (load (field recovery ok)))
+             (assert (load (field recovery ignored-torn-tail)))
+             (assert-eq (load (field recovery last-sequence)) 2)
+             (assert-eq (al-len [Json] (load (field recovery events))) 2)
+             (assert (match (json-string-at (al-get [Json] (load (field recovery events)) 1)
+                                            "event")
+                       (Some [value] (str-eq value "run.completed"))
+                       (None [] false))))))
+
+(deftest rejects-corruption-in-a-complete-journal-record
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-journal-corrupt.jsonl"]
+           (fs/write-file allocator path "not-json\n")
+           (let [recovery (event-journal-recover allocator path)]
+             (assert (not (load (field recovery ok))))
+             (assert (str-eq (load (field recovery error))
+                             "event journal contains invalid JSON")))))

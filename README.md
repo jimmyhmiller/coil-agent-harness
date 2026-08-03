@@ -17,9 +17,11 @@ The current slice can:
 - continue the model with ordered tool results while preserving opaque provider state;
 - run the entire model/tool loop on a background worker and join it later;
 - emit structured JSON event records suitable for a terminal, server, or future UI.
+- append those versioned events to an fsync-backed journal and recover ordered history
+  while safely ignoring a torn final record.
 
-This is not yet a durable or remote service. Event persistence, recovery, network APIs,
-and stream backpressure are deliberately not claimed by this slice.
+This is not yet a remote service. Durable command handling, network APIs, and restart
+resumption are not yet claimed; the event journal and its recovery rules are in place.
 
 ## Build and verify
 
@@ -80,6 +82,7 @@ src/core/       Provider-neutral JSON, events, models, tools, schema validation
 src/runtime/    Bounded model/tool loop, background handle, parallel tool executor
 src/providers/  OpenAI Responses, two DeepSeek dialects, Codex App Server
 src/infra/      Small adapters over Coil's hosted HTTP, time, and OS libraries
+src/persistence/ Append-only event journal and recovery
 schemas/codex/  Generated schemas for the locally installed Codex App Server protocol
 tests/          Deterministic unit, contract, concurrency, and runtime tests
 ```

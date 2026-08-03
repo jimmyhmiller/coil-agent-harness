@@ -1,0 +1,192 @@
+(module harness-event-journal)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
+(import "coil.fs" :as fs)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "provider-common" :use *)
+
+(extern fsync :cc c [i32] (-> i32))
+
+(defn journal-os-pick [(linux Code) (darwin Code)] (-> Code)
+  (if (primitive/code-eq (primitive/target-os) `linux) linux darwin))
+(defn journal-open-constants [] (-> Code)
+  `(do
+     (const JOURNAL_O_APPEND ~(journal-os-pick `1024 `8))
+     (const JOURNAL_O_CREAT ~(journal-os-pick `64 `512))))
+(meta (journal-open-constants))
+(const JOURNAL_O_WRONLY 1)
+(const JOURNAL_FILE_MODE 420)
+
+(defstruct EventJournal
+  [(allocator (ptr Allocator))
+   (fd i64)
+   (lock (ptr i64))
+   (failed (ptr i64))
+   (sync-each-event bool)])
+
+(defsum JournalOpenResult
+  (JournalOpened [(journal EventJournal)])
+  (JournalOpenFailed [(message (slice u8))]))
+
+(defstruct JournalRecovery
+  [(ok bool)
+   (events (ArrayList Json))
+   (backing-bytes (slice u8))
+   (last-sequence i64)
+   (ignored-torn-tail bool)
+   (error (slice u8))])
+
+(defn journal-lock! [(cell (ptr i64))] (-> i64)
+  (loop (if (= (atomic-cas cell 0 1) 0) (break) 0))
+  0)
+
+(defn journal-unlock! [(cell (ptr i64))] (-> i64)
+  (atomic-store cell 0))
+
+(defn event-journal-open [(allocator (ptr Allocator))
+                          (path (slice u8))
+                          (sync-each-event bool)] (-> JournalOpenResult)
+  (let [c-path (str->cstr allocator path)
+        fd
+          (os/open c-path
+                   (cast i32
+                         (| JOURNAL_O_WRONLY
+                            (| JOURNAL_O_CREAT JOURNAL_O_APPEND)))
+                   JOURNAL_FILE_MODE)]
+    (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+    (if (< fd (cast i32 0))
+        (JournalOpenFailed "could not open event journal")
+        (let [journal (alloc/stack EventJournal)]
+          (store! (field journal allocator) allocator)
+          (store! (field journal fd) (cast i64 fd))
+          (store! (field journal lock) (box allocator i64 0))
+          (store! (field journal failed) (box allocator i64 0))
+          (store! (field journal sync-each-event) sync-each-event)
+          (JournalOpened (load journal))))))
+
+(defn event-journal-append-bytes! [(allocator (ptr Allocator))
+                                   (path (slice u8))
+                                   (bytes (slice u8))] (-> i64)
+  (let [c-path (str->cstr allocator path)
+        fd
+          (os/open c-path
+                   (cast i32
+                         (| JOURNAL_O_WRONLY
+                            (| JOURNAL_O_CREAT JOURNAL_O_APPEND)))
+                   JOURNAL_FILE_MODE)
+        writer (alloc/stack io/Writer)]
+    (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+    (if (< fd (cast i32 0))
+        -1
+        (let [result
+                (match (io/print-str (io/fd-writer writer (cast i64 fd)) bytes)
+                  (Ok [written] written)
+                  (Err [failure] -1))]
+          (os/close fd)
+          result))))
+
+(defn event-journal-close! [(journal (ptr EventJournal))] (-> i64)
+  (journal-lock! (load (field journal lock)))
+  (let [fd (load (field journal fd))]
+    (when (>= fd 0)
+      (os/close (cast i32 fd))
+      (store! (field journal fd) -1)
+      0))
+  (journal-unlock! (load (field journal lock))))
+
+(defn event-journal-failed? [(journal (ptr EventJournal))] (-> bool)
+  (= (atomic-load (load (field journal failed))) 1))
+
+(defn event-journal-publish [(journal (ptr EventJournal)) (event (ptr Event))] (-> i64)
+  (let [allocator (load (field journal allocator))
+        encoded (json-stringify allocator (event-to-json allocator event))]
+    (journal-lock! (load (field journal lock)))
+    (let [writer (alloc/stack io/Writer)
+          fd (load (field journal fd))
+          (mut result) -1]
+      (if (< fd 0)
+          (atomic-store (load (field journal failed)) 1)
+          (match (io/write-line (io/fd-writer writer fd) encoded)
+            (Err [failure] (atomic-store (load (field journal failed)) 1))
+            (Ok [written]
+                (if (and (load (field journal sync-each-event))
+                         (!= (cast i64 (fsync (cast i32 fd))) 0))
+                    (atomic-store (load (field journal failed)) 1)
+                    (store! result 0)))))
+      (journal-unlock! (load (field journal lock)))
+      (load result))))
+
+(impl EventSink EventJournal
+  (publish-event [(self (ptr EventJournal)) (event (ptr Event))]
+                 (-> i64)
+                 (event-journal-publish self event)))
+
+(defn journal-ends-in-newline? [(bytes (slice u8))] (-> bool)
+  (and (> (slice-len [u8] bytes) 0)
+       (= (cast i64 (slice-get [u8] bytes (- (slice-len [u8] bytes) 1))) 10)))
+
+(defn journal-recovery-empty [(allocator (ptr Allocator))] (-> JournalRecovery)
+  (let [recovery (alloc/stack JournalRecovery)]
+    (store! (field recovery ok) true)
+    (store! (field recovery events) (al-new [Json] allocator))
+    (store! (field recovery backing-bytes) "")
+    (store! (field recovery last-sequence) 0)
+    (store! (field recovery ignored-torn-tail) false)
+    (store! (field recovery error) "")
+    (load recovery)))
+
+(defn event-journal-recover [(allocator (ptr Allocator))
+                             (path (slice u8))] (-> JournalRecovery)
+  (let [(mut recovery) (journal-recovery-empty allocator)]
+    (match (fs/read-file allocator path)
+      (Err [failure]
+           (do
+             (store! (field recovery ok) false)
+             (store! (field recovery error) "could not read event journal")))
+      (Ok [bytes]
+          (do
+            (store! (field recovery backing-bytes) bytes)
+            (let [(mut lines) (str-split allocator bytes "\n")
+                  count (al-len [(slice u8)] (load lines))
+                  complete-count (if (journal-ends-in-newline? bytes) (- count 1) (- count 1))
+                  (mut i) 0]
+              (when (and (> count 0) (not (journal-ends-in-newline? bytes)))
+                (store! (field recovery ignored-torn-tail) true)
+                0)
+              (loop (if (or (>= (load i) complete-count)
+                            (not (load (field recovery ok))))
+                        (break)
+                        (let [line (al-get [(slice u8)] (load lines) (load i))
+                              parsed (json-parse allocator line)]
+                          (if (not (load (field parsed ok)))
+                              (do
+                                (store! (field recovery ok) false)
+                                (store! (field recovery error)
+                                        "event journal contains invalid JSON"))
+                              (let [event (load (field parsed value))
+                                    version (json-number-i64 (json-get event "version"))
+                                    sequence (json-number-i64 (json-get event "sequence"))]
+                                (if (or (!= version 1)
+                                        (<= sequence (load (field recovery last-sequence))))
+                                    (do
+                                      (store! (field recovery ok) false)
+                                      (store! (field recovery error)
+                                              "event journal violates version or ordering"))
+                                    (do
+                                      (al-push! [Json]
+                                                (mut (field recovery events))
+                                                event)
+                                      (store! (field recovery last-sequence) sequence)))))
+                          (store! i (+ (load i) 1)))))
+              (al-free! [(slice u8)] (mut lines))))))
+    (load recovery)))
