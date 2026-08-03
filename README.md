@@ -19,8 +19,7 @@ The current slice can:
 - emit structured JSON event records suitable for a terminal, server, or future UI.
 
 This is not yet a durable or remote service. Event persistence, recovery, network APIs,
-stream backpressure, and cancellation propagation are deliberately not claimed by this
-slice.
+and stream backpressure are deliberately not claimed by this slice.
 
 ## Build and verify
 
@@ -107,6 +106,8 @@ steps, each represented by lifecycle events.
 - Parallel tool results retain model call order even when completion order differs.
 - Concurrent event writes may arrive out of order; the atomic `sequence` field is
   authoritative and consumers should order records by it.
+- Every wire event uses the same versioned envelope. Tool events carry their model
+  request as `parent_operation_id`, and every run emits exactly one terminal event.
 - Background handles require the request, provider context, emitter, and allocator to
   remain alive until `agent-run-join` returns.
 - Runs carry one atomic cancellation token and one absolute monotonic deadline.

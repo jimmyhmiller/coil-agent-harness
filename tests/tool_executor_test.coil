@@ -45,12 +45,21 @@
                 (-> ToolResult)
                 (execute-probe self call allocator)))
 
-(defstruct CountingEventSink [(count (ptr i64))])
+(defstruct CountingEventSink
+  [(count (ptr i64))
+   (valid-envelope (ptr i64))])
 
 (impl EventSink CountingEventSink
   (publish-event [(self (ptr CountingEventSink)) (event (ptr Event))]
                  (-> i64)
-                 (atomic-add (load (field self count)) 1)))
+                 (do
+                   (atomic-add (load (field self count)) 1)
+                   (when (or (!= (load (field event version)) 1)
+                             (not (str-eq (load (field event parent-operation-id))
+                                          "model-1")))
+                     (atomic-store (load (field self valid-envelope)) 0)
+                     0)
+                   0)))
 
 (defn executor-tool [(allocator (ptr Allocator)) (probe (ptr ParallelProbe))] (-> ToolDefinition)
   (let [schema-result
@@ -80,6 +89,7 @@
                active (box allocator i64 0)
                maximum (box allocator i64 0)
                event-count (box allocator i64 0)
+               valid-envelope (box allocator i64 1)
                sequence (box allocator i64 0)
                probe (box allocator ParallelProbe (zeroed ParallelProbe))
                registry (box allocator ToolRegistry (tool-registry-new allocator))
@@ -96,9 +106,11 @@
            (al-push! [ToolCall] calls (executor-call allocator "first"))
            (al-push! [ToolCall] calls (executor-call allocator "second"))
            (store! (field sink count) event-count)
+           (store! (field sink valid-envelope) valid-envelope)
            (store! (field emitter sink) sink)
            (store! (field emitter next-sequence) sequence)
            (store! (field execution run-id) "parallel-test")
+           (store! (field execution parent-operation-id) "model-1")
            (store! (field execution provider) "fake")
            (store! (field execution model) "fake")
            (store! (field execution registry) registry)
@@ -116,13 +128,15 @@
                                    (ToolSucceeded [] true)
                                    (_ false)))
                (assert (str-eq (load (field first call-id)) "first")))
-             (assert-eq (atomic-load event-count) 8))))
+             (assert-eq (atomic-load event-count) 8)
+             (assert-eq (atomic-load valid-envelope) 1))))
 
 (deftest reports-a-tool-that-exceeds-its-cooperative-deadline
          (let [allocator (malloc-allocator)
                active (box allocator i64 0)
                maximum (box allocator i64 0)
                event-count (box allocator i64 0)
+               valid-envelope (box allocator i64 1)
                sequence (box allocator i64 0)
                probe (box allocator ParallelProbe (zeroed ParallelProbe))
                registry (box allocator ToolRegistry (tool-registry-new allocator))
@@ -140,8 +154,10 @@
              (store! registry (load registry-value)))
            (al-push! [ToolCall] calls (executor-call allocator "slow"))
            (store! (field sink count) event-count)
+           (store! (field sink valid-envelope) valid-envelope)
            (store! emitter (event-emitter-new sink sequence))
            (store! (field execution run-id) "timeout-test")
+           (store! (field execution parent-operation-id) "model-1")
            (store! (field execution provider) "fake")
            (store! (field execution model) "fake")
            (store! (field execution registry) registry)
@@ -157,4 +173,5 @@
                                  (ToolErrored [] true)
                                  (_ false)))
              (assert (str-eq (load (field result error)) "tool deadline exceeded"))
-             (assert-eq (atomic-load event-count) 4))))
+             (assert-eq (atomic-load event-count) 4)
+             (assert-eq (atomic-load valid-envelope) 1))))

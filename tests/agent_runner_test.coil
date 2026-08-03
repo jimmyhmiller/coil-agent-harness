@@ -119,22 +119,42 @@
 
 (defstruct CountingEventSink [(count (ptr i64))])
 
+(defstruct TerminalEventSink
+  [(count (ptr i64))
+   (terminal-count (ptr i64))])
+
 (impl EventSink CountingEventSink
   (publish-event [(self (ptr CountingEventSink)) (event (ptr Event))]
                  (-> i64)
                  (atomic-add (load (field self count)) 1)))
+
+(impl EventSink TerminalEventSink
+  (publish-event [(self (ptr TerminalEventSink)) (event (ptr Event))]
+                 (-> i64)
+                 (do
+                   (atomic-add (load (field self count)) 1)
+                   (match-else (load (field event kind))
+                               (RunCompleted []
+                                             (atomic-add (load (field self terminal-count)) 1))
+                               (RunFailed []
+                                          (atomic-add (load (field self terminal-count)) 1))
+                               (RunCancelled []
+                                             (atomic-add (load (field self terminal-count)) 1))
+                               (_ 0))
+                   0)))
 
 (deftest background-run-executes-tools-and-continues-the-model
          (let [allocator (malloc-allocator)
                calls (box allocator i64 0)
                observed (box allocator i64 0)
                events (box allocator i64 0)
+               terminals (box allocator i64 0)
                sequence (box allocator i64 1)
                state (box allocator FakeProviderState (zeroed FakeProviderState))
                registry (box allocator ToolRegistry (tool-registry-new allocator))
                messages (box allocator (ArrayList Message) (al-new [Message] allocator))
                request (box allocator ModelRequest (zeroed ModelRequest))
-               sink (alloc/stack CountingEventSink)
+               sink (alloc/stack TerminalEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
                policy (alloc/stack AgentRunPolicy)
                authorizer (alloc/stack AllowAllAuthorizer)]
@@ -152,6 +172,7 @@
            (store! (field request reasoning) (ReasoningNone))
            (store! (field request timeout-ms) 1000)
            (store! (field sink count) events)
+           (store! (field sink terminal-count) terminals)
            (store! (field emitter sink) sink)
            (store! (field emitter next-sequence) sequence)
            (store! (field policy max-model-turns) 3)
@@ -168,6 +189,7 @@
              (assert-eq (atomic-load calls) 2)
              (assert-eq (atomic-load observed) 1)
              (assert-eq (atomic-load events) 10)
+             (assert-eq (atomic-load terminals) 1)
              (assert (match result
                        (ModelOk [response]
                                 (let [final response]
@@ -179,8 +201,9 @@
                provider (box allocator SlowProvider (zeroed SlowProvider))
                request (box allocator ModelRequest (zeroed ModelRequest))
                events (box allocator i64 0)
+               terminals (box allocator i64 0)
                sequence (box allocator i64 1)
-               sink (alloc/stack CountingEventSink)
+               sink (alloc/stack TerminalEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
                authorizer (alloc/stack AllowAllAuthorizer)
                policy (alloc/stack AgentRunPolicy)]
@@ -190,6 +213,7 @@
            (store! (field request model) "slow-model")
            (store! (field request timeout-ms) 1000)
            (store! (field sink count) events)
+           (store! (field sink terminal-count) terminals)
            (store! emitter (event-emitter-new sink sequence))
            (store! (field policy max-model-turns) 1)
            (store! (field policy max-parallel-tools) 1)
@@ -210,15 +234,17 @@
                                      (match-else (load (field failed kind))
                                                  (CancelledFailure [] true)
                                                  (_ false))))))
-               (assert-eq (atomic-load events) 2)))))
+               (assert-eq (atomic-load events) 2)
+               (assert-eq (atomic-load terminals) 1)))))
 
 (deftest run-deadline-wins-over-a-late-model-response
          (let [allocator (malloc-allocator)
                provider (box allocator SlowProvider (zeroed SlowProvider))
                request (box allocator ModelRequest (zeroed ModelRequest))
                events (box allocator i64 0)
+               terminals (box allocator i64 0)
                sequence (box allocator i64 1)
-               sink (alloc/stack CountingEventSink)
+               sink (alloc/stack TerminalEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
                authorizer (alloc/stack AllowAllAuthorizer)
                policy (alloc/stack AgentRunPolicy)]
@@ -228,6 +254,7 @@
            (store! (field request model) "slow-model")
            (store! (field request timeout-ms) 5)
            (store! (field sink count) events)
+           (store! (field sink terminal-count) terminals)
            (store! emitter (event-emitter-new sink sequence))
            (store! (field policy max-model-turns) 1)
            (store! (field policy max-parallel-tools) 1)
@@ -245,4 +272,5 @@
                                    (match-else (load (field failed kind))
                                                (TimeoutFailure [] true)
                                                (_ false))))))
-             (assert-eq (atomic-load events) 2))))
+             (assert-eq (atomic-load events) 2)
+             (assert-eq (atomic-load terminals) 1))))

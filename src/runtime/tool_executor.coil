@@ -13,6 +13,7 @@
 
 (defstruct ToolExecutionRequest
   [(run-id (slice u8))
+   (parent-operation-id (slice u8))
    (provider (slice u8))
    (model (slice u8))
    (registry (ptr ToolRegistry))
@@ -27,6 +28,7 @@
 
 (defstruct ToolJob
   [(run-id (slice u8))
+   (parent-operation-id (slice u8))
    (provider (slice u8))
    (model (slice u8))
    (call ToolCall)
@@ -49,6 +51,7 @@
 (defn tool-event [(emitter (ptr EventEmitter))
                   (kind EventKind)
                   (run-id (slice u8))
+                  (parent-operation-id (slice u8))
                   (provider (slice u8))
                   (model (slice u8))
                   (call ToolCall)
@@ -58,7 +61,7 @@
               kind
               run-id
               (load (field call id))
-              ""
+              parent-operation-id
               provider
               model
               payload))
@@ -74,6 +77,7 @@
     (tool-event (load (field job emitter))
                 (ToolCallStarted)
                 (load (field job run-id))
+                (load (field job parent-operation-id))
                 (load (field job provider))
                 (load (field job model))
                 (load call)
@@ -103,6 +107,7 @@
                        (tool-event (load (field job emitter))
                                    (ToolCallCompleted)
                                    (load (field job run-id))
+                                   (load (field job parent-operation-id))
                                    (load (field job provider))
                                    (load (field job model))
                                    (load call)
@@ -111,6 +116,7 @@
                      (tool-event (load (field job emitter))
                                  (ToolCallFailed)
                                  (load (field job run-id))
+                                 (load (field job parent-operation-id))
                                  (load (field job provider))
                                  (load (field job model))
                                  (load call)
@@ -151,6 +157,7 @@
                 (tool-event (load (field request emitter))
                             (ToolCallProposed)
                             (load (field request run-id))
+                            (load (field request parent-operation-id))
                             (load (field request provider))
                             (load (field request model))
                             call
@@ -163,6 +170,7 @@
                           (tool-event (load (field request emitter))
                                       (ToolCallFailed)
                                       (load (field request run-id))
+                                      (load (field request parent-operation-id))
                                       (load (field request provider))
                                       (load (field request model))
                                       call
@@ -183,6 +191,7 @@
                                 (tool-event (load (field request emitter))
                                             (ToolCallRejected)
                                             (load (field request run-id))
+                                            (load (field request parent-operation-id))
                                             (load (field request provider))
                                             (load (field request model))
                                             call
@@ -198,6 +207,7 @@
                                           (tool-event (load (field request emitter))
                                                       (ToolCallRejected)
                                                       (load (field request run-id))
+                                                      (load (field request parent-operation-id))
                                                       (load (field request provider))
                                                       (load (field request model))
                                                       call
@@ -205,6 +215,8 @@
                                 (Authorize []
                                            (let [job (alloc/stack ToolJob)]
                                              (store! (field job run-id) (load (field request run-id)))
+                                             (store! (field job parent-operation-id)
+                                                     (load (field request parent-operation-id)))
                                              (store! (field job provider) (load (field request provider)))
                                              (store! (field job model) (load (field request model)))
                                              (store! (field job call) call)
@@ -236,6 +248,7 @@
                                              (tool-event (load (field request emitter))
                                                          (ToolCallAuthorized)
                                                          (load (field request run-id))
+                                                         (load (field request parent-operation-id))
                                                          (load (field request provider))
                                                          (load (field request model))
                                                          call
@@ -284,6 +297,7 @@
                                     (tool-event (load (field job-slot emitter))
                                                 (ToolCallFailed)
                                                 (load (field job-slot run-id))
+                                                (load (field job-slot parent-operation-id))
                                                 (load (field job-slot provider))
                                                 (load (field job-slot model))
                                                 (load call)

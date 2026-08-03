@@ -164,6 +164,8 @@
                                                                 (load (field response-value tool-calls)))
                                                          execution (alloc/stack ToolExecutionRequest)]
                                                      (store! (field execution run-id) (load (field current run-id)))
+                                                     (store! (field execution parent-operation-id)
+                                                             (load (field current operation-id)))
                                                      (store! (field execution provider) (provider-name provider))
                                                      (store! (field execution model) (load (field current model)))
                                                      (store! (field execution registry) (load (field current tools)))

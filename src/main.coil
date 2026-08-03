@@ -44,30 +44,8 @@
 
 (defn publish-cli-event [(self (ptr CliEventSink)) (event (ptr Event))] (-> i64)
   (let [allocator (malloc-allocator)
-        (mut record) (json-object allocator)]
-    (json-object-put! (mut record)
-                      "sequence"
-                      (json-integer allocator (load (field event sequence))))
-    (json-object-put! (mut record)
-                      "timestamp_ms"
-                      (json-integer allocator (load (field event timestamp-ms))))
-    (json-object-put! (mut record)
-                      "event"
-                      (JsonString (event-kind-name (load (field event kind)))))
-    (json-object-put! (mut record)
-                      "run_id"
-                      (JsonString (load (field event run-id))))
-    (json-object-put! (mut record)
-                      "operation_id"
-                      (JsonString (load (field event operation-id))))
-    (json-object-put! (mut record)
-                      "provider"
-                      (JsonString (load (field event provider))))
-    (json-object-put! (mut record)
-                      "model"
-                      (JsonString (load (field event model))))
-    (json-object-put! (mut record) "payload" (load (field event payload)))
-    (write-line 2 (json-stringify allocator (load record)))))
+        record (event-to-json allocator event)]
+    (write-line 2 (json-stringify allocator record))))
 
 (impl EventSink CliEventSink
   (publish-event [(self (ptr CliEventSink)) (event (ptr Event))]
