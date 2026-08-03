@@ -286,6 +286,9 @@
                request (test-request allocator)
                wire (deepseek-anthropic-request-json allocator request)
                tool (json-array-get (json-get wire "tools") 0)]
+           (assert (match (json-bool-value (json-get wire "stream"))
+                     (Some [value] value)
+                     (None [] false)))
            (assert (match (json-string-at tool "name")
                      (Some [value] (str-eq value "city_fact"))
                      (None [] false)))
@@ -294,6 +297,49 @@
            (assert (match (json-string-at (json-get wire "tool_choice") "type")
                      (Some [value] (str-eq value "auto"))
                      (None [] false)))))
+
+(deftest deepseek-anthropic-stream-reconstructs-content-tools-and-usage
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               sink (alloc/stack DeltaEventSink)
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               state (alloc/stack DeepSeekAnthropicStreamState)
+               decoder (alloc/stack SseDecoder)]
+           (store! (field sink deltas) 0)
+           (store! (field sink valid) true)
+           (store! (field state allocator) allocator)
+           (store! (field state request) request)
+           (store! (field state emitter) emitter)
+           (store! (field state response-id) "")
+           (store! (field state model) "")
+           (store! (field state blocks) (al-new [AnthropicStreamBlock] allocator))
+           (store! (field state usage) (zeroed ModelUsage))
+           (store! (field state completed) false)
+           (store! (field state failed) false)
+           (store! decoder (sse-decoder-new allocator state 16384))
+           (assert (sse-decoder-feed! decoder
+                                      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-stream\",\"model\":\"deepseek-test\",\"usage\":{\"input_tokens\":5}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reason\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tool-1\",\"name\":\"city_fact\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"Oslo\\\"}\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":4}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+           (assert (load (field state completed)))
+           (assert-eq (load (field sink deltas)) 1)
+           (assert (load (field sink valid)))
+           (let [response (anthropic-stream-response state)]
+             (assert (str-eq (load (field response response-id)) "msg-stream"))
+             (assert (str-eq (load (field response output-text)) "hi"))
+             (assert-eq (load (field (field response usage) input-tokens)) 5)
+             (assert-eq (load (field (field response usage) output-tokens)) 4)
+             (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 1)
+             (let [call (al-get [ToolCall] (load (field response tool-calls)) 0)
+                   thinking
+                     (json-array-get (json-get (load (field response raw-output)) "content")
+                                     0)]
+               (assert (match (json-string-at (load (field call arguments)) "city")
+                         (Some [value] (str-eq value "Oslo"))
+                         (None [] false)))
+               (assert (match (json-string-at thinking "signature")
+                         (Some [value] (str-eq value "sig"))
+                         (None [] false)))))
+           (sse-decoder-free! decoder)))
 
 (deftest deepseek-anthropic-parses-parallel-tool-use
          (let [allocator (malloc-allocator)

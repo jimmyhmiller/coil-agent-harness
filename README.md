@@ -101,6 +101,8 @@ steps, each represented by lifecycle events.
   the full previous assistant message is replayed so `reasoning_content` is retained.
   Streaming reconstructs reasoning, indexed tool-call fragments, and final usage.
 - DeepSeek Anthropic compatibility uses `tool_use` and `tool_result` content blocks.
+  Its stream reconstructs text, signed thinking blocks, fragmented tool inputs, and
+  usage without losing the opaque continuation content.
 - Codex is launched as `codex app-server --listen stdio://`. The adapter initializes a
   session, starts a thread and turn, converts notifications to harness events, and has
   pure builders for steering and interrupt requests. Its current one-shot CLI adapter
@@ -122,6 +124,6 @@ steps, each represented by lifecycle events.
 
 The next slice should put the runtime behind a versioned remote command/query/event
 API and persist the event stream. That is the right point to add durable run identity,
-reconnection cursors, cancellation propagation, and restart recovery. DeepSeek's
-Anthropic-compatible dialect is the remaining direct-provider streaming adapter;
-OpenAI Responses, DeepSeek OpenAI-compatible, and Codex deltas stream today.
+reconnection cursors, cancellation propagation, and restart recovery. All current
+provider adapters now emit incremental text deltas with bounded synchronous
+backpressure.

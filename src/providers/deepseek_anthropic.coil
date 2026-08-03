@@ -11,6 +11,7 @@
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
 (import "harness-http" :use *)
+(import "harness-sse" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
@@ -139,7 +140,7 @@
                         (tool-choice-anthropic allocator
                                                (load (field request tool-choice))))
       0)
-    (json-put-bool! (mut body) "stream" false)
+    (json-put-bool! (mut body) "stream" true)
     (load body)))
 
 (defn deepseek-anthropic-usage [(root Json)] (-> ModelUsage)
@@ -214,6 +215,223 @@
               (load (field request model))
               payload))
 
+(defstruct AnthropicStreamBlock
+  [(kind (slice u8))
+   (id (slice u8))
+   (name (slice u8))
+   (data StrBuf)
+   (signature StrBuf)])
+
+(defstruct DeepSeekAnthropicStreamState
+  [(allocator (ptr Allocator))
+   (request (ptr ModelRequest))
+   (emitter (ptr EventEmitter))
+   (response-id (slice u8))
+   (model (slice u8))
+   (blocks (ArrayList AnthropicStreamBlock))
+   (usage ModelUsage)
+   (completed bool)
+   (failed bool)])
+
+(defn anthropic-stream-block! [(state (ptr DeepSeekAnthropicStreamState))
+                               (index-value i64)] (-> (ptr AnthropicStreamBlock))
+  (loop (if (> (al-len [AnthropicStreamBlock] (load (field state blocks)))
+               index-value)
+            (break)
+            (let [block-slot (alloc/stack AnthropicStreamBlock)]
+              (store! (field block-slot kind) "")
+              (store! (field block-slot id) "")
+              (store! (field block-slot name) "")
+              (store! (field block-slot data)
+                      (sb-new (load (field state allocator))))
+              (store! (field block-slot signature)
+                      (sb-new (load (field state allocator))))
+              (al-push! [AnthropicStreamBlock]
+                        (mut (field state blocks))
+                        (load block-slot)))))
+  (index (load (field (field state blocks) data)) index-value))
+
+(defn anthropic-stream-start! [(state (ptr DeepSeekAnthropicStreamState))
+                               (wire Json)] (-> i64)
+  (let [block (json-get wire "content_block")
+        slot
+          (anthropic-stream-block! state
+                                   (json-number-i64 (json-get wire "index")))]
+    (match (json-string-at block "type")
+      (Some [value]
+            (store! (field slot kind)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at block "id")
+      (Some [value]
+            (store! (field slot id)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at block "name")
+      (Some [value]
+            (store! (field slot name)
+                    (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    0))
+
+(defn anthropic-stream-delta! [(state (ptr DeepSeekAnthropicStreamState))
+                               (wire Json)] (-> i64)
+  (let [delta (json-get wire "delta")
+        slot
+          (anthropic-stream-block! state
+                                   (json-number-i64 (json-get wire "index")))
+        kind
+          (match (json-string-at delta "type")
+            (Some [value] value)
+            (None [] ""))]
+    (cond (str-eq kind "text_delta")
+            (match (json-string-at delta "text")
+              (Some [value]
+                    (do
+                      (sb-push-str! (mut (field slot data)) value)
+                      (deepseek-anthropic-event (load (field state emitter))
+                                                (load (field state request))
+                                                (ModelResponseDelta)
+                                                (JsonString value))))
+              (None [] 0))
+          (str-eq kind "thinking_delta")
+            (match (json-string-at delta "thinking")
+              (Some [value] (sb-push-str! (mut (field slot data)) value))
+              (None [] 0))
+          (str-eq kind "signature_delta")
+            (match (json-string-at delta "signature")
+              (Some [value]
+                    (sb-push-str! (mut (field slot signature)) value))
+              (None [] 0))
+          (str-eq kind "input_json_delta")
+            (match (json-string-at delta "partial_json")
+              (Some [value] (sb-push-str! (mut (field slot data)) value))
+              (None [] 0))
+          :else 0)))
+
+(defn anthropic-stream-usage! [(state (ptr DeepSeekAnthropicStreamState))
+                               (usage Json)] (-> i64)
+  (let [input (json-number-i64 (json-get usage "input_tokens"))
+        output (json-number-i64 (json-get usage "output_tokens"))
+        cached (json-number-i64 (json-get usage "cache_read_input_tokens"))]
+    (when (> input 0) (store! (field (field state usage) input-tokens) input) 0)
+    (when (> output 0) (store! (field (field state usage) output-tokens) output) 0)
+    (when (> cached 0)
+      (store! (field (field state usage) cached-input-tokens) cached)
+      0)
+    0))
+
+(defn anthropic-stream-event! [(state (ptr DeepSeekAnthropicStreamState))
+                               (wire Json)] (-> bool)
+  (let [kind
+          (match (json-string-at wire "type")
+            (Some [value] value)
+            (None [] ""))]
+    (cond (str-eq kind "message_start")
+            (let [message (json-get wire "message")]
+              (match (json-string-at message "id")
+                (Some [value]
+                      (store! (field state response-id)
+                              (concat-or-empty (load (field state allocator))
+                                               ""
+                                               value)))
+                (None [] 0))
+              (match (json-string-at message "model")
+                (Some [value]
+                      (store! (field state model)
+                              (concat-or-empty (load (field state allocator))
+                                               ""
+                                               value)))
+                (None [] 0))
+              (anthropic-stream-usage! state (json-get message "usage")))
+          (str-eq kind "content_block_start") (anthropic-stream-start! state wire)
+          (str-eq kind "content_block_delta") (anthropic-stream-delta! state wire)
+          (str-eq kind "message_delta") (anthropic-stream-usage! state (json-get wire "usage"))
+          (str-eq kind "message_stop") (do (store! (field state completed) true) 0)
+          (str-eq kind "error") (do (store! (field state failed) true) 0)
+          :else 0)
+    (not (load (field state failed)))))
+
+(impl SseEventSink DeepSeekAnthropicStreamState
+  (consume-sse-event [(self (ptr DeepSeekAnthropicStreamState))
+                      (event-name (slice u8))
+                      (data (slice u8))]
+                     (-> bool)
+                     (if (model-request-cancelled? (load (field self request)))
+                         false
+                         (let [parsed (json-parse (load (field self allocator)) data)]
+                           (if (load (field parsed ok))
+                               (anthropic-stream-event! self
+                                                        (load (field parsed value)))
+                               (do (store! (field self failed) true) false))))))
+
+(defn anthropic-stream-response [(state (ptr DeepSeekAnthropicStreamState))] (-> ModelResponse)
+  (let [allocator (load (field state allocator))
+        (mut root) (json-object allocator)
+        (mut content) (json-array allocator)
+        (mut usage) (json-object allocator)
+        (mut i) 0
+        count (al-len [AnthropicStreamBlock] (load (field state blocks)))]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [source
+                      (al-get [AnthropicStreamBlock]
+                              (load (field state blocks))
+                              (load i))
+                    kind (load (field source kind))
+                    (mut block) (json-object allocator)]
+                (json-put-string! (mut block) "type" kind)
+                (cond (str-eq kind "text")
+                        (do
+                          (json-put-string! (mut block)
+                                            "text"
+                                            (sb-str (load (field source data))))
+                          0)
+                      (str-eq kind "thinking")
+                        (do
+                          (json-put-string! (mut block)
+                                            "thinking"
+                                            (sb-str (load (field source data))))
+                          (json-put-string! (mut block)
+                                            "signature"
+                                            (sb-str (load (field source signature))))
+                          0)
+                      (str-eq kind "tool_use")
+                        (let [parsed
+                                (json-parse allocator
+                                            (sb-str (load (field source data))))]
+                          (json-put-string! (mut block) "id" (load (field source id)))
+                          (json-put-string! (mut block)
+                                            "name"
+                                            (load (field source name)))
+                          (json-object-put! (mut block)
+                                            "input"
+                                            (if (load (field parsed ok))
+                                                (load (field parsed value))
+                                                (JsonNull)))
+                          0)
+                      :else 0)
+                (json-array-push! (mut content) (load block))
+                (store! i (+ (load i) 1)))))
+    (json-put-string! (mut root) "id" (load (field state response-id)))
+    (json-put-string! (mut root) "model" (load (field state model)))
+    (json-object-put! (mut root) "content" (load content))
+    (json-object-put! (mut usage)
+                      "input_tokens"
+                      (json-integer allocator
+                                    (load (field (field state usage) input-tokens))))
+    (json-object-put! (mut usage)
+                      "output_tokens"
+                      (json-integer allocator
+                                    (load (field (field state usage) output-tokens))))
+    (json-object-put! (mut usage)
+                      "cache_read_input_tokens"
+                      (json-integer allocator
+                                    (load (field (field state usage)
+                                                 cached-input-tokens))))
+    (json-object-put! (mut root) "usage" (load usage))
+    (deepseek-anthropic-parse-response allocator (load root))))
+
 (defn deepseek-anthropic-execute [(context (ptr DeepSeekAnthropicContext))
                                   (request (ptr ModelRequest))
                                   (emitter (ptr EventEmitter))
@@ -273,6 +491,70 @@
                                                           (JsonString (load (field response response-id))))
                                 (ModelOk response)))))))))))))
 
+(defn deepseek-anthropic-execute-stream [(context (ptr DeepSeekAnthropicContext))
+                                         (request (ptr ModelRequest))
+                                         (emitter (ptr EventEmitter))
+                                         (allocator (ptr Allocator))] (-> ModelResult)
+  (let [key (api-key allocator (load (field context credential)))]
+    (if (= (slice-len [u8] key) 0)
+        (model-failure "deepseek-anthropic" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
+        (let [headers
+                (box allocator
+                     (ArrayList (slice u8))
+                     (al-new [(slice u8)] allocator))
+              api-header (concat-or-empty allocator "x-api-key: " key)
+              state (alloc/stack DeepSeekAnthropicStreamState)
+              decoder (alloc/stack SseDecoder)
+              http-request (alloc/stack HttpRequest)]
+          (al-push! [(slice u8)] headers "Content-Type: application/json")
+          (al-push! [(slice u8)] headers "Accept: text/event-stream")
+          (al-push! [(slice u8)] headers "anthropic-version: 2023-06-01")
+          (al-push! [(slice u8)] headers api-header)
+          (store! (field state allocator) allocator)
+          (store! (field state request) request)
+          (store! (field state emitter) emitter)
+          (store! (field state response-id) "")
+          (store! (field state model) "")
+          (store! (field state blocks) (al-new [AnthropicStreamBlock] allocator))
+          (store! (field state usage) (zeroed ModelUsage))
+          (store! (field state completed) false)
+          (store! (field state failed) false)
+          (store! decoder (sse-decoder-new allocator state 1048576))
+          (store! (field http-request url) (load (field context endpoint)))
+          (store! (field http-request headers) headers)
+          (store! (field http-request body)
+                  (json-stringify allocator
+                                  (deepseek-anthropic-request-json allocator request)))
+          (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+          (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
+          (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
+          (deepseek-anthropic-event emitter request (ModelRequestStarted) (JsonNull))
+          (let [http (http-post-stream allocator http-request)
+                status (load (field http status-code))]
+            (sse-decoder-free! decoder)
+            (if (or (!= (load (field http transport-code)) 0)
+                    (< status 200)
+                    (>= status 300)
+                    (load (field state failed))
+                    (not (load (field state completed))))
+                (let [message
+                        (if (load (field state failed))
+                            "DeepSeek Anthropic stream failed"
+                            (if (or (< status 200) (>= status 300))
+                                "DeepSeek Anthropic streaming request returned an error"
+                                (load (field http error))))]
+                  (deepseek-anthropic-event emitter
+                                            request
+                                            (ModelRequestFailed)
+                                            (JsonString message))
+                  (model-failure "deepseek-anthropic" status message))
+                (let [response (anthropic-stream-response state)]
+                  (deepseek-anthropic-event emitter
+                                            request
+                                            (ModelRequestCompleted)
+                                            (JsonString (load (field response response-id))))
+                  (ModelOk response))))))))
+
 (impl ModelProvider DeepSeekAnthropicContext
   (provider-name [(self (ptr DeepSeekAnthropicContext))]
                  (-> (slice u8))
@@ -283,4 +565,4 @@
                   (emitter (ptr EventEmitter))
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
-                 (deepseek-anthropic-execute self request emitter allocator)))
+                 (deepseek-anthropic-execute-stream self request emitter allocator)))
