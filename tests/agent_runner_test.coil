@@ -1,16 +1,16 @@
 (module harness-agent-runner-test)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "atomic.coil" :use *)
-(import "match.coil" :use *)
-(import "str.coil" :use *)
-(import "../src/core/event.coil" :use *)
-(import "../src/core/json.coil" :use *)
-(import "../src/core/model.coil" :use *)
-(import "../src/core/tool.coil" :use *)
-(import "../src/providers/common.coil" :use *)
-(import "../src/runtime/agent_runner.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+(import "harness-agent-runner" :use *)
 
 (defstruct FakeProviderState
   [(calls (ptr i64))
@@ -36,7 +36,7 @@
   (let [parsed
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
-        definition (alloc-stack ToolDefinition)
+        definition (stack ToolDefinition)
         implementation (box allocator FakeTool (zeroed FakeTool))]
     (store! (field (field definition spec) name) "fake")
     (store! (field (field definition spec) description) "fake")
@@ -50,7 +50,7 @@
     (load definition)))
 
 (defn fake-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
-  (let [call (alloc-stack ToolCall)]
+  (let [call (stack ToolCall)]
     (store! (field call id) id)
     (store! (field call name) "fake")
     (store! (field call arguments) (json-object allocator))
@@ -61,11 +61,11 @@
                              (request (ptr ModelRequest))
                              (emitter (ptr EventEmitter))
                              (allocator (ptr Allocator))] (-> ModelResult)
-  (let [call-number (iadd (atomic-add (load (field state calls)) 1) 1)
+  (let [call-number (+ (atomic-add (load (field state calls)) 1) 1)
         (mut response) (response-empty allocator)]
     (store! (field response provider) "fake")
     (store! (field response model) "fake-model")
-    (if (icmp-eq call-number 1)
+    (if (= call-number 1)
         (do
           (store! (field response response-id) "first-response")
           (store! (field response raw-output) (JsonString "opaque-provider-state"))
@@ -77,10 +77,10 @@
                     (fake-call allocator "call-b")))
         (do
           (when (and (load (field (field request continuation) present))
-                     (icmp-eq (al-len [ToolResult]
-                                      (load (load (field (field request continuation)
-                                                         tool-results))))
-                              2))
+                     (= (al-len [ToolResult]
+                                (load (load (field (field request continuation)
+                                                   tool-results))))
+                        2))
             (atomic-store (load (field state observed-continuation)) 1)
             0)
           (store! (field response response-id) "final-response")
@@ -114,10 +114,10 @@
                registry (box allocator ToolRegistry (tool-registry-new allocator))
                messages (box allocator (ArrayList Message) (al-new [Message] allocator))
                request (box allocator ModelRequest (zeroed ModelRequest))
-               sink (alloc-stack CountingEventSink)
+               sink (stack CountingEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc-stack AgentRunPolicy)
-               authorizer (alloc-stack AllowAllAuthorizer)]
+               policy (stack AgentRunPolicy)
+               authorizer (stack AllowAllAuthorizer)]
            (store! (field state calls) calls)
            (store! (field state observed-continuation) observed)
            (tool-register! registry (fake-definition allocator))

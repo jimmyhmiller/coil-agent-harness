@@ -1,10 +1,10 @@
 (module harness-model)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "../core/json.coil" :use *)
-(import "../core/tool.coil" :use *)
-(import "../core/event.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "harness-event" :use *)
 
 (defsum MessageRole
   (SystemRole [])

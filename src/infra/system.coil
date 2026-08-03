@@ -1,0 +1,18 @@
+(module harness-system)
+
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.time" :as time)
+
+(defn now-ms [] (-> i64)
+  (match (time/wall-now-ms)
+    (Ok [value] value)
+    (Err [failure] 0)))
+
+(defn sleep-ms [(milliseconds i64)] (-> i64)
+  (match (time/duration-millis milliseconds)
+    (Err [failure] -1)
+    (Ok [duration]
+        (match (time/sleep duration)
+          (Ok [value] value)
+          (Err [failure] -1)))))

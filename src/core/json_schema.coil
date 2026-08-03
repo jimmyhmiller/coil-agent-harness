@@ -1,12 +1,12 @@
 (module harness-json-schema)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "match.coil" :use *)
-(import "result.coil" :use *)
-(import "slice.coil" :use *)
-(import "str.coil" :use *)
-(import "../core/json.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
 
 (defstruct SchemaValidation
   [(ok bool)
@@ -14,14 +14,14 @@
    (message (slice u8))])
 
 (defn schema-valid [] (-> SchemaValidation)
-  (let [result (alloc-stack SchemaValidation)]
+  (let [result (stack SchemaValidation)]
     (store! (field result ok) true)
     (store! (field result path) "$")
     (store! (field result message) "")
     (load result)))
 
 (defn schema-invalid [(path (slice u8)) (message (slice u8))] (-> SchemaValidation)
-  (let [result (alloc-stack SchemaValidation)]
+  (let [result (stack SchemaValidation)]
     (store! (field result ok) false)
     (store! (field result path) path)
     (store! (field result message) message)
@@ -55,14 +55,14 @@
                            (let [(mut i) 0
                                  n (al-len [Json] (load items))
                                  (mut allowed) false]
-                             (loop (if (icmp-ge (load i) n)
+                             (loop (if (>= (load i) n)
                                        (break)
                                        (match-else (al-get [Json] (load items) (load i))
                                                    (JsonString [expected]
                                                                (if (schema-type-matches? expected value)
                                                                    (do (store! allowed true) (break))
-                                                                   (store! i (iadd (load i) 1))))
-                                                   (_ (store! i (iadd (load i) 1))))))
+                                                                   (store! i (+ (load i) 1))))
+                                                   (_ (store! i (+ (load i) 1))))))
                              (load allowed)))
                 (_ false))))
 
@@ -76,13 +76,13 @@
                          (let [(mut i) 0
                                n (al-len [Json] (load items))
                                (mut found) false]
-                           (loop (if (icmp-ge (load i) n)
+                           (loop (if (>= (load i) n)
                                      (break)
                                      (if (json-schema-equal? allocator
                                                              (al-get [Json] (load items) (load i))
                                                              value)
                                          (do (store! found true) (break))
-                                         (store! i (iadd (load i) 1)))))
+                                         (store! i (+ (load i) 1)))))
                            (load found)))
               (_ false)))
 
@@ -93,12 +93,12 @@
                          (let [(mut i) 0
                                n (al-len [Json] (load required))
                                (mut valid) true]
-                           (loop (if (icmp-ge (load i) n)
+                           (loop (if (>= (load i) n)
                                      (break)
                                      (match-else (al-get [Json] (load required) (load i))
                                                  (JsonString [key]
                                                              (if (json-has-key? value key)
-                                                                 (store! i (iadd (load i) 1))
+                                                                 (store! i (+ (load i) 1))
                                                                  (do (store! valid false) (break))))
                                                  (_ (do (store! valid false) (break))))))
                            (load valid)))
@@ -116,7 +116,7 @@
                     (match (json-bool-value (json-get schema "additionalProperties"))
                       (Some [flag] flag)
                       (None [] true))]
-              (loop (if (or (icmp-ge (load i) n) (not (load (field result ok))))
+              (loop (if (or (>= (load i) n) (not (load (field result ok))))
                         (break)
                         (let [key (al-get [(slice u8)] (load keys) (load i))]
                           (if (json-has-key? properties key)
@@ -125,12 +125,12 @@
                                                                   (json-get properties key)
                                                                   (json-get value key)
                                                                   key
-                                                                  (iadd depth 1)))
+                                                                  (+ depth 1)))
                               (if additional
                                   0
                                   (store! result
                                           (schema-invalid key "additional property is not allowed"))))
-                          (store! i (iadd (load i) 1)))))
+                          (store! i (+ (load i) 1)))))
               (load result))))))
 
 (defn schema-array-valid? [(allocator (ptr Allocator)) (schema Json) (value Json) (path (slice u8)) (depth i64)] (-> SchemaValidation)
@@ -140,7 +140,7 @@
                            (let [(mut i) 0
                                  n (al-len [Json] (load items))
                                  (mut result) (schema-valid)]
-                             (loop (if (or (icmp-ge (load i) n) (not (load (field result ok))))
+                             (loop (if (or (>= (load i) n) (not (load (field result ok))))
                                        (break)
                                        (do
                                          (store! result
@@ -148,8 +148,8 @@
                                                                              item-schema
                                                                              (al-get [Json] (load items) (load i))
                                                                              path
-                                                                             (iadd depth 1)))
-                                         (store! i (iadd (load i) 1)))))
+                                                                             (+ depth 1)))
+                                         (store! i (+ (load i) 1)))))
                              (load result)))
                 (_ (schema-valid)))))
 
@@ -160,17 +160,17 @@
                          (let [(mut i) 0
                                n (al-len [Json] (load choices))
                                (mut valid) false]
-                           (loop (if (icmp-ge (load i) n)
+                           (loop (if (>= (load i) n)
                                      (break)
                                      (let [result
                                              (json-schema-validate-depth allocator
                                                                          (al-get [Json] (load choices) (load i))
                                                                          value
                                                                          path
-                                                                         (iadd depth 1))]
+                                                                         (+ depth 1))]
                                        (if (load (field result ok))
                                            (do (store! valid true) (break))
-                                           (store! i (iadd (load i) 1))))))
+                                           (store! i (+ (load i) 1))))))
                            (load valid)))
               (_ false)))
 
@@ -182,7 +182,7 @@
                                   (value Json)
                                   (path (slice u8))
                                   (depth i64)] (-> SchemaValidation)
-  (if (icmp-gt depth 64)
+  (if (> depth 64)
       (schema-invalid path "schema nesting exceeds 64 levels")
       (if (json-has-key? schema "anyOf")
           (if (schema-any-of-valid? allocator schema value path depth)

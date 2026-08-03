@@ -1,14 +1,14 @@
 (module harness-tool-executor)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "match.coil" :use *)
-(import "thread.coil" :use *)
-(import "../core/event.coil" :use *)
-(import "../core/json.coil" :use *)
-(import "../core/json_schema.coil" :use *)
-(import "../core/tool.coil" :use *)
-(import "../infra/native.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.thread" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-json-schema" :use *)
+(import "harness-tool" :use *)
+(import "harness-system" :use *)
 
 (defstruct ToolExecutionRequest
   [(run-id (slice u8))
@@ -42,7 +42,7 @@
                   (call ToolCall)
                   (payload Json)] (-> i64)
   (emit-event emitter
-              (harness_now_ms)
+              (now-ms)
               kind
               run-id
               (load (field call id))
@@ -58,7 +58,7 @@
         result-slot
           (index (load (field job results-data))
                  (load (field job result-index)))
-        started (harness_now_ms)]
+        started (now-ms)]
     (tool-event (load (field job emitter))
                 (ToolCallStarted)
                 (load (field job run-id))
@@ -70,7 +70,7 @@
             (execute-tool (load (field definition implementation))
                           call
                           (malloc-allocator))
-          finished (harness_now_ms)]
+          finished (now-ms)]
       (store! (field executed call-id) (load (field call id)))
       (store! (field executed started-at-ms) started)
       (store! (field executed finished-at-ms) finished)
@@ -99,13 +99,13 @@
 (defn denied-result [(call ToolCall) (reason (slice u8))] (-> ToolResult)
   (let [(mut result) (tool-result-empty (load (field call id)) (ToolDenied))]
     (store! (field result error) reason)
-    (store! (field result finished-at-ms) (harness_now_ms))
+    (store! (field result finished-at-ms) (now-ms))
     (load result)))
 
 (defn unknown-result [(call ToolCall)] (-> ToolResult)
   (let [(mut result) (tool-result-empty (load (field call id)) (ToolUnknown))]
     (store! (field result error) "unknown tool")
-    (store! (field result finished-at-ms) (harness_now_ms))
+    (store! (field result finished-at-ms) (now-ms))
     (load result)))
 
 ;; Execute all authorized calls, using at most `max-parallel` worker threads. Results
@@ -119,7 +119,7 @@
         (mut i) 0]
     (al-reserve! [ToolResult] (mut results) count)
     (al-reserve! [ToolJob] (mut jobs) count)
-    (loop (if (icmp-ge (load i) count)
+    (loop (if (>= (load i) count)
               (break)
               (let [call (al-get [ToolCall] (load calls) (load i))]
                 (al-push! [ToolResult]
@@ -180,7 +180,7 @@
                                                       call
                                                       (JsonString reason))))
                                 (Authorize []
-                                           (let [job (alloc-stack ToolJob)]
+                                           (let [job (stack ToolJob)]
                                              (store! (field job run-id) (load (field request run-id)))
                                              (store! (field job provider) (load (field request provider)))
                                              (store! (field job model) (load (field request model)))
@@ -197,36 +197,36 @@
                                                          (load (field request model))
                                                          call
                                                          (JsonString (load (field call name)))))))))))
-                (store! i (iadd (load i) 1)))))
+                (store! i (+ (load i) 1)))))
     
     (let [job-count (al-len [ToolJob] (load jobs))
           limit
-            (if (icmp-gt (load (field request max-parallel)) 0)
+            (if (> (load (field request max-parallel)) 0)
                 (load (field request max-parallel))
                 1)
           (mut start) 0]
-      (loop (if (icmp-ge (load start) job-count)
+      (loop (if (>= (load start) job-count)
                 (break)
-                (let [remaining (isub job-count (load start))
-                      batch-size (if (icmp-lt remaining limit) remaining limit)
+                (let [remaining (- job-count (load start))
+                      batch-size (if (< remaining limit) remaining limit)
                       (mut active) (al-new [ActiveThread] allocator)
                       (mut j) 0]
                   (al-reserve! [ActiveThread] (mut active) batch-size)
-                  (loop (if (icmp-ge (load j) batch-size)
+                  (loop (if (>= (load j) batch-size)
                             (break)
                             (do
                               (al-push! [ActiveThread] (mut active) (zeroed ActiveThread))
-                              (store! j (iadd (load j) 1)))))
+                              (store! j (+ (load j) 1)))))
                   (store! j 0)
-                  (loop (if (icmp-ge (load j) batch-size)
+                  (loop (if (>= (load j) batch-size)
                             (break)
                             (let [active-slot (index (load (field active data)) (load j))
-                                  job-slot (index (load (field jobs data)) (iadd (load start) (load j)))
+                                  job-slot (index (load (field jobs data)) (+ (load start) (load j)))
                                   spawn-code
                                     (thread-spawn (field active-slot thread)
                                                   (fnptr-of tool-job-run)
                                                   (cast (ptr i8) job-slot))]
-                              (if (icmp-eq spawn-code 0)
+                              (if (= spawn-code 0)
                                   (store! (field active-slot spawned) true)
                                   (let [call (field job-slot call)
                                         result-slot
@@ -236,7 +236,7 @@
                                           (tool-result-empty (load (field call id))
                                                              (ToolErrored))]
                                     (store! (field failed error) "could not spawn tool worker")
-                                    (store! (field failed finished-at-ms) (harness_now_ms))
+                                    (store! (field failed finished-at-ms) (now-ms))
                                     (store! result-slot (load failed))
                                     (tool-event (load (field job-slot emitter))
                                                 (ToolCallFailed)
@@ -245,17 +245,17 @@
                                                 (load (field job-slot model))
                                                 (load call)
                                                 (JsonString "could not spawn tool worker"))))
-                              (store! j (iadd (load j) 1)))))
+                              (store! j (+ (load j) 1)))))
                   (store! j 0)
-                  (loop (if (icmp-ge (load j) batch-size)
+                  (loop (if (>= (load j) batch-size)
                             (break)
                             (let [active-slot (index (load (field active data)) (load j))]
                               (when (load (field active-slot spawned))
                                 (thread-join (field active-slot thread))
                                 0)
-                              (store! j (iadd (load j) 1)))))
+                              (store! j (+ (load j) 1)))))
                   (al-free! [ActiveThread] (mut active))
-                  (store! start (iadd (load start) batch-size))))))
-    (let [batch (alloc-stack ToolExecutionBatch)]
+                  (store! start (+ (load start) batch-size))))))
+    (let [batch (stack ToolExecutionBatch)]
       (store! (field batch results) (load results))
       (load batch))))

@@ -24,7 +24,7 @@ slice.
 
 ## Build and verify
 
-Requirements are COIL, a C11 compiler, libcurl, pthread support, and (for Codex) the
+Requirements are COIL with its bundled HTTP dependency installed and (for Codex) the
 `codex` CLI installed and authenticated.
 
 ```sh
@@ -35,11 +35,10 @@ coil verify
 sh scripts/check_file_size.sh
 ```
 
-The test suites are declared in `Coil.toml`, so project `coil test` inherits the
-libcurl native dependency, C source, include directory, and linker configuration.
-`coil verify` validates the manifest, formatting, lint, every entry/test target graph,
-native inputs, and all tests. The standalone size-check script enforces the repository's
-4,000-line guard. Neither command spends model credits.
+The test suites are declared in `Coil.toml`. `coil verify` validates the manifest,
+formatting, lint, every entry/test target graph, and all tests. The standalone
+size-check script enforces the repository's 4,000-line guard. Neither command spends
+model credits.
 
 ## Credentials
 
@@ -75,15 +74,13 @@ runtime does not hard-code a provider's model catalogue.
 src/core/       Provider-neutral JSON, events, models, tools, schema validation
 src/runtime/    Bounded model/tool loop, background handle, parallel tool executor
 src/providers/  OpenAI Responses, two DeepSeek dialects, Codex App Server
-src/infra/      HTTP and the narrow C/POSIX bridge
-native/         libcurl, time, process, and pipe implementation
+src/infra/      Small adapters over Coil's hosted HTTP, time, and OS libraries
 schemas/codex/  Generated schemas for the locally installed Codex App Server protocol
 tests/          Deterministic unit, contract, concurrency, and runtime tests
 ```
 
-COIL places native objects and dependency files under `.coil/build/native/` and uses
-collision-free test runners under `.coil/build/test/`; source directories remain free
-of generated build products.
+COIL places build products under `.coil/build/`; source directories remain free of
+generated build products.
 
 Provider adapters own URLs, authentication, request/response formats, and preservation
 of provider-specific continuation state. Runtime code never switches on a provider

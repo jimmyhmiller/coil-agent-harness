@@ -1,24 +1,31 @@
 (module harness-main)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "match.coil" :use *)
-(import "slice.coil" :use *)
-(import "str.coil" :use *)
-(import "core/event.coil" :use *)
-(import "core/json.coil" :use *)
-(import "core/model.coil" :use *)
-(import "core/tool.coil" :use *)
-(import "infra/http.coil" :use *)
-(import "infra/native.coil" :use *)
-(import "providers/codex_app_server.coil" :use *)
-(import "providers/deepseek_anthropic.coil" :use *)
-(import "providers/deepseek_openai.coil" :use *)
-(import "providers/openai_responses.coil" :use *)
-(import "runtime/agent_runner.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "harness-http" :use *)
+(import "codex-app-server" :use *)
+(import "deepseek-anthropic" :use *)
+(import "deepseek-openai" :use *)
+(import "openai-responses" :use *)
+(import "harness-agent-runner" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
-  (harness_write_fd fd (slice-data [u8] value) (slice-len [u8] value)))
+  (let [writer (stack io/Writer)]
+    (match (io/write-all (io/fd-writer writer fd)
+                         (cast (ptr i8) (slice-data [u8] value))
+                         (slice-len [u8] value))
+      (Ok [written] written)
+      (Err [failure] -1))))
 
 (defn write-line [(fd i64) (value (slice u8))] (-> i64)
   (let [(mut line) (sb-new (malloc-allocator))]
@@ -98,7 +105,7 @@
     (load schema)))
 
 (defn echo-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
-  (let [definition (alloc-stack ToolDefinition)
+  (let [definition (stack ToolDefinition)
         implementation (box allocator EchoTool (zeroed EchoTool))]
     (store! (field (field definition spec) name) "echo")
     (store! (field (field definition spec) description)
@@ -116,9 +123,9 @@
                     (prompt (slice u8))
                     (force-tool bool)
                     (registry (ptr ToolRegistry))] (-> ModelRequest)
-  (let [request (alloc-stack ModelRequest)
+  (let [request (stack ModelRequest)
         messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        message (alloc-stack Message)]
+        message (stack Message)]
     (store! (field message role) (UserRole))
     (store! (field message content) prompt)
     (al-push! [Message] messages (load message))
@@ -156,9 +163,9 @@
                ModelRequest
                (make-request allocator model prompt force-tool registry))
         sequence (box allocator i64 1)
-        sink (alloc-stack CliEventSink)
-        authorizer (alloc-stack AllowAllAuthorizer)
-        policy (alloc-stack AgentRunPolicy)]
+        sink (stack CliEventSink)
+        authorizer (stack AllowAllAuthorizer)
+        policy (stack AgentRunPolicy)]
     (let [emitter (box allocator EventEmitter (event-emitter-new sink sequence))]
       (store! (field policy max-model-turns) 8)
       (store! (field policy max-parallel-tools) 8)
@@ -186,10 +193,12 @@
         openai-context (box allocator OpenAIResponsesContext (openai-context-default))
         deepseek-openai-context (box allocator DeepSeekOpenAIContext (deepseek-openai-context-default))
         deepseek-anthropic-context (box allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default))
-        cwd-buffer (harness_current_dir)
-        cwd (http-owned-copy allocator cwd-buffer)
+        cwd-result (os/current-dir allocator)
+        cwd
+          (match cwd-result
+            (Ok [owned] (os/owned-string-slice owned))
+            (Err [failure] "."))
         codex-context-value (box allocator CodexAppServerContext (codex-context cwd))]
-    (harness_buffer_free cwd-buffer)
     (tool-register! registry (echo-definition allocator))
     (if (and force-tool (str-eq provider-name "codex"))
         (do
@@ -210,7 +219,7 @@
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [count (cast i64 argc)]
-    (if (icmp-lt count 5)
+    (if (< count 5)
         (cli-usage)
         (let [command (cstr->str (load (index argv 1)))
               provider (cstr->str (load (index argv 2)))

@@ -11,7 +11,7 @@ provider capability   tool executor
          \              /
  model + tool + event contracts
               |
-        JSON / HTTP / native
+        JSON / hosted Coil libraries
 ```
 
 The runtime does not know URLs, headers, provider response shapes, or Codex
@@ -72,13 +72,12 @@ Foreground and background entry points call the same runner. A background handle
 owns only thread/job state and exposes completion polling plus an idempotent join;
 it does not fork orchestration behavior.
 
-## Native boundary
+## Hosted system boundary
 
-COIL owns orchestration and data modeling. `native/harness_native.c` is a small
-bridge for facilities not yet ergonomic in COIL: libcurl, monotonic wall-clock
-timestamps, process environment access, current-directory lookup, raw fd output,
-sleep used by concurrency tests, and bidirectional Codex App Server pipes. The C
-surface contains no provider policy.
+COIL owns orchestration, data modeling, HTTP, time, process environment access,
+current-directory lookup, fd I/O, sleep, readiness polling, and bidirectional Codex
+App Server pipes. The harness uses Coil's supported hosted libraries directly and
+contains no application-owned native shim.
 
 ## Deliberate next boundaries
 

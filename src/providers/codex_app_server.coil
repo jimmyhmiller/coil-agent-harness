@@ -1,17 +1,21 @@
 (module codex-app-server)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "match.coil" :use *)
-(import "result.coil" :use *)
-(import "slice.coil" :use *)
-(import "str.coil" :use *)
-(import "../core/event.coil" :use *)
-(import "../core/json.coil" :use *)
-(import "../core/model.coil" :use *)
-(import "../infra/http.coil" :use *)
-(import "../infra/native.coil" :use *)
-(import "../providers/common.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.selectors" :as selectors)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coil.subprocess" :as subprocess)
+(import "coil.time" :as time)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-http" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
 
 (defstruct CodexAppServerContext
   [(cwd (slice u8))
@@ -19,7 +23,7 @@
    (approval-policy (slice u8))])
 
 (defn codex-context [(cwd (slice u8))] (-> CodexAppServerContext)
-  (let [context (alloc-stack CodexAppServerContext)]
+  (let [context (stack CodexAppServerContext)]
     (store! (field context cwd) cwd)
     (store! (field context sandbox) "workspace-write")
     (store! (field context approval-policy) "never")
@@ -35,6 +39,53 @@
   [(ok bool)
    (message Json)
    (error (slice u8))])
+
+(defstruct CodexSpawnResult
+  [(code i64)
+   (process subprocess/Child)
+   (error (slice u8))])
+
+(defn codex-spawn [(allocator (ptr Allocator))] (-> CodexSpawnResult)
+  (let [result (stack CodexSpawnResult)
+        child (stack subprocess/Child)
+        args (stack (array (slice u8) 3))]
+    (store! (field result code) 0)
+    (store! (field result error) "")
+    (store! (index args 0) "app-server")
+    (store! (index args 1) "--listen")
+    (store! (index args 2) "stdio://")
+    (match (subprocess/spawn allocator
+                             child
+                             "codex"
+                             (slice-new [(slice u8)] (index args 0) 3)
+                             (subprocess/pipe-stdio)
+                             (subprocess/pipe-stdio)
+                             (subprocess/inherit-stdio))
+      (Ok [spawned] (store! (field result process) (load child)))
+      (Err [failure]
+           (do
+             (store! (field result code) -1)
+             (store! (field result error) "could not spawn Codex app-server"))))
+    (load result)))
+
+(defn codex-close [(process (ptr subprocess/Child))] (-> i64)
+  (subprocess/child-close-stdin process)
+  (match (subprocess/child-try-wait process)
+    (Ok [status]
+        (match status
+          (Some [finished] 0)
+          (None []
+                (do
+                  (subprocess/child-terminate process)
+                  (subprocess/child-wait process)
+                  0))))
+    (Err [failure]
+         (do
+           (subprocess/child-kill-and-wait process)
+           0)))
+  (match (subprocess/child-close process)
+    (Ok [value] value)
+    (Err [failure] -1)))
 
 (defn codex-rpc-request [(allocator (ptr Allocator)) (id i64) (method (slice u8)) (params Json)] (-> Json)
   (let [(mut request) (json-object allocator)]
@@ -71,7 +122,7 @@
     (json-put-string! (mut params)
                       "approvalPolicy"
                       (load (field context approval-policy)))
-    (when (icmp-gt (slice-len [u8] (load (field request instructions))) 0)
+    (when (> (slice-len [u8] (load (field request instructions))) 0)
       (json-put-string! (mut params)
                         "developerInstructions"
                         (load (field request instructions)))
@@ -82,10 +133,10 @@
   (let [messages (load (field request messages))
         (mut i) (al-len [Message] (load messages))
         (mut result) ""]
-    (loop (if (icmp-le (load i) 0)
+    (loop (if (<= (load i) 0)
               (break)
               (do
-                (store! i (isub (load i) 1))
+                (store! i (- (load i) 1))
                 (let [message (al-get [Message] (load messages) (load i))]
                   (match (load (field message role))
                     (UserRole []
@@ -110,32 +161,61 @@
                       (reasoning-effort-name (load (field request reasoning))))
     (codex-rpc-request allocator 3 "turn/start" (load params))))
 
-(defn codex-send [(allocator (ptr Allocator)) (process (ptr NativeProcess)) (message Json)] (-> i64)
-  (let [line (json-stringify allocator message)]
-    (harness_process_write_line process
-                                (slice-data [u8] line)
-                                (slice-len [u8] line))))
+(defn codex-send [(allocator (ptr Allocator))
+                  (process (ptr subprocess/Child))
+                  (message Json)] (-> i64)
+  (let [line (json-stringify allocator message)
+        writer (stack io/Writer)]
+    (match (subprocess/child-stdin-writer writer process)
+      (None [] -1)
+      (Some [output]
+            (match (io/write-line output line)
+              (Ok [written] 0)
+              (Err [failure] -1))))))
 
-(defn codex-read [(allocator (ptr Allocator)) (process (ptr NativeProcess)) (timeout-ms i64)] (-> CodexRead)
-  (let [native-line (alloc-stack NativeBuffer)
-        result (alloc-stack CodexRead)
-        code (harness_process_read_line process native-line timeout-ms)]
+(defn codex-read [(allocator (ptr Allocator))
+                  (process (ptr subprocess/Child))
+                  (timeout-ms i64)] (-> CodexRead)
+  (let [result (stack CodexRead)
+        reader (stack io/Reader)]
     (store! (field result ok) false)
     (store! (field result eof) false)
     (store! (field result message) (JsonNull))
     (store! (field result error) "")
-    (cond (icmp-eq code 1)
-            (let [line (http-owned-copy allocator (load native-line))
-                  parsed (json-parse allocator line)]
-              (harness_buffer_free (load native-line))
-              (if (load (field parsed ok))
-                  (do
-                    (store! (field result ok) true)
-                    (store! (field result message) (load (field parsed value)))
-                    0)
-                  (store! (field result error) "Codex app-server returned invalid JSON")))
-          (icmp-eq code 0) (store! (field result eof) true)
-          :else (store! (field result error) "Codex app-server read timed out or failed"))
+    (match (time/duration-millis timeout-ms)
+      (Err [failure]
+           (store! (field result error) "invalid Codex app-server timeout"))
+      (Ok [duration]
+          (match (selectors/wait-fd-for (load (field process stdout-fd))
+                                        (selectors/interest-readable)
+                                        duration)
+            (Err [failure]
+                 (store! (field result error) "Codex app-server read timed out or failed"))
+            (Ok [ready]
+                (match (subprocess/child-stdout-reader reader process)
+                  (None [] (store! (field result eof) true))
+                  (Some [input]
+                        (match (io/read-line-alloc allocator input 16777216)
+                          (Err [failure]
+                               (match failure
+                                 (io/Eof [] (store! (field result eof) true))
+                                 (io/Errno [code]
+                                           (store! (field result error) "Codex app-server read failed"))
+                                 (io/LineTooLong []
+                                                 (store! (field result error) "Codex app-server line was too long"))
+                                 (io/OutOfMemory []
+                                                 (store! (field result error) "Codex app-server allocation failed"))
+                                 (io/InvalidLimit []
+                                                  (store! (field result error) "invalid Codex app-server line limit"))))
+                          (Ok [owned]
+                              (let [parsed (json-parse allocator (io/owned-bytes-slice owned))]
+                                (if (load (field parsed ok))
+                                    (do
+                                      (store! (field result ok) true)
+                                      (store! (field result message) (load (field parsed value)))
+                                      0)
+                                    (store! (field result error)
+                                            "Codex app-server returned invalid JSON")))))))))))
     (load result)))
 
 (defn codex-emit [(emitter (ptr EventEmitter))
@@ -143,7 +223,7 @@
                   (kind EventKind)
                   (payload Json)] (-> i64)
   (emit-event emitter
-              (harness_now_ms)
+              (now-ms)
               kind
               (load (field request run-id))
               (load (field request operation-id))
@@ -153,7 +233,7 @@
               payload))
 
 (defn codex-reject-server-request [(allocator (ptr Allocator))
-                                   (process (ptr NativeProcess))
+                                   (process (ptr subprocess/Child))
                                    (message Json)] (-> i64)
   (let [(mut error) (json-object allocator)
         (mut response) (json-object allocator)]
@@ -166,7 +246,7 @@
     (codex-send allocator process (load response))))
 
 (defn codex-observe-message [(allocator (ptr Allocator))
-                             (process (ptr NativeProcess))
+                             (process (ptr subprocess/Child))
                              (emitter (ptr EventEmitter))
                              (request (ptr ModelRequest))
                              (message Json)] (-> i64)
@@ -187,11 +267,11 @@
     (None [] 0)))
 
 (defn codex-wait-response [(allocator (ptr Allocator))
-                           (process (ptr NativeProcess))
+                           (process (ptr subprocess/Child))
                            (emitter (ptr EventEmitter))
                            (request (ptr ModelRequest))
                            (wanted-id i64)] (-> CodexWait)
-  (let [result (alloc-stack CodexWait)
+  (let [result (stack CodexWait)
         (mut done) false]
     (store! (field result ok) false)
     (store! (field result message) (JsonNull))
@@ -208,7 +288,7 @@
                       (break))
                     (let [message (load (field read-result message))]
                       (codex-observe-message allocator process emitter request message)
-                      (when (icmp-eq (json-number-i64 (json-get message "id")) wanted-id)
+                      (when (= (json-number-i64 (json-get message "id")) wanted-id)
                         (if (match-else (json-get message "error")
                                         (JsonNull [] false)
                                         (_ true))
@@ -223,7 +303,7 @@
     (load result)))
 
 (defn codex-turn-loop [(allocator (ptr Allocator))
-                       (process (ptr NativeProcess))
+                       (process (ptr subprocess/Child))
                        (emitter (ptr EventEmitter))
                        (request (ptr ModelRequest))
                        (thread-id (slice u8))] (-> ModelResult)
@@ -231,7 +311,7 @@
         (mut final) (JsonNull)
         (mut completed) false
         (mut failure) ""]
-    (loop (if (or (load completed) (icmp-gt (slice-len [u8] (load failure)) 0))
+    (loop (if (or (load completed) (> (slice-len [u8] (load failure)) 0))
               (break)
               (let [read-result (codex-read allocator process (load (field request timeout-ms)))]
                 (if (not (load (field read-result ok)))
@@ -264,7 +344,7 @@
                                         (Some [value] value)
                                         (None [] status))))
                           0)))))))
-    (if (icmp-gt (slice-len [u8] (load failure)) 0)
+    (if (> (slice-len [u8] (load failure)) 0)
         (model-failure "codex-app-server" 0 (load failure))
         (let [(mut response) (response-empty allocator)]
           (store! (field response provider) "codex-app-server")
@@ -278,14 +358,14 @@
           (ModelOk (load response))))))
 
 (defn codex-start-and-run-turn [(allocator (ptr Allocator))
-                                (process (ptr NativeProcess))
+                                (process (ptr subprocess/Child))
                                 (emitter (ptr EventEmitter))
                                 (request (ptr ModelRequest))
                                 (thread-id (slice u8))] (-> ModelResult)
-  (if (icmp-ne (codex-send allocator
-                           process
-                           (codex-turn-start-request allocator thread-id request))
-               0)
+  (if (!= (codex-send allocator
+                      process
+                      (codex-turn-start-request allocator thread-id request))
+          0)
       (model-failure "codex-app-server" 0 "could not send turn/start")
       (let [started (codex-wait-response allocator process emitter request 3)]
         (if (not (load (field started ok)))
@@ -296,19 +376,17 @@
                      (request (ptr ModelRequest))
                      (emitter (ptr EventEmitter))
                      (allocator (ptr Allocator))] (-> ModelResult)
-  (let [spawn-result (harness_codex_spawn)]
-    (if (icmp-ne (load (field spawn-result code)) 0)
-        (let [message (http-owned-copy allocator (load (field spawn-result error)))]
-          (harness_buffer_free (load (field spawn-result error)))
-          (model-failure "codex-app-server" 0 message))
+  (let [spawn-result (codex-spawn allocator)]
+    (if (!= (load (field spawn-result code)) 0)
+        (model-failure "codex-app-server" 0 (load (field spawn-result error)))
         (let [(mut process) (load (field spawn-result process))]
           (codex-emit emitter request (ModelRequestStarted) (JsonNull))
-          (if (icmp-ne (codex-send allocator
-                                   (mut process)
-                                   (codex-initialize-request allocator))
-                       0)
+          (if (!= (codex-send allocator
+                              (mut process)
+                              (codex-initialize-request allocator))
+                  0)
               (do
-                (harness_process_close (mut process))
+                (codex-close (mut process))
                 (codex-emit emitter
                             request
                             (ModelRequestFailed)
@@ -319,7 +397,7 @@
               (let [initialized (codex-wait-response allocator (mut process) emitter request 1)]
                 (if (not (load (field initialized ok)))
                     (do
-                      (harness_process_close (mut process))
+                      (codex-close (mut process))
                       (codex-emit emitter
                                   request
                                   (ModelRequestFailed)
@@ -337,7 +415,7 @@
                       (let [started (codex-wait-response allocator (mut process) emitter request 2)]
                         (if (not (load (field started ok)))
                             (do
-                              (harness_process_close (mut process))
+                              (codex-close (mut process))
                               (codex-emit emitter
                                           request
                                           (ModelRequestFailed)
@@ -351,9 +429,9 @@
                                                            "id")
                                       (Some [value] value)
                                       (None [] ""))]
-                              (if (icmp-eq (slice-len [u8] thread-id) 0)
+                              (if (= (slice-len [u8] thread-id) 0)
                                   (do
-                                    (harness_process_close (mut process))
+                                    (codex-close (mut process))
                                     (codex-emit emitter
                                                 request
                                                 (ModelRequestFailed)
@@ -368,7 +446,7 @@
                                                                       emitter
                                                                       request
                                                                       thread-id)]
-                                      (harness_process_close (mut process))
+                                      (codex-close (mut process))
                                       (match turn-result
                                         (ModelOk [response]
                                                  (do

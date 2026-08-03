@@ -1,5 +1,9 @@
 # COIL native-gap report for the agent harness
 
+> Historical report: the listed gaps have since been filled by Coil's hosted HTTP,
+> subprocess, selector, OS, time, and I/O libraries, and the harness migration is
+> complete.
+
 ## Goal
 
 The harness should contain no project-written C. All operating-system and network

@@ -1,15 +1,15 @@
 (module provider-common)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "match.coil" :use *)
-(import "result.coil" :use *)
-(import "slice.coil" :use *)
-(import "str.coil" :use *)
-(import "../core/json.coil" :use *)
-(import "../core/model.coil" :use *)
-(import "../core/tool.coil" :use *)
-(import "../infra/native.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
 
 (const TOOL_LAYOUT_RESPONSES 0)
 (const TOOL_LAYOUT_CHAT 1)
@@ -19,12 +19,20 @@
   [(primary-env (ptr i8))
    (fallback-env (ptr i8))])
 
-;; Return a borrowed process-environment value, trying the primary name first.
-(defn api-key [(credential ApiCredential)] (-> (ptr i8))
-  (let [primary (harness_getenv (load (field credential primary-env)))]
-    (if (icmp-ne (cast i64 primary) 0)
-        primary
-        (harness_getenv (load (field credential fallback-env))))))
+;; Return an allocator-owned credential value, trying the primary name first.
+(defn api-key [(allocator (ptr Allocator)) (credential ApiCredential)] (-> (slice u8))
+  (match (os/env-get allocator (cstr->str (load (field credential primary-env))))
+    (Ok [primary]
+        (match primary
+          (Some [value] (os/owned-string-slice value))
+          (None []
+                (match (os/env-get allocator (cstr->str (load (field credential fallback-env))))
+                  (Ok [fallback]
+                      (match fallback
+                        (Some [value] (os/owned-string-slice value))
+                        (None [] "")))
+                  (Err [failure] "")))))
+    (Err [failure] "")))
 
 (defn json-put-string! [(object (mut Json)) (key (slice u8)) (value (slice u8))] (-> bool)
   (json-object-put! (mut object) key (JsonString value)))
@@ -42,20 +50,20 @@
     (json-put-string! (mut function) "name" (load (field spec name)))
     (json-put-string! (mut function) "description" (load (field spec description)))
     (json-object-put! (mut function)
-                      (if (icmp-eq layout TOOL_LAYOUT_ANTHROPIC)
+                      (if (= layout TOOL_LAYOUT_ANTHROPIC)
                           "input_schema"
                           "parameters")
                       (load (field spec input-schema)))
-    (when (icmp-ne layout TOOL_LAYOUT_ANTHROPIC)
+    (when (!= layout TOOL_LAYOUT_ANTHROPIC)
       (json-put-bool! (mut function) "strict" (load (field spec strict)))
       0)
-    (if (icmp-eq layout TOOL_LAYOUT_CHAT)
+    (if (= layout TOOL_LAYOUT_CHAT)
         (let [(mut wrapper) (json-object allocator)]
           (json-put-string! (mut wrapper) "type" "function")
           (json-object-put! (mut wrapper) "function" (load function))
           (load wrapper))
         (do
-          (when (icmp-eq layout TOOL_LAYOUT_RESPONSES)
+          (when (= layout TOOL_LAYOUT_RESPONSES)
             (json-put-string! (mut function) "type" "function")
             0)
           (load function)))))
@@ -65,21 +73,21 @@
         definitions (field registry definitions)
         (mut i) 0
         n (al-len [ToolDefinition] (load definitions))]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (>= (load i) n)
               (break)
               (let [definition (al-get [ToolDefinition] (load definitions) (load i))]
                 (json-array-push! (mut tools)
                                   (tool-spec-wire allocator
                                                   (load (field definition spec))
                                                   layout))
-                (store! i (iadd (load i) 1)))))
+                (store! i (+ (load i) 1)))))
     (load tools)))
 
 (defn messages-wire [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
   (let [(mut result) (json-array allocator)
         (mut i) 0
         n (al-len [Message] (load messages))]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (>= (load i) n)
               (break)
               (let [message (al-get [Message] (load messages) (load i))
                     (mut object) (json-object allocator)]
@@ -90,7 +98,7 @@
                                   "content"
                                   (load (field message content)))
                 (json-array-push! (mut result) (load object))
-                (store! i (iadd (load i) 1)))))
+                (store! i (+ (load i) 1)))))
     (load result)))
 
 (defn tool-choice-responses [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
@@ -141,7 +149,7 @@
   (zeroed ModelUsage))
 
 (defn response-empty [(allocator (ptr Allocator))] (-> ModelResponse)
-  (let [response (alloc-stack ModelResponse)]
+  (let [response (stack ModelResponse)]
     (store! (field response provider) "")
     (store! (field response model) "")
     (store! (field response response-id) "")
@@ -154,19 +162,19 @@
 (defn model-failure [(provider (slice u8))
                      (status i64)
                      (message (slice u8))] (-> ModelResult)
-  (let [failure (alloc-stack ModelFailure)]
+  (let [failure (stack ModelFailure)]
     (store! (field failure kind)
-            (cond (icmp-eq status 0) (TransportFailure)
-                  (or (icmp-eq status 401) (icmp-eq status 403)) (AuthenticationFailure)
-                  (icmp-eq status 429) (RateLimitFailure)
+            (cond (= status 0) (TransportFailure)
+                  (or (= status 401) (= status 403)) (AuthenticationFailure)
+                  (= status 429) (RateLimitFailure)
                   :else (ProviderFailure)))
     (store! (field failure provider) provider)
     (store! (field failure status-code) status)
     (store! (field failure message) message)
     (store! (field failure retryable)
-            (or (icmp-eq status 0)
-                (or (icmp-eq status 408)
-                    (or (icmp-eq status 429) (icmp-ge status 500)))))
+            (or (= status 0)
+                (or (= status 408)
+                    (or (= status 429) (>= status 500)))))
     (ModelErr (load failure))))
 
 (defn json-error-message [(root Json) (fallback (slice u8))] (-> (slice u8))
@@ -178,7 +186,7 @@
                         (id (slice u8))
                         (name (slice u8))
                         (raw-arguments (slice u8))] (-> ToolCall)
-  (let [call (alloc-stack ToolCall)
+  (let [call (stack ToolCall)
         parsed (json-parse allocator raw-arguments)]
     (store! (field call id) id)
     (store! (field call name) name)

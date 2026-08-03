@@ -1,7 +1,7 @@
 (module harness-event)
 
-(import "atomic.coil" :use *)
-(import "../core/json.coil" :use *)
+(import "coil.atomic" :use *)
+(import "harness-json" :use *)
 
 ;; Stable semantic lifecycle categories. Additions are expected; existing meanings
 ;; must not be repurposed because persisted event streams and UIs depend on them.
@@ -55,7 +55,7 @@
 ;; Create an emitter over caller-owned sequence storage. The sequence cell must
 ;; outlive every worker that uses the emitter.
 (defn event-emitter-new [(sink (dyn EventSink)) (next-sequence (ptr i64))] (-> EventEmitter)
-  (let [emitter (alloc-stack EventEmitter)]
+  (let [emitter (stack EventEmitter)]
     (store! (field emitter sink) sink)
     (store! (field emitter next-sequence) next-sequence)
     (load emitter)))
@@ -71,7 +71,7 @@
                   (model (slice u8))
                   (payload Json)] (-> i64)
   (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
-        event (alloc-stack Event)
+        event (stack Event)
         sink (field emitter sink)]
     (store! (field event version) 1)
     (store! (field event sequence) sequence)

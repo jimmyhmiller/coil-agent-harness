@@ -1,12 +1,10 @@
 (module harness-http)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "mem.coil" :use *)
-(import "result.coil" :use *)
-(import "slice.coil" :use *)
-(import "str.coil" :use *)
-(import "../infra/native.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.http.client" :as client)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
 
 (defstruct HttpChunkSink
   [(context (ptr i8))
@@ -28,70 +26,63 @@
 (defn discard-http-chunk [(data (ptr u8)) (len usize) (context (ptr i8))] (-> usize)
   len)
 
-(defn http-owned-copy [(allocator (ptr Allocator)) (buffer NativeBuffer)] (-> (slice u8))
-  (let [len (load (field buffer len))]
-    (if (icmp-le len 0)
-        ""
-        (match (raw-alloc allocator len 1)
-          (None [] "")
-          (Some [raw]
-                (let [destination (cast (ptr u8) raw)]
-                  (mem-copy [u8] destination (load (field buffer data)) len)
-                  (slice-new [u8] destination len)))))))
-
-;; Perform a JSON HTTP POST. Authentication values are supplied as complete header
-;; lines by the provider boundary and are never logged here.
-(defn http-post [(allocator (ptr Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
-  (let [headers (load (field request headers))
-        count (al-len [(slice u8)] (load headers))
-        pointer-bytes (imul (iadd count 1) (sizeof (ptr i8)))
-        header-pointers
-          (cast (ptr (ptr i8))
-                (unwrap-ptr [i8] (raw-alloc allocator pointer-bytes (alignof (ptr i8)))))
-        (mut i) 0]
-    (loop (if (icmp-ge (load i) count)
+(defn header-colon [(line (slice u8))] (-> i64)
+  (let [(mut i) 0
+        (mut found) -1]
+    (loop (if (>= (load i) (slice-len [u8] line))
               (break)
-              (do
-                (store! (index header-pointers (load i))
-                        (str->cstr allocator
-                                   (al-get [(slice u8)] (load headers) (load i))))
-                (store! i (iadd (load i) 1)))))
-    (store! (index header-pointers count) (cast (ptr i8) 0))
-    (let [url (str->cstr allocator (load (field request url)))
-          chunks (field request chunks)
-          native
-            (harness_http_post url
-                               header-pointers
-                               (slice-data [u8] (load (field request body)))
-                               (slice-len [u8] (load (field request body)))
-                               (load (field request timeout-ms))
-                               (load (field chunks consume))
-                               (load (field chunks context)))
-          result (alloc-stack HttpResponse)]
-      (store! (field result transport-code) (load (field native transport-code)))
-      (store! (field result status-code) (load (field native status-code)))
-      (store! (field result body)
-              (http-owned-copy allocator (load (field native body))))
-      (store! (field result error)
-              (http-owned-copy allocator (load (field native error))))
-      (harness_buffer_free (load (field native body)))
-      (harness_buffer_free (load (field native error)))
-      (store! i 0)
-      (loop (if (icmp-ge (load i) count)
-                (break)
-                (let [header (al-get [(slice u8)] (load headers) (load i))
-                      pointer (load (index header-pointers (load i)))]
-                  (raw-free allocator
-                            (cast (ptr i8) pointer)
-                            (iadd (slice-len [u8] header) 1)
-                            1)
-                  (store! i (iadd (load i) 1)))))
-      (raw-free allocator
-                (cast (ptr i8) url)
-                (iadd (slice-len [u8] (load (field request url))) 1)
-                1)
-      (raw-free allocator
-                (cast (ptr i8) header-pointers)
-                pointer-bytes
-                (alignof (ptr i8)))
-      (load result))))
+              (if (= (cast i64 (slice-get [u8] line (load i))) 58)
+                  (do (store! found (load i)) (break))
+                  (store! i (+ (load i) 1)))))
+    (load found)))
+
+(defn request-headers [(allocator (ptr Allocator))
+                       (lines (ptr (ArrayList (slice u8))))] (-> (slice client/Header))
+  (let [(mut headers) (al-new [client/Header] allocator)
+        (mut i) 0
+        count (al-len [(slice u8)] (load lines))]
+    (al-reserve! [client/Header] (mut headers) count)
+    (loop (if (>= (load i) count)
+              (break)
+              (let [line (al-get [(slice u8)] (load lines) (load i))
+                    colon (header-colon line)]
+                (when (> colon 0)
+                  (let [header (stack client/Header)
+                        value-start
+                          (if (and (< (+ colon 1) (slice-len [u8] line))
+                                   (= (cast i64 (slice-get [u8] line (+ colon 1))) 32))
+                              (+ colon 2)
+                              (+ colon 1))]
+                    (store! (field header name) (subslice [u8] line 0 colon))
+                    (store! (field header value)
+                            (subslice [u8] line value-start (slice-len [u8] line)))
+                    (al-push! [client/Header] (mut headers) (load header))))
+                (store! i (+ (load i) 1)))))
+    (al-into-slice [client/Header] (mut headers))))
+
+;; Adapt the harness's existing POST shape to Coil's supported HTTP client.
+(defn http-post [(allocator (ptr Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
+  (let [headers (request-headers allocator (load (field request headers)))
+        native-request (stack client/Request)
+        result (stack HttpResponse)]
+    (store! (field result transport-code) 0)
+    (store! (field result status-code) 0)
+    (store! (field result body) "")
+    (store! (field result error) "")
+    (store! (field native-request method) "POST")
+    (store! (field native-request url) (load (field request url)))
+    (store! (field native-request headers) headers)
+    (store! (field native-request body) (load (field request body)))
+    (store! (field native-request connect-timeout-ms) (load (field request timeout-ms)))
+    (store! (field native-request timeout-ms) (load (field request timeout-ms)))
+    (store! (field native-request follow-redirects) false)
+    (match (client/request allocator native-request)
+      (Ok [response]
+          (do
+            (store! (field result status-code) (client/response-status response))
+            (store! (field result body) (client/response-body response))))
+      (Err [failure]
+           (do
+             (store! (field result transport-code) -1)
+             (store! (field result error) "HTTP transport failed"))))
+    (load result)))

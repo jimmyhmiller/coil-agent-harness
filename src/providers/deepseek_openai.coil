@@ -1,18 +1,18 @@
 (module deepseek-openai)
 
-(import "alloc.coil" :use *)
-(import "arraylist.coil" :use *)
-(import "match.coil" :use *)
-(import "result.coil" :use *)
-(import "slice.coil" :use *)
-(import "str.coil" :use *)
-(import "../core/event.coil" :use *)
-(import "../core/json.coil" :use *)
-(import "../core/model.coil" :use *)
-(import "../core/tool.coil" :use *)
-(import "../infra/http.coil" :use *)
-(import "../infra/native.coil" :use *)
-(import "../providers/common.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "harness-http" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
 
 (defstruct DeepSeekOpenAIContext
   [(endpoint (slice u8))
@@ -20,7 +20,7 @@
    (credential ApiCredential)])
 
 (defn deepseek-openai-context-default [] (-> DeepSeekOpenAIContext)
-  (let [context (alloc-stack DeepSeekOpenAIContext)]
+  (let [context (stack DeepSeekOpenAIContext)]
     (store! (field context endpoint) "https://api.deepseek.com/chat/completions")
     (store! (field context strict-endpoint) "https://api.deepseek.com/beta/chat/completions")
     (store! (field (field context credential) primary-env) c"DEEPSEEK_API_KEY")
@@ -32,12 +32,12 @@
         (mut i) 0
         n (al-len [ToolDefinition] (load definitions))
         (mut strict) false]
-    (loop (if (icmp-ge (load i) n)
+    (loop (if (>= (load i) n)
               (break)
               (let [definition (al-get [ToolDefinition] (load definitions) (load i))]
                 (if (load (field (field definition spec) strict))
                     (do (store! strict true) (break))
-                    (store! i (iadd (load i) 1))))))
+                    (store! i (+ (load i) 1))))))
     (load strict)))
 
 (defn deepseek-tool-result-message [(allocator (ptr Allocator)) (result ToolResult)] (-> Json)
@@ -67,13 +67,13 @@
       (let [results (load (field continuation tool-results))
             (mut i) 0
             n (al-len [ToolResult] (load results))]
-        (loop (if (icmp-ge (load i) n)
+        (loop (if (>= (load i) n)
                   (break)
                   (do
                     (json-array-push! (mut messages)
                                       (deepseek-tool-result-message allocator
                                                                     (al-get [ToolResult] (load results) (load i))))
-                    (store! i (iadd (load i) 1))))))
+                    (store! i (+ (load i) 1))))))
       0)
     (load messages)))
 
@@ -97,15 +97,15 @@
                         "reasoning_effort"
                         (reasoning-effort-name (load (field request reasoning))))
       0)
-    (when (icmp-gt (load (field request max-output-tokens)) 0)
+    (when (> (load (field request max-output-tokens)) 0)
       (json-object-put! (mut body)
                         "max_tokens"
                         (json-integer allocator
                                       (load (field request max-output-tokens))))
       0)
-    (when (icmp-gt (al-len [ToolDefinition]
-                           (load (field (load (field request tools)) definitions)))
-                   0)
+    (when (> (al-len [ToolDefinition]
+                     (load (field (load (field request tools)) definitions)))
+             0)
       (json-object-put! (mut body)
                         "tools"
                         (tool-registry-wire allocator
@@ -120,7 +120,7 @@
     (load body)))
 
 (defn deepseek-openai-usage [(root Json)] (-> ModelUsage)
-  (let [usage (alloc-stack ModelUsage)
+  (let [usage (stack ModelUsage)
         wire (json-get root "usage")]
     (store! (field usage input-tokens)
             (json-number-i64 (json-get wire "prompt_tokens")))
@@ -145,7 +145,7 @@
             (match (json-string-at root "model") (Some [value] value) (None [] "")))
     (store! (field response output-text)
             (match (json-string-at message "content") (Some [value] value) (None [] "")))
-    (loop (if (icmp-ge (load i) count)
+    (loop (if (>= (load i) count)
               (break)
               (let [wire (json-array-get calls (load i))
                     function (json-get wire "function")
@@ -164,7 +164,7 @@
                 (al-push! [ToolCall]
                           (mut (field response tool-calls))
                           (parsed-tool-call allocator id name arguments))
-                (store! i (iadd (load i) 1)))))
+                (store! i (+ (load i) 1)))))
     (store! (field response usage) (deepseek-openai-usage root))
     (store! (field response raw-output) root)
     (load response)))
@@ -174,7 +174,7 @@
                              (kind EventKind)
                              (payload Json)] (-> i64)
   (emit-event emitter
-              (harness_now_ms)
+              (now-ms)
               kind
               (load (field request run-id))
               (load (field request operation-id))
@@ -187,14 +187,14 @@
                                (request (ptr ModelRequest))
                                (emitter (ptr EventEmitter))
                                (allocator (ptr Allocator))] (-> ModelResult)
-  (let [key (api-key (load (field context credential)))]
-    (if (icmp-eq (cast i64 key) 0)
+  (let [key (api-key allocator (load (field context credential)))]
+    (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-openai" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
                 (box allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
-              authorization (concat-or-empty allocator "Authorization: Bearer " (cstr->str key))
+              authorization (concat-or-empty allocator "Authorization: Bearer " key)
               endpoint
                 (if (registry-needs-strict? (load (field request tools)))
                     (load (field context strict-endpoint))
@@ -203,7 +203,7 @@
           (al-push! [(slice u8)] headers authorization)
           (let [wire (deepseek-openai-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (alloc-stack HttpRequest)]
+                http-request (stack HttpRequest)]
             (store! (field http-request url) endpoint)
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)
@@ -212,7 +212,7 @@
             (store! (field (field http-request chunks) consume) (fnptr-of discard-http-chunk))
             (deepseek-openai-event emitter request (ModelRequestStarted) (JsonNull))
             (let [http (http-post allocator http-request)]
-              (if (icmp-ne (load (field http transport-code)) 0)
+              (if (!= (load (field http transport-code)) 0)
                   (do
                     (deepseek-openai-event emitter
                                            request
@@ -231,7 +231,7 @@
                                          "DeepSeek returned invalid JSON"))
                         (let [root (load (field parsed value))
                               status (load (field http status-code))]
-                          (if (or (icmp-lt status 200) (icmp-ge status 300))
+                          (if (or (< status 200) (>= status 300))
                               (let [message (json-error-message root (load (field http body)))]
                                 (deepseek-openai-event emitter
                                                        request

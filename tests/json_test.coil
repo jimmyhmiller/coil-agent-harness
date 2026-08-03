@@ -1,10 +1,10 @@
 (module harness-json-test)
 
-(import "alloc.coil" :use *)
-(import "match.coil" :use *)
-(import "str.coil" :use *)
-(import "../src/core/json.coil" :use *)
-(import "../src/core/json_schema.coil" :use *)
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-json-schema" :use *)
 
 (deftest parses-and-serializes-owned-json
          (let [allocator (malloc-allocator)
