@@ -8,6 +8,7 @@
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
+(import "harness-interactive-authorizer" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
@@ -197,6 +198,97 @@
                                           (load (field recovery last-sequence))))
           (service-response 200 (load result))))))
 
+(defn service-authorization-response [(service (ptr RunService))
+                                      (run-id (slice u8))
+                                      (authorization-id (slice u8))
+                                      (status i64)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        recovery (service-recover service)
+        decision
+          (authorization-decision (field recovery events)
+                                  run-id
+                                  authorization-id)
+        (mut body) (json-object allocator)]
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-put-string! (mut body) "run_id" run-id)
+    (json-put-string! (mut body) "authorization_id" authorization-id)
+    (match decision
+      (AuthorizationPending [] (json-put-string! (mut body) "decision" "pending"))
+      (AuthorizationAllowed [] (json-put-string! (mut body) "decision" "allow"))
+      (AuthorizationRejected [reason]
+                             (do
+                               (json-put-string! (mut body) "decision" "reject")
+                               (json-put-string! (mut body) "reason" reason))))
+    (service-response status (load body))))
+
+(defn authorization-command-valid? [(command Json)] (-> bool)
+  (and (command-valid? command)
+       (and (> (slice-len [u8] (command-string command "authorization_id")) 0)
+            (match (json-string-at command "decision")
+              (Some [value] (or (str-eq value "allow") (str-eq value "reject")))
+              (None [] false)))))
+
+(defn service-decide-authorization [(service (ptr RunService))
+                                    (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))]
+    (if (not (authorization-command-valid? command))
+        (service-error allocator
+                       400
+                       "invalid_command"
+                       "expected an allow or reject authorization command")
+        (let [recovery (service-recover service)
+              command-id (command-string command "command_id")
+              run-id (command-string command "run_id")
+              authorization-id (command-string command "authorization_id")]
+          (if (not (load (field recovery ok)))
+              (service-error allocator
+                             500
+                             "journal_recovery_failed"
+                             (load (field recovery error)))
+              (if (> (journal-command-sequence (field recovery events) command-id) 0)
+                  (service-authorization-response service run-id authorization-id 200)
+                  (if (= (authorization-request-sequence (field recovery events)
+                                                         run-id
+                                                         authorization-id)
+                         0)
+                      (service-error allocator
+                                     404
+                                     "authorization_not_found"
+                                     "authorization request does not exist")
+                      (match (authorization-decision (field recovery events)
+                                                     run-id
+                                                     authorization-id)
+                        (AuthorizationAllowed []
+                                              (service-error allocator
+                                                             409
+                                                             "authorization_decided"
+                                                             "authorization already has a decision"))
+                        (AuthorizationRejected [reason]
+                                               (service-error allocator
+                                                              409
+                                                              "authorization_decided"
+                                                              "authorization already has a decision"))
+                        (AuthorizationPending []
+                                              (do
+                                                (emit-event (load (field service emitter))
+                                                            (now-ms)
+                                                            (AuthorizationDecided)
+                                                            run-id
+                                                            authorization-id
+                                                            ""
+                                                            "service"
+                                                            ""
+                                                            command)
+                                                (if (event-journal-failed? (load (field service journal)))
+                                                    (service-error allocator
+                                                                   500
+                                                                   "journal_write_failed"
+                                                                   "authorization decision was not durable")
+                                                    (service-authorization-response service
+                                                                                    run-id
+                                                                                    authorization-id
+                                                                                    202))))))))))))
+
 (defn run-created-before? [(events (ref (ArrayList Json)))
                            (before i64)
                            (run-id (slice u8))] (-> bool)
@@ -311,6 +403,24 @@
               ""))
     (None [] "")))
 
+(defn service-authorization-marker [(rest (slice u8))] (-> i64)
+  (match (str-find rest "/authorizations/")
+    (Some [position] position)
+    (None [] -1)))
+
+(defn service-authorization-run-id [(rest (slice u8))] (-> (slice u8))
+  (let [marker (service-authorization-marker rest)]
+    (if (> marker 0) (subslice [u8] rest 0 marker) "")))
+
+(defn service-authorization-id [(rest (slice u8))] (-> (slice u8))
+  (let [marker (service-authorization-marker rest)]
+    (if (> marker 0)
+        (let [start (+ marker 16)]
+          (if (< start (slice-len [u8] rest))
+              (subslice [u8] rest start (slice-len [u8] rest))
+              ""))
+        "")))
+
 ;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
 ;; request into this value and serialize the returned status/body.
 (defn service-handle-http [(service (ptr RunService))
@@ -326,8 +436,31 @@
           (starts-with target "/v1/runs/")
             (let [rest (service-target-parts target)
                   cancel-run-id (service-cancel-run-id rest)
-                  events-run-id (service-events-run-id rest)]
+                  events-run-id (service-events-run-id rest)
+                  authorization-run-id (service-authorization-run-id rest)
+                  authorization-id (service-authorization-id rest)]
               (cond (and (str-eq method "POST")
+                         (> (slice-len [u8] authorization-run-id) 0)
+                         (> (slice-len [u8] authorization-id) 0))
+                      (let [parsed
+                              (service-parse-command service
+                                                     (load (field request body)))]
+                        (if (not (load (field parsed ok)))
+                            (service-error allocator
+                                           400
+                                           "invalid_json"
+                                           "request body is not valid JSON")
+                            (let [command (load (field parsed value))]
+                              (if (or (not (str-eq (command-string command "run_id")
+                                                   authorization-run-id))
+                                      (not (str-eq (command-string command "authorization_id")
+                                                   authorization-id)))
+                                  (service-error allocator
+                                                 409
+                                                 "authorization_id_mismatch"
+                                                 "path and command authorization IDs differ")
+                                  (service-decide-authorization service command)))))
+                    (and (str-eq method "POST")
                          (> (slice-len [u8] cancel-run-id) 0))
                       (let [parsed
                               (service-parse-command service

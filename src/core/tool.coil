@@ -16,6 +16,12 @@
   (Reversible [])
   (Destructive []))
 
+(defn tool-effect-name [(effect ToolEffect)] (-> (slice u8))
+  (match effect
+    (ReadOnly [] "read_only")
+    (Reversible [] "reversible")
+    (Destructive [] "destructive")))
+
 (defstruct CancellationToken [(requested i64)])
 
 (defn cancellation-token-new [(allocator (ptr Allocator))] (-> (ptr CancellationToken))

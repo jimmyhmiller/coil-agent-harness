@@ -21,12 +21,20 @@ The current slice can:
   while safely ignoring a torn final record;
 - accept versioned create, cancel, run-query, and cursor-based event-query commands
   through a loopback HTTP service boundary;
+- pause tool execution for durable interactive authorization decisions, with
+  idempotent allow/reject commands and fail-closed cancellation or expiry;
 - rebuild durable run state on restart, relaunch work that was only queued, and
   terminalize work whose in-process outcome can no longer be known.
 
 The HTTP listener and durable service are currently library entry points exercised by
 real-socket integration tests. The CLI does not yet expose a long-running `serve`
 command, and remote deployment still needs authentication and transport hardening.
+
+The version 1 service routes are `POST /v1/runs`,
+`POST /v1/runs/{run_id}/cancel`, `GET /v1/runs/{run_id}`,
+`GET /v1/runs/{run_id}/events?after={sequence}`, and
+`POST /v1/runs/{run_id}/authorizations/{authorization_id}`. Mutation bodies carry a
+stable `command_id`; replaying the same command does not repeat its effect.
 
 ## Build and verify
 
@@ -131,9 +139,8 @@ steps, each represented by lifecycle events.
 
 ## Next architectural slice
 
-The next slice should add interactive authorization as a durable request/decision
-protocol, then connect the service controller to the production runtime and expose a
-long-running authenticated `serve` command. Production tools can then grow behind the
-same provider-neutral validation, authorization, timeout, cancellation, and event
-contracts. All current provider adapters emit incremental text deltas with bounded
-synchronous backpressure.
+The next slice should connect the service controller to the production runtime and
+expose a long-running authenticated `serve` command. Production tools can then grow
+behind the same provider-neutral validation, authorization, timeout, cancellation,
+and event contracts. All current provider adapters emit incremental text deltas with
+bounded synchronous backpressure.
