@@ -1,0 +1,258 @@
+(module harness-runtime-controller)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.str" :use *)
+(import "codex-app-server" :use *)
+(import "deepseek-anthropic" :use *)
+(import "deepseek-openai" :use *)
+(import "harness-agent-runner" :use *)
+(import "harness-event" :use *)
+(import "harness-interactive-authorizer" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-run-service" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+(import "openai-responses" :use *)
+(import "provider-common" :use *)
+
+(defstruct ActiveRuntimeRun
+  [(run-id (slice u8))
+   (handle AgentRunHandle)])
+
+(defstruct RuntimeRunController
+  [(allocator (ptr Allocator))
+   (registry (ptr ToolRegistry))
+   (emitter (ptr EventEmitter))
+   (journal-path (slice u8))
+   (runs (ArrayList ActiveRuntimeRun))
+   (policy AgentRunPolicy)
+   (max-active-runs i64)
+   (authorization-timeout-ms i64)])
+
+(defn runtime-controller-new [(allocator (ptr Allocator))
+                              (registry (ptr ToolRegistry))
+                              (emitter (ptr EventEmitter))
+                              (journal-path (slice u8))] (-> RuntimeRunController)
+  (let [controller (alloc/stack RuntimeRunController)]
+    (store! (field controller allocator) allocator)
+    (store! (field controller registry) registry)
+    (store! (field controller emitter) emitter)
+    (store! (field controller journal-path) journal-path)
+    (store! (field controller runs) (al-new [ActiveRuntimeRun] allocator))
+    (store! (field (field controller policy) max-model-turns) 8)
+    (store! (field (field controller policy) max-parallel-tools) 8)
+    (store! (field controller max-active-runs) 32)
+    (store! (field controller authorization-timeout-ms) 300000)
+    (load controller)))
+
+(defn runtime-command-timeout [(command Json)] (-> i64)
+  (let [value (json-number-i64 (json-get command "timeout_ms"))]
+    (if (> value 0) value 120000)))
+
+(defn runtime-command-instructions [(command Json)] (-> (slice u8))
+  (let [value (command-string command "instructions")]
+    (if (> (str-len value) 0)
+        value
+        "Be concise. Use tools when they are required by the request.")))
+
+(defn runtime-model-request [(controller (ptr RuntimeRunController))
+                             (command Json)] (-> (ptr ModelRequest))
+  (let [allocator (load (field controller allocator))
+        request (box allocator ModelRequest (zeroed ModelRequest))
+        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+        message (alloc/stack Message)]
+    (store! (field message role) (UserRole))
+    (store! (field message content) (command-string command "prompt"))
+    (al-push! [Message] messages (load message))
+    (store! (field request run-id) (command-string command "run_id"))
+    (store! (field request operation-id) "model-1")
+    (store! (field request model) (command-string command "model"))
+    (store! (field request instructions) (runtime-command-instructions command))
+    (store! (field request messages) messages)
+    (store! (field request tools) (load (field controller registry)))
+    (store! (field request tool-choice) (ToolsAuto))
+    (store! (field request parallel-tool-calls) true)
+    (store! (field request reasoning) (ReasoningMedium))
+    (store! (field request max-output-tokens) 4096)
+    (store! (field request timeout-ms) (runtime-command-timeout command))
+    (store! (field request deadline-monotonic-ms)
+            (deadline-from-timeout (load (field request timeout-ms))))
+    (store! (field request cancellation) (cancellation-token-new allocator))
+    (store! (field (field request continuation) present) false)
+    (store! (field (field request continuation) previous-response-id) "")
+    (store! (field (field request continuation) previous-output) (JsonNull))
+    (store! (field (field request continuation) tool-results)
+            (cast (ptr (ArrayList ToolResult)) 0))
+    request))
+
+(defn runtime-authorizer [(controller (ptr RuntimeRunController))
+                          (command Json)
+                          (request (ptr ModelRequest))] (-> (ptr InteractiveAuthorizer))
+  (let [allocator (load (field controller allocator))
+        authorizer (box allocator InteractiveAuthorizer (zeroed InteractiveAuthorizer))]
+    (store! (field authorizer allocator) allocator)
+    (store! (field authorizer journal-path)
+            (load (field controller journal-path)))
+    (store! (field authorizer emitter) (load (field controller emitter)))
+    (store! (field authorizer run-id) (load (field request run-id)))
+    (store! (field authorizer parent-operation-id)
+            (load (field request operation-id)))
+    (store! (field authorizer provider) (command-string command "provider"))
+    (store! (field authorizer model) (load (field request model)))
+    (store! (field authorizer cancellation)
+            (load (field request cancellation)))
+    (store! (field authorizer run-deadline-monotonic-ms)
+            (load (field request deadline-monotonic-ms)))
+    (store! (field authorizer authorization-timeout-ms)
+            (load (field controller authorization-timeout-ms)))
+    (store! (field authorizer poll-interval-ms) 100)
+    authorizer))
+
+(defn runtime-controller-reap! [(controller (ptr RuntimeRunController))] (-> i64)
+  (let [(mut i) 0]
+    (loop (if (>= (load i)
+                  (al-len [ActiveRuntimeRun]
+                          (load (field controller runs))))
+              (break)
+              (let [slot
+                      (index (load (field (field controller runs) data))
+                             (load i))]
+                (if (agent-run-finished? (field slot handle))
+                    (let [last-index
+                            (- (al-len [ActiveRuntimeRun]
+                                       (load (field controller runs)))
+                               1)]
+                      (agent-run-join (mut (field slot handle)))
+                      (when (!= (load i) last-index)
+                        (store! slot
+                                (al-get [ActiveRuntimeRun]
+                                        (load (field controller runs))
+                                        last-index))
+                        0)
+                      (al-pop! [ActiveRuntimeRun] (mut (field controller runs)))
+                      0)
+                    (store! i (+ (load i) 1))))))
+    0))
+
+(defn runtime-controller-active? [(controller (ptr RuntimeRunController))
+                                  (run-id (slice u8))] (-> bool)
+  (let [(mut i) 0
+        n (al-len [ActiveRuntimeRun] (load (field controller runs)))
+        (mut found) false]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [active
+                      (al-get [ActiveRuntimeRun]
+                              (load (field controller runs))
+                              (load i))]
+                (if (str-eq (load (field active run-id)) run-id)
+                    (do (store! found true) (break))
+                    (store! i (+ (load i) 1))))))
+    (load found)))
+
+(defn runtime-controller-start-provider! [(controller (ptr RuntimeRunController))
+                                          (command Json)
+                                          (provider (dyn ModelProvider))] (-> i64)
+  (if (runtime-controller-active? controller (command-string command "run_id"))
+      0
+      (if (>= (al-len [ActiveRuntimeRun] (load (field controller runs)))
+              (load (field controller max-active-runs)))
+          -1
+          (let [request (runtime-model-request controller command)
+                authorizer (runtime-authorizer controller command request)
+                handle
+                  (run-agent-background (load (field controller allocator))
+                                        provider
+                                        request
+                                        authorizer
+                                        (load (field controller emitter))
+                                        (load (field controller policy)))]
+            (if (not (load (field handle spawned)))
+                -1
+                (let [active (alloc/stack ActiveRuntimeRun)]
+                  (store! (field active run-id) (load (field request run-id)))
+                  (store! (field active handle) handle)
+                  (al-push! [ActiveRuntimeRun]
+                            (mut (field controller runs))
+                            (load active))
+                  0))))))
+
+(defn runtime-controller-start! [(controller (ptr RuntimeRunController))
+                                 (command Json)] (-> i64)
+  (runtime-controller-reap! controller)
+  (let [allocator (load (field controller allocator))
+        provider-name (command-string command "provider")]
+    (cond (str-eq provider-name "openai")
+            (let [context
+                    (box allocator
+                         OpenAIResponsesContext
+                         (openai-context-default))]
+              (runtime-controller-start-provider! controller command context))
+          (str-eq provider-name "deepseek-openai")
+            (let [context
+                    (box allocator
+                         DeepSeekOpenAIContext
+                         (deepseek-openai-context-default))]
+              (runtime-controller-start-provider! controller command context))
+          (str-eq provider-name "deepseek-anthropic")
+            (let [context
+                    (box allocator
+                         DeepSeekAnthropicContext
+                         (deepseek-anthropic-context-default))]
+              (runtime-controller-start-provider! controller command context))
+          (str-eq provider-name "codex")
+            (let [cwd-result (os/current-dir allocator)
+                  cwd
+                    (match cwd-result
+                      (Ok [owned] (os/owned-string-slice owned))
+                      (Err [failure] "."))
+                  context (box allocator CodexAppServerContext (codex-context cwd))]
+              (runtime-controller-start-provider! controller command context))
+          :else -1)))
+
+(defn runtime-controller-cancel! [(controller (ptr RuntimeRunController))
+                                  (run-id (slice u8))] (-> i64)
+  (runtime-controller-reap! controller)
+  (let [(mut i) 0
+        n (al-len [ActiveRuntimeRun] (load (field controller runs)))
+        (mut cancelled) false]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [slot
+                      (index (load (field (field controller runs) data))
+                             (load i))]
+                (if (str-eq (load (field slot run-id)) run-id)
+                    (do
+                      (agent-run-cancel! (field slot handle))
+                      (store! cancelled true)
+                      (break))
+                    (store! i (+ (load i) 1))))))
+    (if (load cancelled) 0 -1)))
+
+(defn runtime-controller-join-all! [(controller (ptr RuntimeRunController))] (-> i64)
+  (let [(mut i) 0
+        n (al-len [ActiveRuntimeRun] (load (field controller runs)))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [slot
+                      (index (load (field (field controller runs) data))
+                             (load i))]
+                (agent-run-cancel! (field slot handle))
+                (agent-run-join (mut (field slot handle)))
+                (store! i (+ (load i) 1)))))
+    (al-clear! [ActiveRuntimeRun] (mut (field controller runs)))
+    0))
+
+(impl RunController RuntimeRunController
+  (start-durable-run [(self (ptr RuntimeRunController)) (command Json)]
+                     (-> i64)
+                     (runtime-controller-start! self command))
+  (cancel-durable-run [(self (ptr RuntimeRunController))
+                       (run-id (slice u8))]
+                      (-> i64)
+                      (runtime-controller-cancel! self run-id)))

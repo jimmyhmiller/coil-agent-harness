@@ -147,9 +147,20 @@
                                                         500
                                                         "journal_write_failed"
                                                         "cancellation command was not durable")
-                                         (do
-                                           (cancel-durable-run (load (field service controller))
-                                                               run-id)
+                                         (let [cancel-code
+                                                 (cancel-durable-run (load (field service controller))
+                                                                     run-id)]
+                                           (when (!= cancel-code 0)
+                                             (emit-event (load (field service emitter))
+                                                         (now-ms)
+                                                         (RunCancelled)
+                                                         run-id
+                                                         run-id
+                                                         ""
+                                                         (load (field view provider))
+                                                         (load (field view model))
+                                                         (JsonString "run had no active worker"))
+                                             0)
                                            (let [refreshed (service-recover service)]
                                              (service-run-response service
                                                                    (field refreshed events)

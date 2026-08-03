@@ -3,52 +3,82 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.http.server" :as http)
 (import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
 (import "harness-http-listener" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
+(import "provider-common" :use *)
+
+(defn write-service-response! [(allocator (ptr Allocator))
+                               (client-fd i64)
+                               (response ServiceResponse)] (-> i64)
+  (write-http-response allocator
+                       client-fd
+                       (load (field response status))
+                       (json-stringify allocator (load (field response body)))))
+
+(defn handle-accepted-request! [(allocator (ptr Allocator))
+                                (client-fd i64)
+                                (service (ptr RunService))
+                                (auth-token (slice u8))
+                                (request-value http/Request)] (-> i64)
+  (let [expected (concat-or-empty allocator "Bearer " auth-token)
+        supplied (http/header request-value "Authorization")
+        (mut result) -1]
+    (if (or (= (slice-len [u8] auth-token) 0)
+            (not (str-eq supplied expected)))
+        (store! result
+                (write-service-response! allocator
+                                         client-fd
+                                         (service-error allocator
+                                                        401
+                                                        "unauthorized"
+                                                        "valid bearer authentication is required")))
+        (let [request (alloc/stack ServiceHttpRequest)]
+          (store! (field request method) (http/method request-value))
+          (store! (field request target) (http/target request-value))
+          (store! (field request body) (http/body request-value))
+          (store! result
+                  (write-service-response! allocator
+                                           client-fd
+                                           (service-handle-http service request)))))
+    (http/request-free request-value)
+    (load result)))
 
 (defn serve-run-service-once [(allocator (ptr Allocator))
                               (listener (ptr HttpListener))
-                              (service (ptr RunService))] (-> i64)
+                              (service (ptr RunService))
+                              (auth-token (slice u8))] (-> i64)
   (let [client-fd (http-listener-accept listener)]
     (if (< client-fd 0)
         -1
-        (let [(mut result) -1]
-          (match (read-accepted-http allocator client-fd)
-            (HttpRequestRejected [status]
-                                 (let [(mut body) (json-object allocator)]
-                                   (json-object-put! (mut body)
-                                                     "version"
-                                                     (json-integer allocator 1))
-                                   (store! result
-                                           (write-http-response allocator
-                                                                client-fd
-                                                                status
-                                                                (json-stringify allocator (load body))))))
-            (HttpRequestAccepted [accepted]
-                                 (let [request-value accepted
-                                       request (alloc/stack ServiceHttpRequest)]
-                                   (store! (field request method)
-                                           (http/method request-value))
-                                   (store! (field request target)
-                                           (http/target request-value))
-                                   (store! (field request body)
-                                           (http/body request-value))
-                                   (let [response (service-handle-http service request)]
-                                     (store! result
-                                             (write-http-response allocator
-                                                                  client-fd
-                                                                  (load (field response status))
-                                                                  (json-stringify allocator
-                                                                                  (load (field response body))))))
-                                   (http/request-free request-value))))
+        (let [result
+                (match (read-accepted-http allocator client-fd)
+                  (HttpRequestRejected [status]
+                                       (let [(mut body) (json-object allocator)]
+                                         (json-object-put! (mut body)
+                                                           "version"
+                                                           (json-integer allocator 1))
+                                         (write-http-response allocator
+                                                              client-fd
+                                                              status
+                                                              (json-stringify allocator
+                                                                              (load body)))))
+                  (HttpRequestAccepted [accepted]
+                                       (handle-accepted-request! allocator
+                                                                 client-fd
+                                                                 service
+                                                                 auth-token
+                                                                 accepted)))]
           (os/close (cast i32 client-fd))
-          (if (< (load result) 0) -1 0)))))
+          (if (< result 0) -1 0)))))
 
 (defn serve-run-service [(allocator (ptr Allocator))
                          (listener (ptr HttpListener))
-                         (service (ptr RunService))] (-> i64)
-  (loop (when (!= (serve-run-service-once allocator listener service) 0)
+                         (service (ptr RunService))
+                         (auth-token (slice u8))] (-> i64)
+  (loop (when (!= (serve-run-service-once allocator listener service auth-token) 0)
           (break)
           0))
   0)

@@ -35,13 +35,36 @@
     (store! (load (field job result))
             (serve-run-service-once (load (field job allocator))
                                     (load (field job listener))
-                                    (load (field job service))))
+                                    (load (field job service))
+                                    "test-token"))
     (cast (ptr i8) 0)))
 
 (defn remote-test-url [(allocator (ptr Allocator)) (port i64)] (-> (slice u8))
   (let [number (json-stringify allocator (json-integer allocator port))
         prefix (concat-or-empty allocator "http://127.0.0.1:" number)]
     (concat-or-empty allocator prefix "/v1/runs")))
+
+(defn remote-create-request [(allocator (ptr Allocator))
+                             (port i64)
+                             (authenticated bool)] (-> HttpResponse)
+  (let [headers
+          (box allocator
+               (ArrayList (slice u8))
+               (al-new [(slice u8)] allocator))
+        request (alloc/stack HttpRequest)]
+    (al-push! [(slice u8)] headers "Content-Type: application/json")
+    (when authenticated
+      (al-push! [(slice u8)] headers "Authorization: Bearer test-token")
+      0)
+    (store! (field request url) (remote-test-url allocator port))
+    (store! (field request headers) headers)
+    (store! (field request body)
+            "{\"version\":1,\"command_id\":\"remote-1\",\"run_id\":\"remote-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+    (store! (field request timeout-ms) 3000)
+    (store! (field (field request chunks) context) (cast (ptr i8) 0))
+    (store! (field (field request chunks) consume)
+            (fnptr-of discard-http-chunk))
+    (http-post allocator request)))
 
 (deftest accepts-a-versioned-command-over-a-real-http-socket
          (let [allocator (malloc-allocator)
@@ -79,29 +102,32 @@
                                           (fnptr-of remote-server-thread)
                                           (cast (ptr i8) server-job)))
                       0)
-           (let [headers
-                   (box allocator
-                        (ArrayList (slice u8))
-                        (al-new [(slice u8)] allocator))
-                 request (alloc/stack HttpRequest)]
-             (al-push! [(slice u8)] headers "Content-Type: application/json")
-             (store! (field request url)
-                     (remote-test-url allocator (load (field listener port))))
-             (store! (field request headers) headers)
-             (store! (field request body)
-                     "{\"version\":1,\"command_id\":\"remote-1\",\"run_id\":\"remote-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
-             (store! (field request timeout-ms) 3000)
-             (store! (field (field request chunks) context) (cast (ptr i8) 0))
-             (store! (field (field request chunks) consume)
-                     (fnptr-of discard-http-chunk))
-             (let [response (http-post allocator request)
-                   parsed (json-parse allocator (load (field response body)))]
-               (assert-eq (load (field response transport-code)) 0)
-               (assert-eq (load (field response status-code)) 202)
-               (assert (load (field parsed ok)))
-               (assert (match (json-string-at (load (field parsed value)) "status")
-                         (Some [value] (str-eq value "queued"))
-                         (None [] false)))))
+           (let [unauthorized
+                   (remote-create-request allocator
+                                          (load (field listener port))
+                                          false)]
+             (assert-eq (load (field unauthorized transport-code)) 0)
+             (assert-eq (load (field unauthorized status-code)) 401))
+           (thread-join server-thread)
+           (assert-eq (load server-result) 0)
+           (assert-eq (load (field controller starts)) 0)
+           (store! server-result -1)
+           (assert-eq (cast i64
+                            (thread-spawn server-thread
+                                          (fnptr-of remote-server-thread)
+                                          (cast (ptr i8) server-job)))
+                      0)
+           (let [response
+                   (remote-create-request allocator
+                                          (load (field listener port))
+                                          true)
+                 parsed (json-parse allocator (load (field response body)))]
+             (assert-eq (load (field response transport-code)) 0)
+             (assert-eq (load (field response status-code)) 202)
+             (assert (load (field parsed ok)))
+             (assert (match (json-string-at (load (field parsed value)) "status")
+                       (Some [value] (str-eq value "queued"))
+                       (None [] false))))
            (thread-join server-thread)
            (assert-eq (load server-result) 0)
            (assert-eq (load (field controller starts)) 1)

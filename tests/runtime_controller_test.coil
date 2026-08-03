@@ -1,0 +1,107 @@
+(module harness-runtime-controller-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-run-service" :use *)
+(import "harness-runtime-controller" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct ControllerFakeProvider [])
+(impl ModelProvider ControllerFakeProvider
+  (provider-name [(self (ptr ControllerFakeProvider))] (-> (slice u8)) "fake")
+  (execute-model [(self (ptr ControllerFakeProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (let [(mut response) (response-empty allocator)]
+                   (store! (field response provider) "fake")
+                   (store! (field response model) (load (field request model)))
+                   (store! (field response response-id) "fake-response")
+                   (store! (field response output-text) "done")
+                   (ModelOk (load response)))))
+
+(defn controller-command [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut command) (json-object allocator)]
+    (json-object-put! (mut command) "version" (json-integer allocator 1))
+    (json-put-string! (mut command) "command_id" "controller-command")
+    (json-put-string! (mut command) "run_id" "controller-run")
+    (json-put-string! (mut command) "provider" "fake")
+    (json-put-string! (mut command) "model" "fake-model")
+    (json-put-string! (mut command) "prompt" "hello")
+    (json-put-string! (mut command) "instructions" "test instructions")
+    (json-object-put! (mut command) "timeout_ms" (json-integer allocator 5000))
+    (load command)))
+
+(deftest builds-and-retains-a-real-background-runtime-run
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-runtime-controller.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new journal sequence))
+           (let [controller
+                   (box allocator
+                        RuntimeRunController
+                        (runtime-controller-new allocator registry emitter path))
+                 command (controller-command allocator)
+                 request (runtime-model-request controller command)]
+             (assert (str-eq (load (field request run-id)) "controller-run"))
+             (assert (str-eq (load (field request instructions)) "test instructions"))
+             (assert-eq (load (field request timeout-ms)) 5000)
+             (assert (> (load (field request deadline-monotonic-ms)) 0))
+             (assert (!= (load (field request cancellation))
+                         (cast (ptr CancellationToken) 0)))
+             (assert-eq (runtime-controller-start-provider! controller command provider) 0)
+             (assert-eq (al-len [ActiveRuntimeRun]
+                                (load (field controller runs)))
+                        1)
+             (assert-eq (runtime-controller-start-provider! controller command provider) 0)
+             (assert-eq (al-len [ActiveRuntimeRun]
+                                (load (field controller runs)))
+                        1)
+             (let [(mut attempt) 0]
+               (loop (if (or (= (al-len [ActiveRuntimeRun]
+                                        (load (field controller runs)))
+                                0)
+                             (>= (load attempt) 200))
+                         (break)
+                         (do
+                           (sleep-ms 5)
+                           (runtime-controller-reap! controller)
+                           (store! attempt (+ (load attempt) 1))))))
+             (assert-eq (al-len [ActiveRuntimeRun]
+                                (load (field controller runs)))
+                        0)
+             (assert-eq (runtime-controller-start! controller
+                                                   (let [(mut unknown) command]
+                                                     (json-put-string! (mut unknown)
+                                                                       "provider"
+                                                                       "unknown")
+                                                     (load unknown)))
+                        -1))
+           (let [recovery (event-journal-recover allocator path)]
+             (assert (load (field recovery ok)))
+             (assert-eq (al-len [Json] (load (field recovery events))) 2)
+             (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 0)
+                                             "event")
+                             "run.started"))
+             (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 1)
+                                             "event")
+                             "run.completed")))
+           (event-journal-close! journal)))

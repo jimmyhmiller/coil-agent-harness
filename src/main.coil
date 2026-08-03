@@ -13,10 +13,17 @@
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
 (import "harness-http" :use *)
+(import "harness-http-listener" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-run-service" :use *)
+(import "harness-runtime-controller" :use *)
+(import "harness-service-http-server" :use *)
 (import "codex-app-server" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "openai-responses" :use *)
+(import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
@@ -36,6 +43,7 @@
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
   (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex> <model> <prompt>")
+  (write-line 2 "       harness serve <port> <journal-path>")
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
   (write-line 2 "  tool  requires the model to call the echo tool")
   64)
@@ -198,14 +206,111 @@
                   (write-line 2 "unknown provider")
                   64)))))
 
+(defn cli-auth-token [(allocator (ptr Allocator))] (-> (slice u8))
+  (match (os/env-get allocator "HARNESS_AUTH_TOKEN")
+    (Ok [found]
+        (match found
+          (Some [value] (os/owned-string-slice value))
+          (None [] "")))
+    (Err [failure] "")))
+
+(defn cli-serve [(port-text (slice u8))
+                 (journal-path (slice u8))] (-> i64)
+  (let [allocator (malloc-allocator)
+        auth-token (cli-auth-token allocator)
+        journal (alloc/stack EventJournal)
+        listener (alloc/stack HttpListener)]
+    (block :serve
+           (when (= (slice-len [u8] auth-token) 0)
+             (write-line 2 "HARNESS_AUTH_TOKEN must be set and non-empty")
+             (return-from :serve 78))
+           (let [port
+                   (match (str-parse-int port-text)
+                     (Some [value] value)
+                     (None []
+                           (do
+                             (write-line 2 "serve port must be an integer")
+                             (return-from :serve 64))))]
+             (when (or (< port 0) (> port 65535))
+               (write-line 2 "serve port must be between 0 and 65535")
+               (return-from :serve 64))
+             (match (event-journal-open allocator journal-path true)
+               (JournalOpenFailed [message]
+                                  (do
+                                    (write-line 2 message)
+                                    (return-from :serve 74)))
+               (JournalOpened [opened] (store! journal opened)))
+             (let [recovery (event-journal-recover allocator journal-path)]
+               (when (not (load (field recovery ok)))
+                 (write-line 2 (load (field recovery error)))
+                 (event-journal-close! journal)
+                 (return-from :serve 65))
+               (let [sequence
+                       (box allocator
+                            i64
+                            (+ (load (field recovery last-sequence)) 1))
+                     emitter
+                       (box allocator
+                            EventEmitter
+                            (event-emitter-new journal sequence))
+                     registry
+                       (box allocator
+                            ToolRegistry
+                            (tool-registry-new allocator))
+                     controller
+                       (box allocator
+                            RuntimeRunController
+                            (runtime-controller-new allocator
+                                                    registry
+                                                    emitter
+                                                    journal-path))
+                     service (alloc/stack RunService)]
+                 (tool-register! registry (echo-definition allocator))
+                 (register-filesystem-tools! registry allocator ".")
+                 (store! (field service allocator) allocator)
+                 (store! (field service journal-path) journal-path)
+                 (store! (field service journal) journal)
+                 (store! (field service emitter) emitter)
+                 (store! (field service controller) controller)
+                 (match (http-listener-open port)
+                   (ListenerOpenFailed [message]
+                                       (do
+                                         (write-line 2 message)
+                                         (event-journal-close! journal)
+                                         (return-from :serve 69)))
+                   (ListenerOpened [opened] (store! listener opened)))
+                 (when (< (service-recover-runs! service) 0)
+                   (write-line 2 "could not recover durable runs")
+                   (http-listener-close! listener)
+                   (event-journal-close! journal)
+                   (return-from :serve 65))
+                 (write-line 2
+                             (concat-or-empty allocator
+                                              "listening on 127.0.0.1:"
+                                              (json-stringify allocator
+                                                              (json-integer allocator
+                                                                            (load (field listener port))))))
+                 (serve-run-service allocator listener service auth-token)
+                 (runtime-controller-join-all! controller)
+                 (http-listener-close! listener)
+                 (event-journal-close! journal)
+                 0))))))
+
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [count (cast i64 argc)]
-    (if (< count 5)
+    (if (< count 2)
         (cli-usage)
-        (let [command (cstr->str (load (index argv 1)))
-              provider (cstr->str (load (index argv 2)))
-              model (cstr->str (load (index argv 3)))
-              prompt (cstr->str (load (index argv 4)))]
-          (cond (str-eq command "run") (cli-run provider model prompt false)
-                (str-eq command "tool") (cli-run provider model prompt true)
-                :else (cli-usage))))))
+        (let [command (cstr->str (load (index argv 1)))]
+          (if (str-eq command "serve")
+              (if (= count 4)
+                  (cli-serve (cstr->str (load (index argv 2)))
+                             (cstr->str (load (index argv 3))))
+                  (cli-usage))
+              (if (< count 5)
+                  (cli-usage)
+                  (let [provider (cstr->str (load (index argv 2)))
+                        model (cstr->str (load (index argv 3)))
+                        prompt (cstr->str (load (index argv 4)))]
+                    (cond (str-eq command "run") (cli-run provider model prompt false)
+                          (str-eq command "tool") (cli-run provider model prompt true)
+                          :else (cli-usage)))))))))

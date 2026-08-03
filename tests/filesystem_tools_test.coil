@@ -1,0 +1,107 @@
+(module harness-filesystem-tools-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-json" :use *)
+(import "harness-run-service" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defn filesystem-call [(allocator (ptr Allocator))
+                       (id (slice u8))
+                       (name (slice u8))
+                       (path (slice u8))
+                       (content (slice u8))] (-> ToolCall)
+  (let [(mut arguments) (json-object allocator)
+        call (alloc/stack ToolCall)]
+    (json-put-string! (mut arguments) "path" path)
+    (when (str-eq name "write_text_file")
+      (json-put-string! (mut arguments) "content" content)
+      0)
+    (store! (field call id) id)
+    (store! (field call name) name)
+    (store! (field call arguments) (load arguments))
+    (store! (field call raw-arguments) "")
+    (load call)))
+
+(deftest reads-and-writes-bounded-workspace-relative-files
+         (let [allocator (malloc-allocator)
+               reader (alloc/stack ReadTextFileTool)
+               writer (alloc/stack WriteTextFileTool)
+               context (alloc/stack ToolExecutionContext)
+               write-call
+                 (box allocator
+                      ToolCall
+                      (filesystem-call allocator
+                                       "write-1"
+                                       "write_text_file"
+                                       "coil-agent-harness-filesystem-tool.txt"
+                                       "hello from a tool"))
+               read-call
+                 (box allocator
+                      ToolCall
+                      (filesystem-call allocator
+                                       "read-1"
+                                       "read_text_file"
+                                       "coil-agent-harness-filesystem-tool.txt"
+                                       ""))]
+           (store! (field reader root) "/tmp")
+           (store! (field writer root) "/tmp")
+           (store! (field context cancellation)
+                   (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [written
+                   (execute-write-text-file writer
+                                            write-call
+                                            context
+                                            allocator)]
+             (assert (match-else (load (field written status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert-eq (json-number-i64 (json-get (load (field written output)) "bytes_written"))
+                        17))
+           (let [read (execute-read-text-file reader read-call context allocator)
+                 output (load (field read output))]
+             (assert (match-else (load (field read status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert (str-eq (command-string output "content")
+                             "hello from a tool"))
+             (assert-eq (json-number-i64 (json-get output "bytes")) 17))))
+
+(deftest rejects-parent-traversal-and-registers-effect-metadata
+         (let [allocator (malloc-allocator)
+               reader (alloc/stack ReadTextFileTool)
+               context (alloc/stack ToolExecutionContext)
+               call
+                 (box allocator
+                      ToolCall
+                      (filesystem-call allocator
+                                       "read-traversal"
+                                       "read_text_file"
+                                       "../secret"
+                                       ""))
+               registry (alloc/stack ToolRegistry)]
+           (store! (field reader root) "/tmp")
+           (store! (field context cancellation)
+                   (cast (ptr CancellationToken) 0))
+           (let [result (execute-read-text-file reader call context allocator)]
+             (assert (match-else (load (field result status))
+                                 (ToolErrored [] true)
+                                 (_ false))))
+           (store! registry (tool-registry-new allocator))
+           (assert (register-filesystem-tools! (mut registry) allocator "/tmp"))
+           (assert-eq (al-len [ToolDefinition]
+                              (load (field registry definitions)))
+                      2)
+           (match (tool-find (load registry) "write_text_file")
+             (None [] (assert false))
+             (Some [definition]
+                   (let [selected definition]
+                     (assert (match-else (load (field (field selected spec) effect))
+                                         (Destructive [] true)
+                                         (_ false))))))))

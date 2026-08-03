@@ -1,0 +1,238 @@
+(module harness-filesystem-tools)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(const FILE_TOOL_MAX_BYTES 1048576)
+
+(defstruct ReadTextFileTool [(root (slice u8))])
+(defstruct WriteTextFileTool [(root (slice u8))])
+
+(defsum BoundedReadResult
+  (BoundedReadOk [(bytes (slice u8)) (truncated bool)])
+  (BoundedReadFailed [(message (slice u8))]))
+
+(defn file-tool-path-safe? [(path (slice u8))] (-> bool)
+  (and (> (slice-len [u8] path) 0)
+       (and (not (os/slice-has-byte? path (cast u8 0)))
+            (and (!= (cast i64 (slice-get [u8] path 0)) 47)
+                 (and (not (str-eq path ".."))
+                      (and (match (str-find path "../")
+                             (Some [position] false)
+                             (None [] true))
+                           (match (str-find path "/..")
+                             (Some [position] false)
+                             (None [] true))))))))
+
+(defn file-tool-path [(allocator (ptr Allocator))
+                      (root (slice u8))
+                      (path (slice u8))] (-> (slice u8))
+  (let [prefix (concat-or-empty allocator root "/")]
+    (concat-or-empty allocator prefix path)))
+
+(defn bounded-read-file [(allocator (ptr Allocator))
+                         (path (slice u8))] (-> BoundedReadResult)
+  (let [c-path (str->cstr allocator path)
+        fd
+          (if (= (cast i64 c-path) 0)
+              (cast i32 -1)
+              (os/open c-path (cast i32 0) 0))]
+    (when (!= (cast i64 c-path) 0)
+      (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+      0)
+    (if (< fd (cast i32 0))
+        (BoundedReadFailed "could not open file")
+        (let [(mut bytes) (al-new [u8] allocator)
+              buffer (alloc/stack (array u8 4096))
+              (mut failed) false
+              (mut truncated) false]
+          (block :done
+                 (loop (let [current (al-len [u8] (load bytes))
+                             remaining (- (+ FILE_TOOL_MAX_BYTES 1) current)
+                             requested (if (< remaining 4096) remaining 4096)]
+                         (if (<= requested 0)
+                             (do (store! truncated true) (break))
+                             (let [count
+                                     (cast i64
+                                           (io/read fd
+                                                    (cast (ptr i8) (index buffer 0))
+                                                    (cast isize requested)))]
+                               (if (< count 0)
+                                   (do (store! failed true) (break))
+                                   (if (= count 0)
+                                       (break)
+                                       (al-extend! [u8]
+                                                   (mut bytes)
+                                                   (cast (ptr u8) (index buffer 0))
+                                                   count))))))))
+          (os/close fd)
+          (if (load failed)
+              (BoundedReadFailed "could not read file")
+              (let [captured (al-into-slice [u8] (mut bytes))]
+                (if (> (slice-len [u8] captured) FILE_TOOL_MAX_BYTES)
+                    (BoundedReadOk (subslice [u8] captured 0 FILE_TOOL_MAX_BYTES)
+                                   true)
+                    (BoundedReadOk captured (load truncated)))))))))
+
+(defn file-tool-error [(call (ptr ToolCall))
+                       (message (slice u8))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
+    (store! (field result error) message)
+    (load result)))
+
+(defn execute-read-text-file [(self (ptr ReadTextFileTool))
+                              (call (ptr ToolCall))
+                              (context (ptr ToolExecutionContext))
+                              (allocator (ptr Allocator))] (-> ToolResult)
+  (let [relative
+          (match (json-string-at (load (field call arguments)) "path")
+            (Some [value] value)
+            (None [] ""))]
+    (if (cancellation-requested? (load (field context cancellation)))
+        (file-tool-error call "read cancelled")
+        (if (not (file-tool-path-safe? relative))
+            (file-tool-error call "path must be workspace-relative without parent traversal")
+            (match (bounded-read-file allocator
+                                      (file-tool-path allocator
+                                                      (load (field self root))
+                                                      relative))
+              (BoundedReadFailed [message] (file-tool-error call message))
+              (BoundedReadOk [bytes truncated]
+                             (let [(mut output) (json-object allocator)
+                                   (mut result)
+                                     (tool-result-empty (load (field call id))
+                                                        (ToolSucceeded))]
+                               (json-put-string! (mut output) "content" bytes)
+                               (json-put-bool! (mut output) "truncated" truncated)
+                               (json-object-put! (mut output)
+                                                 "bytes"
+                                                 (json-integer allocator
+                                                               (slice-len [u8] bytes)))
+                               (store! (field result output) (load output))
+                               (load result))))))))
+
+(defn execute-write-text-file [(self (ptr WriteTextFileTool))
+                               (call (ptr ToolCall))
+                               (context (ptr ToolExecutionContext))
+                               (allocator (ptr Allocator))] (-> ToolResult)
+  (let [arguments (load (field call arguments))
+        relative
+          (match (json-string-at arguments "path")
+            (Some [value] value)
+            (None [] ""))
+        content
+          (match (json-string-at arguments "content")
+            (Some [value] value)
+            (None [] ""))]
+    (cond (cancellation-requested? (load (field context cancellation))) (file-tool-error call "write cancelled")
+          (not (file-tool-path-safe? relative))
+            (file-tool-error call "path must be workspace-relative without parent traversal")
+          (> (slice-len [u8] content) FILE_TOOL_MAX_BYTES) (file-tool-error call "write exceeds one MiB limit")
+          :else
+            (match (fs/write-file allocator
+                                  (file-tool-path allocator
+                                                  (load (field self root))
+                                                  relative)
+                                  content)
+              (Err [failure] (file-tool-error call "could not write file"))
+              (Ok [written]
+                  (let [(mut output) (json-object allocator)
+                        (mut result)
+                          (tool-result-empty (load (field call id))
+                                             (ToolSucceeded))]
+                    (json-object-put! (mut output)
+                                      "bytes_written"
+                                      (json-integer allocator written))
+                    (store! (field result output) (load output))
+                    (load result)))))))
+
+(impl ToolImplementation ReadTextFileTool
+  (execute-tool [(self (ptr ReadTextFileTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-read-text-file self call context allocator)))
+
+(impl ToolImplementation WriteTextFileTool
+  (execute-tool [(self (ptr WriteTextFileTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-write-text-file self call context allocator)))
+
+(defn file-tool-schema [(allocator (ptr Allocator))
+                        (include-content bool)] (-> Json)
+  (let [(mut path) (json-object allocator)
+        (mut content) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-put-string! (mut path) "type" "string")
+    (json-put-string! (mut content) "type" "string")
+    (json-object-put! (mut properties) "path" (load path))
+    (json-array-push! (mut required) (JsonString "path"))
+    (when include-content
+      (json-object-put! (mut properties) "content" (load content))
+      (json-array-push! (mut required) (JsonString "content"))
+      0)
+    (json-put-string! (mut schema) "type" "object")
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-put-bool! (mut schema) "additionalProperties" false)
+    (load schema)))
+
+(defn read-text-file-definition [(allocator (ptr Allocator))
+                                 (root (slice u8))] (-> ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)
+        implementation (box allocator ReadTextFileTool (zeroed ReadTextFileTool))]
+    (store! (field implementation root) root)
+    (store! (field (field definition spec) name) "read_text_file")
+    (store! (field (field definition spec) description)
+            "Read at most one MiB from a workspace-relative text file.")
+    (store! (field (field definition spec) input-schema)
+            (file-tool-schema allocator false))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 10000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn write-text-file-definition [(allocator (ptr Allocator))
+                                  (root (slice u8))] (-> ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)
+        implementation (box allocator WriteTextFileTool (zeroed WriteTextFileTool))]
+    (store! (field implementation root) root)
+    (store! (field (field definition spec) name) "write_text_file")
+    (store! (field (field definition spec) description)
+            "Create or replace a workspace-relative text file, up to one MiB.")
+    (store! (field (field definition spec) input-schema)
+            (file-tool-schema allocator true))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (Destructive))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 10000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn register-filesystem-tools! [(registry (mut ToolRegistry))
+                                  (allocator (ptr Allocator))
+                                  (root (slice u8))] (-> bool)
+  (let [read-added
+          (tool-register! (mut registry)
+                          (read-text-file-definition allocator root))
+        write-added
+          (tool-register! (mut registry)
+                          (write-text-file-definition allocator root))]
+    (and read-added write-added)))

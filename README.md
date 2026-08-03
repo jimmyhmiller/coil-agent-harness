@@ -16,7 +16,7 @@ The current slice can:
 - execute independent tool calls concurrently with an explicit concurrency bound;
 - continue the model with ordered tool results while preserving opaque provider state;
 - run the entire model/tool loop on a background worker and join it later;
-- emit structured JSON event records suitable for a terminal, server, or future UI.
+- emit structured JSON event records suitable for a terminal, server, or future UI;
 - append those versioned events to an fsync-backed journal and recover ordered history
   while safely ignoring a torn final record;
 - accept versioned create, cancel, run-query, and cursor-based event-query commands
@@ -24,11 +24,13 @@ The current slice can:
 - pause tool execution for durable interactive authorization decisions, with
   idempotent allow/reject commands and fail-closed cancellation or expiry;
 - rebuild durable run state on restart, relaunch work that was only queued, and
-  terminalize work whose in-process outcome can no longer be known.
+  terminalize work whose in-process outcome can no longer be known;
+- expose bounded `read_text_file` and `write_text_file` tools to service runs, with
+  traversal checks, effect metadata, deadlines, cancellation, and interactive approval.
 
-The HTTP listener and durable service are currently library entry points exercised by
-real-socket integration tests. The CLI does not yet expose a long-running `serve`
-command, and remote deployment still needs authentication and transport hardening.
+The HTTP listener binds to IPv4 loopback and the CLI exposes a long-running `serve`
+command protected by a required bearer token. Remote/non-loopback deployment still
+needs TLS termination, identity-aware authorization, and transport hardening.
 
 The version 1 service routes are `POST /v1/runs`,
 `POST /v1/runs/{run_id}/cancel`, `GET /v1/runs/{run_id}`,
@@ -78,6 +80,7 @@ events. Do not pass a credential as a CLI argument.
 ./harness tool deepseek-openai deepseek-v4-flash "Call echo with the text hello."
 ./harness tool deepseek-anthropic deepseek-v4-flash "Call echo with the text hello."
 ./harness run codex gpt-5.6-terra "Briefly describe this repository."
+HARNESS_AUTH_TOKEN='replace-me' ./harness serve 8080 ./harness-events.jsonl
 ```
 
 Use `run` for automatic tool selection and `tool` to force the built-in strict `echo`
@@ -87,6 +90,11 @@ streams independently.
 
 The model name is always explicit. Current sensible defaults are shown above, but the
 runtime does not hard-code a provider's model catalogue.
+
+Service requests use `Authorization: Bearer $HARNESS_AUTH_TOKEN`. The filesystem tools
+accept lexically root-relative paths, reject parent traversal, and cap reads and writes
+at one MiB. They are host capabilities, not a sandbox: filesystem symlinks are followed,
+so deployments that need isolation must place the harness in an OS sandbox or container.
 
 ## Module map
 
@@ -139,8 +147,9 @@ steps, each represented by lifecycle events.
 
 ## Next architectural slice
 
-The next slice should connect the service controller to the production runtime and
-expose a long-running authenticated `serve` command. Production tools can then grow
-behind the same provider-neutral validation, authorization, timeout, cancellation,
-and event contracts. All current provider adapters emit incremental text deltas with
-bounded synchronous backpressure.
+The next slice should add identity-aware capabilities beyond the shared bearer token,
+replace journal polling for authorization wakeups with an in-process notification
+path, and harden graceful shutdown. Additional production tools can then grow behind
+the same provider-neutral validation, authorization, timeout, cancellation, output
+bound, and event contracts. All current provider adapters emit incremental text deltas
+with bounded synchronous backpressure.
