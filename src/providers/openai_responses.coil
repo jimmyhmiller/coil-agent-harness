@@ -190,36 +190,38 @@
                       (event-name (slice u8))
                       (data (slice u8))]
                      (-> bool)
-                     (if (str-eq data "[DONE]")
-                         true
-                         (let [parsed (json-parse (load (field self allocator)) data)]
-                           (if (not (load (field parsed ok)))
-                               (do (store! (field self failed) true) false)
-                               (let [wire (load (field parsed value))
-                                     kind
-                                       (if (> (slice-len [u8] event-name) 0)
-                                           event-name
-                                           (match (json-string-at wire "type")
-                                             (Some [value] value)
-                                             (None [] "")))]
-                                 (cond (str-eq kind "response.output_text.delta")
-                                         (match (json-string-at wire "delta")
-                                           (Some [delta]
-                                                 (do
-                                                   (openai-event (load (field self emitter))
-                                                                 (load (field self request))
-                                                                 (ModelResponseDelta)
-                                                                 (JsonString delta))
-                                                   true))
-                                           (None [] true))
-                                       (str-eq kind "response.completed")
-                                         (do
-                                           (store! (field self response)
-                                                   (json-get wire "response"))
-                                           (store! (field self completed) true)
-                                           true)
-                                       (str-eq kind "response.failed") (do (store! (field self failed) true) false)
-                                       :else true)))))))
+                     (if (model-request-cancelled? (load (field self request)))
+                         false
+                         (if (str-eq data "[DONE]")
+                             true
+                             (let [parsed (json-parse (load (field self allocator)) data)]
+                               (if (not (load (field parsed ok)))
+                                   (do (store! (field self failed) true) false)
+                                   (let [wire (load (field parsed value))
+                                         kind
+                                           (if (> (slice-len [u8] event-name) 0)
+                                               event-name
+                                               (match (json-string-at wire "type")
+                                                 (Some [value] value)
+                                                 (None [] "")))]
+                                     (cond (str-eq kind "response.output_text.delta")
+                                             (match (json-string-at wire "delta")
+                                               (Some [delta]
+                                                     (do
+                                                       (openai-event (load (field self emitter))
+                                                                     (load (field self request))
+                                                                     (ModelResponseDelta)
+                                                                     (JsonString delta))
+                                                       true))
+                                               (None [] true))
+                                           (str-eq kind "response.completed")
+                                             (do
+                                               (store! (field self response)
+                                                       (json-get wire "response"))
+                                               (store! (field self completed) true)
+                                               true)
+                                           (str-eq kind "response.failed") (do (store! (field self failed) true) false)
+                                           :else true))))))))
 
 (defn openai-execute-stream [(context (ptr OpenAIResponsesContext))
                              (request (ptr ModelRequest))

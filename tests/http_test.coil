@@ -1,0 +1,41 @@
+(module harness-http-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-http" :use *)
+
+(defn accept-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
+  (let [observed (cast (ptr i64) context)]
+    (store! observed (cast i64 length))
+    length))
+
+(defn reject-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
+  (cast usize 0))
+
+(deftest streaming-callback-delivers-captures-and-propagates-backpressure
+         (let [allocator (malloc-allocator)
+               observed (box allocator i64 0)
+               capture (alloc/stack StreamingCapture)
+               input "stream bytes"]
+           (store! (field (field capture sink) context) (cast (ptr i8) observed))
+           (store! (field (field capture sink) consume) (fnptr-of accept-http-chunk))
+           (store! (field capture body) (al-new [u8] allocator))
+           (store! (field capture max-captured-bytes) 6)
+           (assert-eq (cast i64
+                            (capture-streaming-chunk (cast (ptr i8) (slice-data [u8] input))
+                                                     (cast isize 1)
+                                                     (cast isize (slice-len [u8] input))
+                                                     (cast (ptr i8) capture)))
+                      (slice-len [u8] input))
+           (assert-eq (load observed) (slice-len [u8] input))
+           (assert (str-eq (al-slice [u8] (load (field capture body))) "stream"))
+           (store! (field (field capture sink) consume) (fnptr-of reject-http-chunk))
+           (assert-eq (cast i64
+                            (capture-streaming-chunk (cast (ptr i8) (slice-data [u8] input))
+                                                     (cast isize 1)
+                                                     (cast isize (slice-len [u8] input))
+                                                     (cast (ptr i8) capture)))
+                      0)
+           (al-free! [u8] (mut (field capture body)))))
