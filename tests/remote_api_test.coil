@@ -197,7 +197,7 @@
              (assert-eq (load (field controller starts)) 1)
              (let [recovery (event-journal-recover allocator path)]
                (assert (load (field recovery ok)))
-               (assert-eq (load (field recovery last-sequence)) 1))
+               (assert-eq (load (field recovery last-sequence)) 2))
              (store! shutdown (shutdown-signal-new))
              (assert (shutdown-signal-valid? shutdown))
              (store! server-result -1)

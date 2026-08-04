@@ -143,7 +143,7 @@
                                       "GET"
                                       "/v1/runs/run-1/events?after=0"
                                       "")]
-             (assert-eq (json-array-length (json-get (load (field events body)) "events")) 1))
+             (assert-eq (json-array-length (json-get (load (field events body)) "events")) 2))
            (let [cancelled
                    (service-cancel-run service
                                        (service-command allocator "cancel-1"))
@@ -155,7 +155,7 @@
              (assert-eq (load (field duplicate-cancel status)) 202)
              (assert-eq (load (field controller cancels)) 2)
              (assert-eq (json-array-length (json-get (load (field after-create body)) "events"))
-                        0)
+                        1)
              (assert (match (json-string-at (load (field cancelled body)) "status")
                        (Some [value] (str-eq value "queued"))
                        (None [] false))))
@@ -167,12 +167,40 @@
              (assert-eq (load (field automatic status)) 202)
              (assert-eq (load (field controller starts)) 2))
            (let [recovery (event-journal-recover allocator path)
-                 routed-event (al-get [Json] (load (field recovery events)) 1)
+                 routed-event (al-get [Json] (load (field recovery events)) 2)
                  payload (json-get routed-event "payload")
                  routing (json-get payload "routing")]
              (assert (str-eq (command-string payload "provider") "deepseek-openai"))
              (assert (str-eq (command-string payload "model") "deepseek-v4-flash"))
              (assert (str-eq (command-string routing "policy") "low-cost")))
+           (let [delegated
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"delegate-create\",\"run_id\":\"child-agent\",\"parent_run_id\":\"run-1\",\"parent_agent_id\":\"spoofed-parent\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"research this\"}")
+                 missing-parent
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"missing-parent\",\"run_id\":\"orphan-agent\",\"parent_run_id\":\"missing\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"research this\"}")]
+             (assert-eq (load (field delegated status)) 202)
+             (assert-eq (load (field missing-parent status)) 404)
+             (assert-eq (load (field controller starts)) 3))
+           (let [recovery (event-journal-recover allocator path)
+                 delegated-event (al-get [Json] (load (field recovery events)) 5)
+                 created-agent-event (al-get [Json] (load (field recovery events)) 6)
+                 payload (json-get delegated-event "payload")
+                 message (json-get payload "message")]
+             (assert (str-eq (command-string delegated-event "event") "agent.delegated"))
+             (assert (str-eq (command-string delegated-event "run_id") "run-1"))
+             (assert (str-eq (command-string delegated-event "agent_id") "run-1"))
+             (assert (str-eq (command-string payload "parent_agent_id") "run-1"))
+             (assert (str-eq (command-string message "kind") "delegation"))
+             (assert (str-eq (command-string message "from") "run-1"))
+             (assert (str-eq (command-string message "to") "child-agent"))
+             (assert (str-eq (command-string message "content") "research this"))
+             (assert (str-eq (command-string created-agent-event "event") "agent.created"))
+             (assert (str-eq (command-string created-agent-event "agent_id") "child-agent")))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 

@@ -13,6 +13,8 @@
   (RunCompleted [])
   (RunFailed [])
   (RunCancelled [])
+  (AgentCreated [])
+  (AgentDelegated [])
   (ModelRequestStarted [])
   (ModelResponseDelta [])
   (ModelRequestCompleted [])
@@ -36,6 +38,7 @@
    (timestamp-ms i64)
    (kind EventKind)
    (run-id (slice u8))
+   (agent-id (slice u8))
    (operation-id (slice u8))
    (parent-operation-id (slice u8))
    (provider (slice u8))
@@ -78,15 +81,16 @@
   (atomic-store (field emitter publish-lock) 0))
 
 ;; Publish one event and return its assigned sequence number.
-(defn emit-event [(emitter (ptr EventEmitter))
-                  (timestamp-ms i64)
-                  (kind EventKind)
-                  (run-id (slice u8))
-                  (operation-id (slice u8))
-                  (parent-operation-id (slice u8))
-                  (provider (slice u8))
-                  (model (slice u8))
-                  (payload Json)] (-> i64)
+(defn emit-event-for-agent [(emitter (ptr EventEmitter))
+                            (timestamp-ms i64)
+                            (kind EventKind)
+                            (run-id (slice u8))
+                            (agent-id (slice u8))
+                            (operation-id (slice u8))
+                            (parent-operation-id (slice u8))
+                            (provider (slice u8))
+                            (model (slice u8))
+                            (payload Json)] (-> i64)
   (event-emitter-lock! emitter)
   (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
         event (alloc/stack Event)
@@ -96,6 +100,7 @@
     (store! (field event timestamp-ms) timestamp-ms)
     (store! (field event kind) kind)
     (store! (field event run-id) run-id)
+    (store! (field event agent-id) agent-id)
     (store! (field event operation-id) operation-id)
     (store! (field event parent-operation-id) parent-operation-id)
     (store! (field event provider) provider)
@@ -104,6 +109,28 @@
     (let [publish-code (publish-event (load sink) event)]
       (event-emitter-unlock! emitter)
       (if (= publish-code 0) sequence -1))))
+
+;; Existing run-scoped events belong to the run's root agent. Delegated agents use
+;; their child run ID, so old call sites gain stable identity without an ambient value.
+(defn emit-event [(emitter (ptr EventEmitter))
+                  (timestamp-ms i64)
+                  (kind EventKind)
+                  (run-id (slice u8))
+                  (operation-id (slice u8))
+                  (parent-operation-id (slice u8))
+                  (provider (slice u8))
+                  (model (slice u8))
+                  (payload Json)] (-> i64)
+  (emit-event-for-agent emitter
+                        timestamp-ms
+                        kind
+                        run-id
+                        run-id
+                        operation-id
+                        parent-operation-id
+                        provider
+                        model
+                        payload))
 
 ;; Stable wire name for an event category.
 (defn event-kind-name [(kind EventKind)] (-> (slice u8))
@@ -114,6 +141,8 @@
     (RunCompleted [] "run.completed")
     (RunFailed [] "run.failed")
     (RunCancelled [] "run.cancelled")
+    (AgentCreated [] "agent.created")
+    (AgentDelegated [] "agent.delegated")
     (ModelRequestStarted [] "model.request.started")
     (ModelResponseDelta [] "model.response.delta")
     (ModelRequestCompleted [] "model.request.completed")
@@ -145,6 +174,7 @@
                       "event"
                       (JsonString (event-kind-name (load (field event kind)))))
     (json-object-put! (mut record) "run_id" (JsonString (load (field event run-id))))
+    (json-object-put! (mut record) "agent_id" (JsonString (load (field event agent-id))))
     (json-object-put! (mut record)
                       "operation_id"
                       (JsonString (load (field event operation-id))))

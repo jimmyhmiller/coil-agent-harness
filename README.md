@@ -13,6 +13,8 @@ The current slice can:
 - use Claude subscriptions through native Anthropic Messages and OAuth authentication;
 - advertise provider capabilities and durably resolve explicit `balanced`, `low-cost`,
   `quality`, `subscription`, and `external-agent` routing profiles;
+- assign every event a stable `agent_id` and execute delegated child agents as durable,
+  independently cancellable child runs with typed delegation messages;
 - expose one provider-neutral model, continuation, tool, authorization, result, and
   event contract;
 - validate tool arguments before authorization;
@@ -57,6 +59,14 @@ snapshot; restart recovery never silently reruns routing policy. Current profile
 - `quality`: OpenAI, or Claude when subscription authentication is required;
 - `subscription`: Claude native tools;
 - `external-agent`: Codex App Server.
+
+A normal run's root `agent_id` equals its `run_id`. To delegate work, submit another
+create command with a unique child `run_id` plus `parent_run_id`; the parent must
+already exist. The service owns `agent_id` and `parent_agent_id` attribution and
+replaces spoofed values. It persists `agent.delegated` and `agent.created` events plus
+a versioned `message` of kind `delegation`; the child prompt is that message's content.
+The child uses the ordinary durable scheduler, budgets, tools, authorization,
+cancellation, queries, and recovery behavior rather than a second agent mechanism.
 
 ## Build and verify
 
@@ -225,7 +235,6 @@ authorization, execution, continuation, and event lifecycle.
 
 ## Next architectural slice
 
-The next slice should add typed agent identities, delegation, and traceable messages on
-top of the durable run/event model. Workflow graph definitions can then compose those
-agents without creating a second execution mechanism. All current provider adapters
-emit incremental text deltas with bounded synchronous backpressure.
+The next slice should add workflow graph definitions and per-run graph state that
+compose durable agent runs without creating a second execution mechanism. All current
+provider adapters emit incremental text deltas with bounded synchronous backpressure.

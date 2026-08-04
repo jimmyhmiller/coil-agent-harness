@@ -80,6 +80,31 @@
                               (principal (slice u8))] (-> i64)
   (if (json-put-string! (mut command) "actor" principal) 0 -1))
 
+(defn service-command-agent! [(allocator (ptr Allocator))
+                              (command (mut Json))] (-> i64)
+  (let [run-id (command-string (load command) "run_id")
+        parent-run-id (command-string (load command) "parent_run_id")
+        actor (command-string (load command) "actor")
+        (mut message) (json-object allocator)]
+    (json-put-string! (mut command) "agent_id" run-id)
+    (when (> (slice-len [u8] parent-run-id) 0)
+      (json-put-string! (mut command) "parent_agent_id" parent-run-id)
+      0)
+    (json-object-put! (mut message) "version" (json-integer allocator 1))
+    (json-put-string! (mut message) "message_id" (command-string (load command) "command_id"))
+    (json-put-string! (mut message)
+                      "kind"
+                      (if (> (slice-len [u8] parent-run-id) 0)
+                          "delegation"
+                          "instruction"))
+    (json-put-string! (mut message)
+                      "from"
+                      (if (> (slice-len [u8] parent-run-id) 0) parent-run-id actor))
+    (json-put-string! (mut message) "to" run-id)
+    (json-put-string! (mut message) "content" (command-string (load command) "prompt"))
+    (json-object-put! (mut command) "message" (load message))
+    0))
+
 (defn command-string [(command Json) (key (slice u8))] (-> (slice u8))
   (match (json-string-at command key)
     (Some [value] value)
@@ -120,32 +145,68 @@
                     (match-else (load (field view status))
                                 (RunNotFound []
                                              (let [provider (command-string command "provider")
-                                                   model (command-string command "model")]
-                                               (emit-event (load (field service emitter))
-                                                           (now-ms)
-                                                           (RunCreated)
-                                                           run-id
-                                                           run-id
-                                                           ""
-                                                           provider
-                                                           model
-                                                           command)
-                                               (if (event-journal-failed? (load (field service journal)))
+                                                   model (command-string command "model")
+                                                   parent-run-id (command-string command "parent_run_id")
+                                                   parent-agent-id (command-string command "parent_agent_id")
+                                                   parent-view
+                                                     (project-run (field recovery events)
+                                                                  parent-run-id)]
+                                               (if (and (> (slice-len [u8] parent-run-id) 0)
+                                                        (match-else (load (field parent-view status))
+                                                                    (RunNotFound [] true)
+                                                                    (_ false)))
                                                    (service-error allocator
-                                                                  500
-                                                                  "journal_write_failed"
-                                                                  "create command was not durable")
-                                                   (let [start-code (service-start-durable-run service command)
-                                                         refreshed (service-recover service)]
-                                                     (if (!= start-code 0)
+                                                                  404
+                                                                  "parent_run_not_found"
+                                                                  "delegation parent run does not exist")
+                                                   (do
+                                                     (emit-event (load (field service emitter))
+                                                                 (now-ms)
+                                                                 (RunCreated)
+                                                                 run-id
+                                                                 run-id
+                                                                 ""
+                                                                 provider
+                                                                 model
+                                                                 command)
+                                                     (when (> (slice-len [u8] parent-run-id) 0)
+                                                       (emit-event-for-agent (load (field service emitter))
+                                                                             (now-ms)
+                                                                             (AgentDelegated)
+                                                                             parent-run-id
+                                                                             parent-agent-id
+                                                                             run-id
+                                                                             parent-agent-id
+                                                                             provider
+                                                                             model
+                                                                             command)
+                                                       0)
+                                                     (emit-event-for-agent (load (field service emitter))
+                                                                           (now-ms)
+                                                                           (AgentCreated)
+                                                                           run-id
+                                                                           run-id
+                                                                           run-id
+                                                                           parent-agent-id
+                                                                           provider
+                                                                           model
+                                                                           command)
+                                                     (if (event-journal-failed? (load (field service journal)))
                                                          (service-error allocator
-                                                                        503
-                                                                        "run_start_failed"
-                                                                        "run was durably queued but could not start")
-                                                         (service-run-response service
-                                                                               (field refreshed events)
-                                                                               run-id
-                                                                               202))))))
+                                                                        500
+                                                                        "journal_write_failed"
+                                                                        "create command was not durable")
+                                                         (let [start-code (service-start-durable-run service command)
+                                                               refreshed (service-recover service)]
+                                                           (if (!= start-code 0)
+                                                               (service-error allocator
+                                                                              503
+                                                                              "run_start_failed"
+                                                                              "run was durably queued but could not start")
+                                                               (service-run-response service
+                                                                                     (field refreshed events)
+                                                                                     run-id
+                                                                                     202))))))))
                                 (_ (service-error allocator
                                                   409
                                                   "run_exists"
@@ -526,6 +587,7 @@
                   (if (load (field parsed ok))
                       (let [(mut command) (load (field parsed value))]
                         (service-command-actor! (mut command) principal)
+                        (service-command-agent! allocator (mut command))
                         (match (model-route-command! allocator (mut command))
                           (ModelRouteSelected []
                                               (service-create-run service (load command)))

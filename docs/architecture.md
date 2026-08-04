@@ -26,6 +26,14 @@ Routing happens before `run.created`; its requirements, selection, explanation, 
 capability snapshot are persisted in the command payload. Recovery therefore executes
 the original durable choice even if policy changes later.
 
+Every event names an `agent_id`. A root agent uses its run ID; delegated children use
+their child run ID. Delegation is represented as a normal durable child create command
+with a validated `parent_run_id`, a server-owned parent identity, and a versioned typed
+message whose content becomes the child prompt. The service emits `agent.delegated`
+and `agent.created`, then schedules the child through the existing run controller.
+Children therefore inherit ordinary capacity limits, tool policy, cancellation,
+queries, journaling, and crash recovery.
+
 ## Model turns and continuations
 
 `ModelRequest` is stable across providers. After a model returns tool calls, the
@@ -95,11 +103,10 @@ contains no application-owned native shim.
 
 ## Deliberate next boundaries
 
-- Streaming SSE decoders for Responses and both DeepSeek formats.
-- Cooperative cancellation for HTTP and tool workers.
 - Approval round-trips for interactive Codex App Server requests.
 - Additional production tools and sandboxed execution capabilities.
-- Typed agent communication, delegation, and supervision.
+- Versioned workflow graphs and composable node transitions.
+- Supervisor assessments and interventions over the public event model.
 
 These extend current contracts; they must not introduce alternate model/tool
 loops or UI-specific behavior into the core.
