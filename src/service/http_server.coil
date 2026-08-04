@@ -12,6 +12,60 @@
 (import "harness-shutdown-signal" :use *)
 (import "provider-common" :use *)
 
+(defstruct ServiceAuth
+  [(operator-token (slice u8))
+   (observer-token (slice u8))])
+
+(defstruct AuthenticatedPrincipal
+  [(authenticated bool)
+   (name (slice u8))
+   (can-observe bool)
+   (can-control bool)])
+
+(defn secure-token-eq [(left (slice u8)) (right (slice u8))] (-> bool)
+  (let [left-length (slice-len [u8] left)
+        right-length (slice-len [u8] right)
+        (mut difference) (^ left-length right-length)
+        (mut i) 0
+        limit (if (< left-length right-length) left-length right-length)]
+    (loop (if (>= (load i) limit)
+              (break)
+              (do
+                (store! difference
+                        (| (load difference)
+                           (^ (cast i64 (slice-get [u8] left (load i)))
+                              (cast i64 (slice-get [u8] right (load i))))))
+                (store! i (+ (load i) 1)))))
+    (= (load difference) 0)))
+
+(defn authenticate-service-request [(allocator (ptr Allocator))
+                                    (auth (ptr ServiceAuth))
+                                    (supplied (slice u8))] (-> AuthenticatedPrincipal)
+  (let [principal (alloc/stack AuthenticatedPrincipal)
+        operator-token (load (field auth operator-token))
+        observer-token (load (field auth observer-token))
+        operator-header (concat-or-empty allocator "Bearer " operator-token)
+        observer-header (concat-or-empty allocator "Bearer " observer-token)]
+    (store! (field principal authenticated) false)
+    (store! (field principal name) "")
+    (store! (field principal can-observe) false)
+    (store! (field principal can-control) false)
+    (cond (and (> (slice-len [u8] operator-token) 0)
+               (secure-token-eq supplied operator-header))
+            (do
+              (store! (field principal authenticated) true)
+              (store! (field principal name) "operator")
+              (store! (field principal can-observe) true)
+              (store! (field principal can-control) true))
+          (and (> (slice-len [u8] observer-token) 0)
+               (secure-token-eq supplied observer-header))
+            (do
+              (store! (field principal authenticated) true)
+              (store! (field principal name) "observer")
+              (store! (field principal can-observe) true))
+          :else 0)
+    (load principal)))
+
 (defn write-service-response! [(allocator (ptr Allocator))
                                (client-fd i64)
                                (response ServiceResponse)] (-> i64)
@@ -23,10 +77,10 @@
 (defn handle-accepted-request! [(allocator (ptr Allocator))
                                 (client-fd i64)
                                 (service (ptr RunService))
-                                (auth-token (slice u8))
+                                (auth (ptr ServiceAuth))
                                 (request-value http/Request)] (-> i64)
-  (let [expected (concat-or-empty allocator "Bearer " auth-token)
-        supplied (http/header request-value "Authorization")
+  (let [supplied (http/header request-value "Authorization")
+        principal (authenticate-service-request allocator auth supplied)
         domain (allocation-domain-open allocator)
         request-allocator (allocation-domain-allocator domain)
         previous-allocator (load (field service allocator))
@@ -35,8 +89,7 @@
         (store! result -1)
         (do
           (store! (field service allocator) request-allocator)
-          (if (or (= (slice-len [u8] auth-token) 0)
-                  (not (str-eq supplied expected)))
+          (if (not (load (field principal authenticated)))
               (store! result
                       (write-service-response! request-allocator
                                                client-fd
@@ -48,6 +101,9 @@
                 (store! (field request method) (http/method request-value))
                 (store! (field request target) (http/target request-value))
                 (store! (field request body) (http/body request-value))
+                (store! (field request principal) (load (field principal name)))
+                (store! (field request can-observe) (load (field principal can-observe)))
+                (store! (field request can-control) (load (field principal can-control)))
                 (store! result
                         (write-service-response! request-allocator
                                                  client-fd
@@ -60,7 +116,7 @@
 (defn serve-run-service-once [(allocator (ptr Allocator))
                               (listener (ptr HttpListener))
                               (service (ptr RunService))
-                              (auth-token (slice u8))] (-> i64)
+                              (auth (ptr ServiceAuth))] (-> i64)
   (let [client-fd (http-listener-accept listener)]
     (if (< client-fd 0)
         -1
@@ -80,7 +136,7 @@
                                        (handle-accepted-request! allocator
                                                                  client-fd
                                                                  service
-                                                                 auth-token
+                                                                 auth
                                                                  accepted)))]
           (os/close (cast i32 client-fd))
           (if (< result 0) -1 0)))))
@@ -88,8 +144,8 @@
 (defn serve-run-service [(allocator (ptr Allocator))
                          (listener (ptr HttpListener))
                          (service (ptr RunService))
-                         (auth-token (slice u8))] (-> i64)
-  (loop (when (!= (serve-run-service-once allocator listener service auth-token) 0)
+                         (auth (ptr ServiceAuth))] (-> i64)
+  (loop (when (!= (serve-run-service-once allocator listener service auth) 0)
           (break)
           0))
   0)
@@ -97,7 +153,7 @@
 (defn serve-run-service-until-shutdown [(allocator (ptr Allocator))
                                         (listener (ptr HttpListener))
                                         (service (ptr RunService))
-                                        (auth-token (slice u8))
+                                        (auth (ptr ServiceAuth))
                                         (shutdown (ptr ShutdownSignal))] (-> i64)
   (let [(mut result) 0]
     (loop (if (shutdown-signal-requested? shutdown)
@@ -112,7 +168,7 @@
                       (!= (serve-run-service-once allocator
                                                   listener
                                                   service
-                                                  auth-token)
+                                                  auth)
                           0)
                         (do (store! result -1) (break))
                       :else 0))))

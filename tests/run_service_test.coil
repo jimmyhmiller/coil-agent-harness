@@ -1,6 +1,7 @@
 (module harness-run-service-test)
 
 (import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
@@ -43,15 +44,27 @@
     (json-put-string! (mut command) "run_id" run-id)
     (load command)))
 
-(defn http-service-call [(service (ptr RunService))
-                         (method (slice u8))
-                         (target (slice u8))
-                         (body (slice u8))] (-> ServiceResponse)
+(defn http-service-call-as [(service (ptr RunService))
+                            (method (slice u8))
+                            (target (slice u8))
+                            (body (slice u8))
+                            (principal (slice u8))
+                            (can-observe bool)
+                            (can-control bool)] (-> ServiceResponse)
   (let [request (alloc/stack ServiceHttpRequest)]
     (store! (field request method) method)
     (store! (field request target) target)
     (store! (field request body) body)
+    (store! (field request principal) principal)
+    (store! (field request can-observe) can-observe)
+    (store! (field request can-control) can-control)
     (service-handle-http service request)))
+
+(defn http-service-call [(service (ptr RunService))
+                         (method (slice u8))
+                         (target (slice u8))
+                         (body (slice u8))] (-> ServiceResponse)
+  (http-service-call-as service method target body "test-operator" true true))
 
 (deftest persists-idempotent-create-cancel-and-cursor-queries
          (let [allocator (malloc-allocator)
@@ -82,7 +95,7 @@
                    (http-service-call service
                                       "POST"
                                       "/v1/runs"
-                                      "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+                                      "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\",\"actor\":\"spoofed-client\"}")
                  duplicate
                    (http-service-call service
                                       "POST"
@@ -102,6 +115,29 @@
              (assert (match (json-string-at (load (field queried body)) "status")
                        (Some [value] (str-eq value "queued"))
                        (None [] false))))
+           (let [observed
+                   (http-service-call-as service
+                                         "GET"
+                                         "/v1/runs/run-1"
+                                         ""
+                                         "test-observer"
+                                         true
+                                         false)
+                 forbidden
+                   (http-service-call-as service
+                                         "POST"
+                                         "/v1/runs"
+                                         "{\"version\":1,\"command_id\":\"observer-create\",\"run_id\":\"observer-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}"
+                                         "test-observer"
+                                         true
+                                         false)]
+             (assert-eq (load (field observed status)) 200)
+             (assert-eq (load (field forbidden status)) 403)
+             (assert-eq (load (field controller starts)) 1))
+           (let [recovery (event-journal-recover allocator path)
+                 created-event (al-get [Json] (load (field recovery events)) 0)
+                 payload (json-get created-event "payload")]
+             (assert (str-eq (command-string payload "actor") "test-operator")))
            (let [events
                    (http-service-call service
                                       "GET"

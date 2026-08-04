@@ -5,6 +5,7 @@
 (import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "coil.thread" :use *)
 (import "harness-event" :use *)
@@ -37,12 +38,15 @@
    (result (ptr i64))])
 
 (defn remote-server-thread [(opaque (ptr i8))] (-> (ptr i8))
-  (let [job (cast (ptr RemoteServerJob) opaque)]
+  (let [job (cast (ptr RemoteServerJob) opaque)
+        auth (alloc/stack ServiceAuth)]
+    (store! (field auth operator-token) "test-token")
+    (store! (field auth observer-token) "observer-token")
     (store! (load (field job result))
             (serve-run-service-once (load (field job allocator))
                                     (load (field job listener))
                                     (load (field job service))
-                                    "test-token"))
+                                    auth))
     (cast (ptr i8) 0)))
 
 (defstruct RemoteShutdownServerJob
@@ -53,12 +57,15 @@
    (result (ptr i64))])
 
 (defn remote-shutdown-server-thread [(opaque (ptr i8))] (-> (ptr i8))
-  (let [job (cast (ptr RemoteShutdownServerJob) opaque)]
+  (let [job (cast (ptr RemoteShutdownServerJob) opaque)
+        auth (alloc/stack ServiceAuth)]
+    (store! (field auth operator-token) "secret-token")
+    (store! (field auth observer-token) "")
     (store! (load (field job result))
             (serve-run-service-until-shutdown (load (field job allocator))
                                               (load (field job listener))
                                               (load (field job service))
-                                              "secret-token"
+                                              auth
                                               (load (field job shutdown))))
     (cast (ptr i8) 0)))
 
@@ -69,15 +76,17 @@
 
 (defn remote-create-request [(allocator (ptr Allocator))
                              (port i64)
-                             (authenticated bool)] (-> HttpResponse)
+                             (token (slice u8))] (-> HttpResponse)
   (let [headers
           (box allocator
                (ArrayList (slice u8))
                (al-new [(slice u8)] allocator))
         request (alloc/stack HttpRequest)]
     (al-push! [(slice u8)] headers "Content-Type: application/json")
-    (when authenticated
-      (al-push! [(slice u8)] headers "Authorization: Bearer test-token")
+    (when (> (slice-len [u8] token) 0)
+      (al-push! [(slice u8)]
+                headers
+                (concat-or-empty allocator "Authorization: Bearer " token))
       0)
     (store! (field request url) (remote-test-url allocator port))
     (store! (field request headers) headers)
@@ -104,87 +113,112 @@
                shutdown-job (alloc/stack RemoteShutdownServerJob)
                shutdown (alloc/stack ShutdownSignal)
                server-thread (alloc/stack Thread)]
-           (fs/write-file allocator path "")
-           (match (event-journal-open allocator path true)
-             (JournalOpenFailed [message] (assert false))
-             (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
-           (match (authorization-mailbox-open allocator)
-             (AuthorizationMailboxOpenFailed [message] (assert false))
-             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
-           (store! (field controller starts) 0)
-           (store! (field service allocator) allocator)
-           (store! (field service journal-path) path)
-           (store! (field service journal) journal)
-           (store! (field service emitter) emitter)
-           (store! (field service mailbox) mailbox)
-           (store! (field service controller) controller)
-           (match (http-listener-open 0)
-             (ListenerOpenFailed [message] (assert false))
-             (ListenerOpened [opened] (store! listener opened)))
-           (assert (> (load (field listener port)) 0))
-           (store! (field server-job allocator) allocator)
-           (store! (field server-job listener) listener)
-           (store! (field server-job service) service)
-           (store! (field server-job result) server-result)
-           (assert-eq (cast i64
-                            (thread-spawn server-thread
-                                          (fnptr-of remote-server-thread)
-                                          (cast (ptr i8) server-job)))
-                      0)
-           (let [unauthorized
-                   (remote-create-request allocator
-                                          (load (field listener port))
-                                          false)]
-             (assert-eq (load (field unauthorized transport-code)) 0)
-             (assert-eq (load (field unauthorized status-code)) 401))
-           (thread-join server-thread)
-           (assert-eq (load server-result) 0)
-           (assert-eq (load (field controller starts)) 0)
-           (store! server-result -1)
-           (assert-eq (cast i64
-                            (thread-spawn server-thread
-                                          (fnptr-of remote-server-thread)
-                                          (cast (ptr i8) server-job)))
-                      0)
-           (let [response
-                   (remote-create-request allocator
-                                          (load (field listener port))
-                                          true)
-                 parsed (json-parse allocator (load (field response body)))]
-             (assert-eq (load (field response transport-code)) 0)
-             (assert-eq (load (field response status-code)) 202)
-             (assert (load (field parsed ok)))
-             (assert (match (json-string-at (load (field parsed value)) "status")
-                       (Some [value] (str-eq value "queued"))
-                       (None [] false))))
-           (thread-join server-thread)
-           (assert-eq (load server-result) 0)
-           (assert-eq (load (field controller starts)) 1)
-           (let [recovery (event-journal-recover allocator path)]
-             (assert (load (field recovery ok)))
-             (assert-eq (load (field recovery last-sequence)) 1))
-           (store! shutdown (shutdown-signal-new))
-           (assert (shutdown-signal-valid? shutdown))
-           (store! server-result -1)
-           (store! (field shutdown-job allocator) allocator)
-           (store! (field shutdown-job listener) listener)
-           (store! (field shutdown-job service) service)
-           (store! (field shutdown-job shutdown) shutdown)
-           (store! (field shutdown-job result) server-result)
-           (assert-eq (cast i64
-                            (thread-spawn server-thread
-                                          (fnptr-of remote-shutdown-server-thread)
-                                          (cast (ptr i8) shutdown-job)))
-                      0)
-           (let [partial-client (harness_open_partial_client (cast i32 (load (field listener port))))]
-             (assert (>= partial-client 0))
-             (sleep-ms 50)
-             (shutdown-signal-request! shutdown)
+           (let [auth-check (alloc/stack ServiceAuth)]
+             (store! (field auth-check operator-token) "test-token")
+             (store! (field auth-check observer-token) "observer-token")
+             (let [principal
+                     (authenticate-service-request allocator
+                                                   auth-check
+                                                   "Bearer observer-token")]
+               (assert (load (field principal authenticated)))
+               (assert (load (field principal can-observe)))
+               (assert (not (load (field principal can-control)))))
+             (fs/write-file allocator path "")
+             (match (event-journal-open allocator path true)
+               (JournalOpenFailed [message] (assert false))
+               (JournalOpened [opened] (store! journal opened)))
+             (store! emitter (event-emitter-new journal sequence))
+             (match (authorization-mailbox-open allocator)
+               (AuthorizationMailboxOpenFailed [message] (assert false))
+               (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
+             (store! (field controller starts) 0)
+             (store! (field service allocator) allocator)
+             (store! (field service journal-path) path)
+             (store! (field service journal) journal)
+             (store! (field service emitter) emitter)
+             (store! (field service mailbox) mailbox)
+             (store! (field service controller) controller)
+             (match (http-listener-open 0)
+               (ListenerOpenFailed [message] (assert false))
+               (ListenerOpened [opened] (store! listener opened)))
+             (assert (> (load (field listener port)) 0))
+             (store! (field server-job allocator) allocator)
+             (store! (field server-job listener) listener)
+             (store! (field server-job service) service)
+             (store! (field server-job result) server-result)
+             (assert-eq (cast i64
+                              (thread-spawn server-thread
+                                            (fnptr-of remote-server-thread)
+                                            (cast (ptr i8) server-job)))
+                        0)
+             (let [unauthorized
+                     (remote-create-request allocator
+                                            (load (field listener port))
+                                            "")]
+               (assert-eq (load (field unauthorized transport-code)) 0)
+               (assert-eq (load (field unauthorized status-code)) 401))
              (thread-join server-thread)
              (assert-eq (load server-result) 0)
-             (os/close (cast i32 partial-client)))
-           (shutdown-signal-close! shutdown)
-           (http-listener-close! listener)
-           (authorization-mailbox-close! allocator mailbox)
-           (event-journal-close! journal)))
+             (assert-eq (load (field controller starts)) 0)
+             (store! server-result -1)
+             (assert-eq (cast i64
+                              (thread-spawn server-thread
+                                            (fnptr-of remote-server-thread)
+                                            (cast (ptr i8) server-job)))
+                        0)
+             (let [forbidden
+                     (remote-create-request allocator
+                                            (load (field listener port))
+                                            "observer-token")]
+               (assert-eq (load (field forbidden transport-code)) 0)
+               (assert-eq (load (field forbidden status-code)) 403))
+             (thread-join server-thread)
+             (assert-eq (load server-result) 0)
+             (assert-eq (load (field controller starts)) 0)
+             (store! server-result -1)
+             (assert-eq (cast i64
+                              (thread-spawn server-thread
+                                            (fnptr-of remote-server-thread)
+                                            (cast (ptr i8) server-job)))
+                        0)
+             (let [response
+                     (remote-create-request allocator
+                                            (load (field listener port))
+                                            "test-token")
+                   parsed (json-parse allocator (load (field response body)))]
+               (assert-eq (load (field response transport-code)) 0)
+               (assert-eq (load (field response status-code)) 202)
+               (assert (load (field parsed ok)))
+               (assert (match (json-string-at (load (field parsed value)) "status")
+                         (Some [value] (str-eq value "queued"))
+                         (None [] false))))
+             (thread-join server-thread)
+             (assert-eq (load server-result) 0)
+             (assert-eq (load (field controller starts)) 1)
+             (let [recovery (event-journal-recover allocator path)]
+               (assert (load (field recovery ok)))
+               (assert-eq (load (field recovery last-sequence)) 1))
+             (store! shutdown (shutdown-signal-new))
+             (assert (shutdown-signal-valid? shutdown))
+             (store! server-result -1)
+             (store! (field shutdown-job allocator) allocator)
+             (store! (field shutdown-job listener) listener)
+             (store! (field shutdown-job service) service)
+             (store! (field shutdown-job shutdown) shutdown)
+             (store! (field shutdown-job result) server-result)
+             (assert-eq (cast i64
+                              (thread-spawn server-thread
+                                            (fnptr-of remote-shutdown-server-thread)
+                                            (cast (ptr i8) shutdown-job)))
+                        0)
+             (let [partial-client (harness_open_partial_client (cast i32 (load (field listener port))))]
+               (assert (>= partial-client 0))
+               (sleep-ms 50)
+               (shutdown-signal-request! shutdown)
+               (thread-join server-thread)
+               (assert-eq (load server-result) 0)
+               (os/close (cast i32 partial-client)))
+             (shutdown-signal-close! shutdown)
+             (http-listener-close! listener)
+             (authorization-mailbox-close! allocator mailbox)
+             (event-journal-close! journal))))

@@ -67,6 +67,9 @@
     (store! (field request target)
             "/v1/runs/run-auth/authorizations/call-auth")
     (store! (field request body) body)
+    (store! (field request principal) "test-operator")
+    (store! (field request can-observe) true)
+    (store! (field request can-control) true)
     (service-handle-http service request)))
 
 (deftest waits-for-a-durable-idempotent-authorization-decision
@@ -151,7 +154,10 @@
              (let [request-event (al-get [Json] (load (field recovery events)) 0)
                    payload (json-get request-event "payload")]
                (assert (str-eq (command-string payload "effect") "reversible"))
-               (assert (str-eq (command-string payload "tool") "write-file"))))
+               (assert (str-eq (command-string payload "tool") "write-file")))
+             (let [decision-event (al-get [Json] (load (field recovery events)) 1)
+                   payload (json-get decision-event "payload")]
+               (assert (str-eq (command-string payload "actor") "test-operator"))))
            ;; A restarted waiter observes the durable decision immediately and does
            ;; not append a second request.
            (assert (match-else (interactive-authorize authorizer spec call)

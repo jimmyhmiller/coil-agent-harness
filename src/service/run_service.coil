@@ -35,7 +35,10 @@
 (defstruct ServiceHttpRequest
   [(method (slice u8))
    (target (slice u8))
-   (body (slice u8))])
+   (body (slice u8))
+   (principal (slice u8))
+   (can-observe bool)
+   (can-control bool)])
 
 ;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
 ;; by value through a trait object is not ABI-stable across Coil backends.
@@ -65,6 +68,16 @@
     (json-put-string! (mut body) "error" code)
     (json-put-string! (mut body) "message" message)
     (service-response status (load body))))
+
+(defn service-forbidden [(allocator (ptr Allocator))] (-> ServiceResponse)
+  (service-error allocator
+                 403
+                 "forbidden"
+                 "authenticated principal lacks the required capability"))
+
+(defn service-command-actor! [(command (mut Json))
+                              (principal (slice u8))] (-> i64)
+  (if (json-put-string! (mut command) "actor" principal) 0 -1))
 
 (defn command-string [(command Json) (key (slice u8))] (-> (slice u8))
   (match (json-string-at command key)
@@ -499,12 +512,19 @@
                            (request (ptr ServiceHttpRequest))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
         method (load (field request method))
-        target (load (field request target))]
+        target (load (field request target))
+        principal (load (field request principal))
+        can-observe (load (field request can-observe))
+        can-control (load (field request can-control))]
     (cond (and (str-eq method "POST") (str-eq target "/v1/runs"))
-            (let [parsed (service-parse-command service (load (field request body)))]
-              (if (load (field parsed ok))
-                  (service-create-run service (load (field parsed value)))
-                  (service-error allocator 400 "invalid_json" "request body is not valid JSON")))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (let [(mut command) (load (field parsed value))]
+                        (service-command-actor! (mut command) principal)
+                        (service-create-run service (load command)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
           (starts-with target "/v1/runs/")
             (let [rest (service-target-parts target)
                   cancel-run-id (service-cancel-run-id rest)
@@ -514,47 +534,58 @@
               (cond (and (str-eq method "POST")
                          (> (slice-len [u8] authorization-run-id) 0)
                          (> (slice-len [u8] authorization-id) 0))
-                      (let [parsed
-                              (service-parse-command service
-                                                     (load (field request body)))]
-                        (if (not (load (field parsed ok)))
-                            (service-error allocator
-                                           400
-                                           "invalid_json"
-                                           "request body is not valid JSON")
-                            (let [command (load (field parsed value))]
-                              (if (or (not (str-eq (command-string command "run_id")
-                                                   authorization-run-id))
-                                      (not (str-eq (command-string command "authorization_id")
-                                                   authorization-id)))
-                                  (service-error allocator
-                                                 409
-                                                 "authorization_id_mismatch"
-                                                 "path and command authorization IDs differ")
-                                  (service-decide-authorization service command)))))
+                      (if (not can-control)
+                          (service-forbidden allocator)
+                          (let [parsed
+                                  (service-parse-command service
+                                                         (load (field request body)))]
+                            (if (not (load (field parsed ok)))
+                                (service-error allocator
+                                               400
+                                               "invalid_json"
+                                               "request body is not valid JSON")
+                                (let [(mut command) (load (field parsed value))]
+                                  (service-command-actor! (mut command) principal)
+                                  (if (or (not (str-eq (command-string (load command) "run_id")
+                                                       authorization-run-id))
+                                          (not (str-eq (command-string (load command) "authorization_id")
+                                                       authorization-id)))
+                                      (service-error allocator
+                                                     409
+                                                     "authorization_id_mismatch"
+                                                     "path and command authorization IDs differ")
+                                      (service-decide-authorization service (load command)))))))
                     (and (str-eq method "POST")
                          (> (slice-len [u8] cancel-run-id) 0))
-                      (let [parsed
-                              (service-parse-command service
-                                                     (load (field request body)))]
-                        (if (not (load (field parsed ok)))
-                            (service-error allocator
-                                           400
-                                           "invalid_json"
-                                           "request body is not valid JSON")
-                            (let [command (load (field parsed value))]
-                              (if (not (str-eq (command-string command "run_id")
-                                               cancel-run-id))
-                                  (service-error allocator
-                                                 409
-                                                 "run_id_mismatch"
-                                                 "path and command run IDs differ")
-                                  (service-cancel-run service command)))))
+                      (if (not can-control)
+                          (service-forbidden allocator)
+                          (let [parsed
+                                  (service-parse-command service
+                                                         (load (field request body)))]
+                            (if (not (load (field parsed ok)))
+                                (service-error allocator
+                                               400
+                                               "invalid_json"
+                                               "request body is not valid JSON")
+                                (let [(mut command) (load (field parsed value))]
+                                  (service-command-actor! (mut command) principal)
+                                  (if (not (str-eq (command-string (load command) "run_id")
+                                                   cancel-run-id))
+                                      (service-error allocator
+                                                     409
+                                                     "run_id_mismatch"
+                                                     "path and command run IDs differ")
+                                      (service-cancel-run service (load command)))))))
                     (and (str-eq method "GET")
                          (> (slice-len [u8] events-run-id) 0))
-                      (service-query-events service
-                                            events-run-id
-                                            (service-events-cursor target))
-                    (str-eq method "GET") (service-query-run service rest)
+                      (if can-observe
+                          (service-query-events service
+                                                events-run-id
+                                                (service-events-cursor target))
+                          (service-forbidden allocator))
+                    (str-eq method "GET")
+                      (if can-observe
+                          (service-query-run service rest)
+                          (service-forbidden allocator))
                     :else (service-error allocator 405 "method_not_allowed" "method is not supported")))
           :else (service-error allocator 404 "not_found" "route does not exist"))))

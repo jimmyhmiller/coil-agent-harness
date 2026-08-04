@@ -215,7 +215,21 @@
                   64)))))
 
 (defn cli-auth-token [(allocator (ptr Allocator))] (-> (slice u8))
-  (match (os/env-get allocator "HARNESS_AUTH_TOKEN")
+  (match (os/env-get allocator "HARNESS_OPERATOR_TOKEN")
+    (Ok [found]
+        (match found
+          (Some [value] (os/owned-string-slice value))
+          (None []
+                (match (os/env-get allocator "HARNESS_AUTH_TOKEN")
+                  (Ok [legacy]
+                      (match legacy
+                        (Some [value] (os/owned-string-slice value))
+                        (None [] "")))
+                  (Err [failure] "")))))
+    (Err [failure] "")))
+
+(defn cli-observer-token [(allocator (ptr Allocator))] (-> (slice u8))
+  (match (os/env-get allocator "HARNESS_OBSERVER_TOKEN")
     (Ok [found]
         (match found
           (Some [value] (os/owned-string-slice value))
@@ -226,13 +240,17 @@
                  (journal-path (slice u8))] (-> i64)
   (let [allocator (malloc-allocator)
         auth-token (cli-auth-token allocator)
+        observer-token (cli-observer-token allocator)
+        service-auth (alloc/stack ServiceAuth)
         journal (alloc/stack EventJournal)
         mailbox (alloc/stack AuthorizationMailbox)
         listener (alloc/stack HttpListener)]
     (block :serve
            (when (= (slice-len [u8] auth-token) 0)
-             (write-line 2 "HARNESS_AUTH_TOKEN must be set and non-empty")
+             (write-line 2 "HARNESS_OPERATOR_TOKEN or HARNESS_AUTH_TOKEN must be set and non-empty")
              (return-from :serve 78))
+           (store! (field service-auth operator-token) auth-token)
+           (store! (field service-auth observer-token) observer-token)
            (let [port
                    (match (str-parse-int port-text)
                      (Some [value] value)
@@ -329,7 +347,7 @@
                                (serve-run-service-until-shutdown allocator
                                                                  listener
                                                                  service
-                                                                 auth-token
+                                                                 service-auth
                                                                  shutdown)))
                    (shutdown-signal-close! shutdown)
                    (runtime-controller-join-all! controller)

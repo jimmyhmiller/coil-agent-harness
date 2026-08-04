@@ -30,8 +30,10 @@ The current slice can:
   traversal checks, effect metadata, deadlines, cancellation, and interactive approval.
 
 The HTTP listener binds to IPv4 loopback and the CLI exposes a long-running `serve`
-command protected by a required bearer token. Remote/non-loopback deployment still
-needs TLS termination, identity-aware authorization, and transport hardening.
+command protected by capability-bearing credentials. Operator credentials can create,
+cancel, inspect, and authorize runs; observer credentials can only inspect runs and
+events. Remote/non-loopback deployment still needs TLS termination and transport
+hardening.
 
 The version 1 service routes are `POST /v1/runs`,
 `POST /v1/runs/{run_id}/cancel`, `GET /v1/runs/{run_id}`,
@@ -137,7 +139,11 @@ streams independently.
 The model name is always explicit. Current sensible defaults are shown above, but the
 runtime does not hard-code a provider's model catalogue.
 
-Service requests use `Authorization: Bearer $HARNESS_AUTH_TOKEN`. The filesystem tools
+Service requests use `Authorization: Bearer ...`. Set `HARNESS_OPERATOR_TOKEN` for a
+principal with observe/control capabilities and optionally `HARNESS_OBSERVER_TOKEN`
+for a read-only principal. `HARNESS_AUTH_TOKEN` remains a compatibility fallback for
+the operator credential. Mutation payloads cannot choose their durable actor identity;
+the service overwrites `actor` with the authenticated principal. The filesystem tools
 accept lexically root-relative paths, reject parent traversal, and cap reads and writes
 at one MiB. They are host capabilities, not a sandbox: filesystem symlinks are followed,
 so deployments that need isolation must place the harness in an OS sandbox or container.
