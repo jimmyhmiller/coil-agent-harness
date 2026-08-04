@@ -226,7 +226,10 @@
                                 (str-eq (load (field success response-id)) "msg-fixture")))
                      (ModelErr [failure] false)))
            ;; Native Claude OAuth uses the same stream and tool parser.
-           (assert (match (execute-model claude request emitter allocator)
+           (assert (match (deepseek-anthropic-execute-stream (field claude messages)
+                                                             request
+                                                             emitter
+                                                             allocator)
                      (ModelOk [response]
                               (let [success response]
                                 (and (str-eq (load (field success response-id)) "msg-fixture")

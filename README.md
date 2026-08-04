@@ -103,9 +103,16 @@ Provider credentials are read only inside provider adapters:
 - OpenAI: `OPENAI_API_KEY`, with `OPENAI_KEY` as a fallback;
 - DeepSeek: `DEEPSEEK_API_KEY`, with `DEEPSEEK_KEY` as a fallback;
 - Codex: the existing Codex CLI login/session.
-- Claude subscription: `ANTHROPIC_OAUTH_TOKEN`, with `ANTHROPIC_AUTH_TOKEN` as a
-  fallback. Generate a long-lived token with `claude setup-token`, then place it in the
-  environment; never pass it as a CLI argument.
+- Claude subscription: run `./harness login claude`. OAuth credentials are stored at
+  `~/.coil-agent-harness/auth.json` with mode `0600` and refreshed automatically under
+  a cross-process lock. `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN` remain
+  environment overrides; never pass credentials as CLI arguments.
+
+Claude login requires Python 3, opens the authorization page in your browser, and
+falls back to accepting the final redirect URL in the terminal. Run
+`./harness logout claude` to remove the stored credentials. Installed or relocated
+builds can set `HARNESS_CLAUDE_OAUTH_HELPER` to the absolute path of
+`scripts/claude_oauth.py`.
 
 Credentials are used to construct request headers and are never included in emitted
 events. Do not pass a credential as a CLI argument.

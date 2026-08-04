@@ -18,6 +18,7 @@
 (defstruct DeepSeekAnthropicContext
   [(endpoint (slice u8))
    (credential ApiCredential)
+   (credential-value (slice u8))
    (provider (slice u8))
    (credential-error (slice u8))
    (oauth bool)
@@ -29,6 +30,7 @@
     (store! (field (field context credential) primary-env) c"DEEPSEEK_API_KEY")
     (store! (field (field context credential) fallback-env) c"DEEPSEEK_KEY")
     (store! (field context provider) "deepseek-anthropic")
+    (store! (field context credential-value) "")
     (store! (field context credential-error) "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
     (store! (field context oauth) false)
     (store! (field context transport)
@@ -488,7 +490,11 @@
                                   (request (ptr ModelRequest))
                                   (emitter (ptr EventEmitter))
                                   (allocator (ptr Allocator))] (-> ModelResult)
-  (let [key (api-key allocator (load (field context credential)))]
+  (let [configured (load (field context credential-value))
+        key
+          (if (> (slice-len [u8] configured) 0)
+              configured
+              (api-key allocator (load (field context credential))))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-anthropic" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
@@ -552,7 +558,11 @@
                                          (request (ptr ModelRequest))
                                          (emitter (ptr EventEmitter))
                                          (allocator (ptr Allocator))] (-> ModelResult)
-  (let [key (api-key allocator (load (field context credential)))]
+  (let [configured (load (field context credential-value))
+        key
+          (if (> (slice-len [u8] configured) 0)
+              configured
+              (api-key allocator (load (field context credential))))]
     (if (= (slice-len [u8] key) 0)
         (model-failure (load (field context provider))
                        0
