@@ -26,6 +26,8 @@ The current slice can:
   idempotent allow/reject commands and fail-closed cancellation or expiry;
 - rebuild durable run state on restart, relaunch work that was only queued, and
   terminalize work whose in-process outcome can no longer be known;
+- hold a kernel-backed exclusive writer lease for each journal, rejecting a second
+  harness process before it can duplicate recovery or side effects;
 - expose bounded `read_text_file` and `write_text_file` tools to service runs, with
   traversal checks, effect metadata, deadlines, cancellation, and interactive approval.
 
@@ -208,8 +210,8 @@ authorization, execution, continuation, and event lifecycle.
 
 ## Next architectural slice
 
-The next slice should add identity-aware capabilities beyond the shared bearer token
-and durable admission control across multiple harness processes. Additional production
-tools can then grow behind the same provider-neutral validation, authorization,
-timeout, cancellation, output bound, and event contracts. All current provider
-adapters emit incremental text deltas with bounded synchronous backpressure.
+The next slice should add additional production tools behind the existing
+provider-neutral validation, authorization, timeout, cancellation, output-bound, and
+event contracts. Model capability metadata and an explainable routing policy can then
+replace provider-name selection at the API boundary. All current provider adapters emit
+incremental text deltas with bounded synchronous backpressure.

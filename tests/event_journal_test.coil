@@ -89,6 +89,26 @@
              (assert (str-eq (load (field recovery error))
                              "event journal contains invalid JSON")))))
 
+(deftest admits-only-one-writer-for-a-journal
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-journal-owner.jsonl"
+               first (alloc/stack EventJournal)
+               reopened (alloc/stack EventJournal)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [journal] (store! first journal)))
+           (assert (match (event-journal-open allocator path true)
+                     (JournalOpenFailed [message]
+                                        (str-eq message
+                                                "event journal is already owned by another harness process"))
+                     (JournalOpened [journal] false)))
+           (event-journal-close! first)
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [journal] (store! reopened journal)))
+           (event-journal-close! reopened)))
+
 (deftest serializes-sequence-assignment-with-concurrent-publication
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-journal-concurrent.jsonl"

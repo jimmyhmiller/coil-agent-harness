@@ -106,6 +106,14 @@ coil build -O1
 echo "e2e: exercising authenticated HTTP, idempotency, failure, events, and recovery"
 start_server
 
+echo "e2e: rejecting a second process for the owned journal"
+contender_port=$((port + 1000))
+if HARNESS_AUTH_TOKEN=$token ./harness serve "$contender_port" "$journal" \
+  >"$work_dir/contender.out" 2>"$work_dir/contender.err"; then
+  fail "second harness process acquired an already-owned journal"
+fi
+assert_contains "$work_dir/contender.err" 'event journal is already owned by another harness process'
+
 unauthorized_status=$(curl -sS -o "$work_dir/unauthorized.json" -w '%{http_code}' \
   "$base_url/v1/runs/missing")
 [ "$unauthorized_status" = 401 ] || fail "unauthorized request returned $unauthorized_status"

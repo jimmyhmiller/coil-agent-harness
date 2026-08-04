@@ -17,6 +17,7 @@
 (import "provider-common" :use *)
 
 (extern fsync :cc c [i32] (-> i32))
+(extern flock :cc c [i32 i32] (-> i32))
 
 (defn journal-os-pick [(linux Code) (darwin Code)] (-> Code)
   (if (primitive/code-eq (primitive/target-os) `linux) linux darwin))
@@ -27,6 +28,9 @@
 (meta (journal-open-constants))
 (const JOURNAL_O_WRONLY 1)
 (const JOURNAL_FILE_MODE 420)
+(const JOURNAL_LOCK_EX 2)
+(const JOURNAL_LOCK_NB 4)
+(const JOURNAL_LOCK_UN 8)
 
 (defstruct EventJournal
   [(allocator (ptr Allocator))
@@ -67,13 +71,20 @@
     (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
     (if (< fd (cast i32 0))
         (JournalOpenFailed "could not open event journal")
-        (let [journal (alloc/stack EventJournal)]
-          (store! (field journal allocator) allocator)
-          (store! (field journal fd) (cast i64 fd))
-          (store! (field journal lock) (box allocator i64 0))
-          (store! (field journal failed) (box allocator i64 0))
-          (store! (field journal sync-each-event) sync-each-event)
-          (JournalOpened (load journal))))))
+        (if (!= (cast i64
+                      (flock fd
+                             (cast i32 (| JOURNAL_LOCK_EX JOURNAL_LOCK_NB))))
+                0)
+            (do
+              (os/close fd)
+              (JournalOpenFailed "event journal is already owned by another harness process"))
+            (let [journal (alloc/stack EventJournal)]
+              (store! (field journal allocator) allocator)
+              (store! (field journal fd) (cast i64 fd))
+              (store! (field journal lock) (box allocator i64 0))
+              (store! (field journal failed) (box allocator i64 0))
+              (store! (field journal sync-each-event) sync-each-event)
+              (JournalOpened (load journal)))))))
 
 (defn event-journal-append-bytes! [(allocator (ptr Allocator))
                                    (path (slice u8))
@@ -90,9 +101,17 @@
     (if (< fd (cast i32 0))
         -1
         (let [result
-                (match (io/print-str (io/fd-writer writer (cast i64 fd)) bytes)
-                  (Ok [written] written)
-                  (Err [failure] -1))]
+                (if (!= (cast i64
+                              (flock fd
+                                     (cast i32 (| JOURNAL_LOCK_EX JOURNAL_LOCK_NB))))
+                        0)
+                    -1
+                    (let [written
+                            (match (io/print-str (io/fd-writer writer (cast i64 fd)) bytes)
+                              (Ok [count] count)
+                              (Err [failure] -1))]
+                      (flock fd (cast i32 JOURNAL_LOCK_UN))
+                      written))]
           (os/close fd)
           result))))
 
@@ -100,6 +119,7 @@
   (journal-lock! (load (field journal lock)))
   (let [fd (load (field journal fd))]
     (when (>= fd 0)
+      (flock (cast i32 fd) (cast i32 JOURNAL_LOCK_UN))
       (os/close (cast i32 fd))
       (store! (field journal fd) -1)
       0))

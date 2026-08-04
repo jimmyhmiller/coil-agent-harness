@@ -68,6 +68,13 @@ Credentials are resolved only inside provider adapters. Request-start events do
 not contain headers or API keys. Raw provider payloads are retained in model
 responses for correct continuation, but are not emitted automatically.
 
+Each durable journal has exactly one live writer process. `event-journal-open`
+acquires a non-blocking kernel file lease and retains it for the journal lifetime.
+A competing harness fails before recovery, scheduling, or listening, preventing
+duplicate restart decisions, event sequence collisions, and repeated side effects.
+The lease is released by close or process exit, so a replacement process can recover
+the durable queue after a crash.
+
 Foreground and background entry points call the same runner. A background handle
 owns only thread/job state and exposes completion polling plus an idempotent join;
 it does not fork orchestration behavior.
@@ -83,10 +90,9 @@ contains no application-owned native shim.
 
 - Streaming SSE decoders for Responses and both DeepSeek formats.
 - Cooperative cancellation for HTTP and tool workers.
-- A durable append-only event journal plus replay/recovery.
-- Cooperative run cancellation and remote transport.
 - Provider capability metadata and model-routing/cost policy.
 - Approval round-trips for interactive Codex App Server requests.
+- Additional production tools and sandboxed execution capabilities.
 
 These extend current contracts; they must not introduce alternate model/tool
 loops or UI-specific behavior into the core.
