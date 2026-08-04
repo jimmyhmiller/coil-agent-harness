@@ -248,3 +248,7 @@ production tools, and auditable supervision. The next roadmap pass should priori
 operational hardening and measured gaps rather than introducing another execution
 mechanism. All current provider adapters emit incremental text deltas with bounded
 synchronous backpressure.
+
+See [the roadmap audit](docs/roadmap-audit.md) for the completed slices and the one
+remaining product boundary: interactive Codex App Server approval RPCs need a scoped
+authorization capability added to the provider/runtime contract.

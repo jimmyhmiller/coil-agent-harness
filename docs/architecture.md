@@ -115,7 +115,7 @@ contains no application-owned native shim.
 ## Deliberate next boundaries
 
 - Approval round-trips for interactive Codex App Server requests.
-- Additional production tools and sandboxed execution capabilities.
 
-These extend current contracts; they must not introduce alternate model/tool
-loops or UI-specific behavior into the core.
+This requires an explicit authorization capability at the provider/runtime boundary;
+the current provider contract cannot ask the durable service mailbox for a decision.
+It must not introduce an alternate model/tool loop or provider-owned approval policy.
