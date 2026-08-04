@@ -2,6 +2,7 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-tool" :use *)
 (import "harness-event" :use *)
@@ -94,8 +95,39 @@
   (ModelOk [(response ModelResponse)])
   (ModelErr [(failure ModelFailure)]))
 
+;; Capabilities are explicit provider-boundary facts used by routing and UIs. Cost
+;; tier is a relative policy input (1 is cheapest), not a billing estimate.
+(defstruct ProviderCapabilities
+  [(streaming bool)
+   (harness-tools bool)
+   (parallel-tools bool)
+   (reasoning bool)
+   (subscription-auth bool)
+   (cost-tier i64)])
+
+(defn provider-capabilities-for [(name (slice u8))] (-> ProviderCapabilities)
+  (let [capabilities (alloc/stack ProviderCapabilities)
+        codex (or (str-eq name "codex") (str-eq name "codex-app-server"))
+        claude (or (str-eq name "claude") (str-eq name "claude-anthropic"))]
+    (store! (field capabilities streaming) true)
+    (store! (field capabilities harness-tools) (not codex))
+    (store! (field capabilities parallel-tools) (not codex))
+    (store! (field capabilities reasoning) true)
+    (store! (field capabilities subscription-auth) (or codex claude))
+    (store! (field capabilities cost-tier)
+            (cond (or (str-eq name "deepseek-openai")
+                      (str-eq name "deepseek-anthropic"))
+                    1
+                  (or codex claude) 2
+                  (or (str-eq name "openai")
+                      (str-eq name "openai-responses"))
+                    3
+                  :else 0))
+    (load capabilities)))
+
 (deftrait ModelProvider [Self]
   (provider-name [(self (ptr Self))] (-> (slice u8)))
+  (provider-capabilities [(self (ptr Self))] (-> ProviderCapabilities))
   (execute-model [(self (ptr Self))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))

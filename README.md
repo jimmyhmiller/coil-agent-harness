@@ -11,6 +11,8 @@ The current slice can:
 - call DeepSeek through its OpenAI-compatible and Anthropic-compatible APIs;
 - use Codex as an external agent through the Codex App Server JSONL protocol;
 - use Claude subscriptions through native Anthropic Messages and OAuth authentication;
+- advertise provider capabilities and durably resolve explicit `balanced`, `low-cost`,
+  `quality`, `subscription`, and `external-agent` routing profiles;
 - expose one provider-neutral model, continuation, tool, authorization, result, and
   event contract;
 - validate tool arguments before authorization;
@@ -43,6 +45,18 @@ The version 1 service routes are `POST /v1/runs`,
 `GET /v1/runs/{run_id}/events?after={sequence}`, and
 `POST /v1/runs/{run_id}/authorizations/{authorization_id}`. Mutation bodies carry a
 stable `command_id`; replaying the same command does not repeat its effect.
+
+A create command can pin `provider` and `model`, or set both to `auto` and provide a
+`routing_profile`. Optional `requires_harness_tools` and `requires_subscription`
+constraints are checked against provider metadata. The resolved command persists a
+`routing` object containing the request, selection, policy, reason, and capability
+snapshot; restart recovery never silently reruns routing policy. Current profiles are:
+
+- `balanced` (default): Claude native tools via subscription OAuth;
+- `low-cost`: DeepSeek, or Claude when subscription authentication is required;
+- `quality`: OpenAI, or Claude when subscription authentication is required;
+- `subscription`: Claude native tools;
+- `external-agent`: Codex App Server.
 
 ## Build and verify
 
@@ -211,8 +225,7 @@ authorization, execution, continuation, and event lifecycle.
 
 ## Next architectural slice
 
-The next slice should add additional production tools behind the existing
-provider-neutral validation, authorization, timeout, cancellation, output-bound, and
-event contracts. Model capability metadata and an explainable routing policy can then
-replace provider-name selection at the API boundary. All current provider adapters emit
-incremental text deltas with bounded synchronous backpressure.
+The next slice should add typed agent identities, delegation, and traceable messages on
+top of the durable run/event model. Workflow graph definitions can then compose those
+agents without creating a second execution mechanism. All current provider adapters
+emit incremental text deltas with bounded synchronous backpressure.

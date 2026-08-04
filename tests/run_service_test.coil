@@ -159,6 +159,20 @@
              (assert (match (json-string-at (load (field cancelled body)) "status")
                        (Some [value] (str-eq value "queued"))
                        (None [] false))))
+           (let [automatic
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"auto-create\",\"run_id\":\"auto-run\",\"provider\":\"auto\",\"model\":\"auto\",\"routing_profile\":\"low-cost\",\"requires_harness_tools\":true,\"prompt\":\"hello\"}")]
+             (assert-eq (load (field automatic status)) 202)
+             (assert-eq (load (field controller starts)) 2))
+           (let [recovery (event-journal-recover allocator path)
+                 routed-event (al-get [Json] (load (field recovery events)) 1)
+                 payload (json-get routed-event "payload")
+                 routing (json-get payload "routing")]
+             (assert (str-eq (command-string payload "provider") "deepseek-openai"))
+             (assert (str-eq (command-string payload "model") "deepseek-v4-flash"))
+             (assert (str-eq (command-string routing "policy") "low-cost")))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 

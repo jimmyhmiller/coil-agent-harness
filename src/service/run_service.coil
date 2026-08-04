@@ -10,6 +10,7 @@
 (import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-interactive-authorizer" :use *)
+(import "harness-model-router" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
@@ -87,7 +88,9 @@
 (defn command-valid? [(command Json)] (-> bool)
   (and (= (json-number-i64 (json-get command "version")) 1)
        (and (> (slice-len [u8] (command-string command "command_id")) 0)
-            (> (slice-len [u8] (command-string command "run_id")) 0))))
+            (and (> (slice-len [u8] (command-string command "run_id")) 0)
+                 (and (> (slice-len [u8] (command-string command "provider")) 0)
+                      (> (slice-len [u8] (command-string command "model")) 0))))))
 
 (defn service-recover [(service (ptr RunService))] (-> JournalRecovery)
   (event-journal-recover (load (field service allocator))
@@ -523,7 +526,14 @@
                   (if (load (field parsed ok))
                       (let [(mut command) (load (field parsed value))]
                         (service-command-actor! (mut command) principal)
-                        (service-create-run service (load command)))
+                        (match (model-route-command! allocator (mut command))
+                          (ModelRouteSelected []
+                                              (service-create-run service (load command)))
+                          (ModelRouteRejected [message]
+                                              (service-error allocator
+                                                             400
+                                                             "routing_rejected"
+                                                             message))))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
           (starts-with target "/v1/runs/")
             (let [rest (service-target-parts target)

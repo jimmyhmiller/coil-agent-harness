@@ -496,6 +496,9 @@
   (provider-name [(self (ptr DeepSeekOpenAIContext))]
                  (-> (slice u8))
                  "deepseek-openai")
+  (provider-capabilities [(self (ptr DeepSeekOpenAIContext))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "deepseek-openai"))
   
   (execute-model [(self (ptr DeepSeekOpenAIContext))
                   (request (ptr ModelRequest))

@@ -23,6 +23,9 @@
 
 (impl ModelProvider SlowProvider
   (provider-name [(self (ptr SlowProvider))] (-> (slice u8)) "slow")
+  (provider-capabilities [(self (ptr SlowProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "slow"))
   (execute-model [(self (ptr SlowProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
@@ -109,6 +112,9 @@
 
 (impl ModelProvider FakeProviderState
   (provider-name [(self (ptr FakeProviderState))] (-> (slice u8)) "fake")
+  (provider-capabilities [(self (ptr FakeProviderState))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "fake"))
   
   (execute-model [(self (ptr FakeProviderState))
                   (request (ptr ModelRequest))

@@ -19,6 +19,13 @@ protocol method names. Providers do not authorize or execute harness tools. Tool
 implementations do not choose policy. Monitoring observes semantic events and is
 not coupled to terminal output.
 
+Every provider advertises streaming, native-tool, parallel-tool, reasoning,
+subscription-authentication, and relative-cost capabilities through the model
+boundary. Create commands may pin provider/model or select a named routing profile.
+Routing happens before `run.created`; its requirements, selection, explanation, and
+capability snapshot are persisted in the command payload. Recovery therefore executes
+the original durable choice even if policy changes later.
+
 ## Model turns and continuations
 
 `ModelRequest` is stable across providers. After a model returns tool calls, the
@@ -90,9 +97,9 @@ contains no application-owned native shim.
 
 - Streaming SSE decoders for Responses and both DeepSeek formats.
 - Cooperative cancellation for HTTP and tool workers.
-- Provider capability metadata and model-routing/cost policy.
 - Approval round-trips for interactive Codex App Server requests.
 - Additional production tools and sandboxed execution capabilities.
+- Typed agent communication, delegation, and supervision.
 
 These extend current contracts; they must not introduce alternate model/tool
 loops or UI-specific behavior into the core.

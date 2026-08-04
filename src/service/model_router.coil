@@ -1,0 +1,121 @@
+(module harness-model-router)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "provider-common" :use *)
+
+(defsum ModelRouteResult
+  (ModelRouteSelected [])
+  (ModelRouteRejected [(message (slice u8))]))
+
+(defn route-command-string [(command Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at command key)
+    (Some [value] value)
+    (None [] "")))
+
+(defn route-command-bool [(command Json) (key (slice u8))] (-> bool)
+  (match (json-bool-value (json-get command key))
+    (Some [value] value)
+    (None [] false)))
+
+(defn route-known-provider? [(provider (slice u8))] (-> bool)
+  (let [capabilities (provider-capabilities-for provider)]
+    (> (load (field capabilities cost-tier)) 0)))
+
+(defn route-default-model [(provider (slice u8))] (-> (slice u8))
+  (cond (str-eq provider "openai") "gpt-5.6"
+        (str-eq provider "deepseek-openai") "deepseek-v4-flash"
+        (str-eq provider "deepseek-anthropic") "deepseek-v4-flash"
+        (str-eq provider "codex") "gpt-5.6-terra"
+        (str-eq provider "claude") "claude-sonnet-4-6"
+        :else ""))
+
+(defn route-profile-provider [(profile (slice u8))
+                              (requires-subscription bool)] (-> (slice u8))
+  (cond (str-eq profile "low-cost") (if requires-subscription "claude" "deepseek-openai")
+        (str-eq profile "quality") (if requires-subscription "claude" "openai")
+        (str-eq profile "subscription") "claude"
+        (str-eq profile "external-agent") "codex"
+        (str-eq profile "balanced") "claude"
+        :else ""))
+
+(defn route-profile-reason [(profile (slice u8))] (-> (slice u8))
+  (cond (str-eq profile "low-cost") "selected the lowest relative cost tier satisfying requirements"
+        (str-eq profile "quality") "selected the quality-preferred direct provider satisfying requirements"
+        (str-eq profile "subscription") "selected native harness tools with subscription authentication"
+        (str-eq profile "external-agent") "selected the external Codex agent capability"
+        :else "selected the balanced native-tool subscription policy"))
+
+(defn route-capabilities-json [(allocator (ptr Allocator))
+                               (capabilities ProviderCapabilities)] (-> Json)
+  (let [(mut value) (json-object allocator)]
+    (json-put-bool! (mut value) "streaming" (load (field capabilities streaming)))
+    (json-put-bool! (mut value) "harness_tools" (load (field capabilities harness-tools)))
+    (json-put-bool! (mut value) "parallel_tools" (load (field capabilities parallel-tools)))
+    (json-put-bool! (mut value) "reasoning" (load (field capabilities reasoning)))
+    (json-put-bool! (mut value) "subscription_auth" (load (field capabilities subscription-auth)))
+    (json-object-put! (mut value)
+                      "cost_tier"
+                      (json-integer allocator (load (field capabilities cost-tier))))
+    (load value)))
+
+(defn model-route-command! [(allocator (ptr Allocator))
+                            (command (mut Json))] (-> ModelRouteResult)
+  (let [requested-provider (route-command-string (load command) "provider")
+        requested-model (route-command-string (load command) "model")
+        automatic
+          (or (= (slice-len [u8] requested-provider) 0)
+              (str-eq requested-provider "auto"))
+        profile-value (route-command-string (load command) "routing_profile")
+        profile (if (= (slice-len [u8] profile-value) 0) "balanced" profile-value)
+        requires-tools (route-command-bool (load command) "requires_harness_tools")
+        requires-subscription (route-command-bool (load command) "requires_subscription")
+        selected-provider
+          (if automatic
+              (route-profile-provider profile requires-subscription)
+              requested-provider)
+        selected-model
+          (if automatic
+              (route-default-model selected-provider)
+              requested-model)
+        capabilities (provider-capabilities-for selected-provider)]
+    (cond (= (slice-len [u8] selected-provider) 0) (ModelRouteRejected "unknown routing profile")
+          (and automatic
+               (and (> (slice-len [u8] requested-model) 0)
+                    (not (str-eq requested-model "auto"))))
+            (ModelRouteRejected "automatic provider selection requires model to be omitted or auto")
+          (and (not automatic)
+               (and (not (route-known-provider? selected-provider))
+                    (or requires-tools requires-subscription)))
+            (ModelRouteRejected "custom provider capabilities are unavailable for requested constraints")
+          (or (= (slice-len [u8] selected-model) 0)
+              (str-eq selected-model "auto"))
+            (ModelRouteRejected "model must be set when provider is pinned")
+          (and requires-tools (not (load (field capabilities harness-tools))))
+            (ModelRouteRejected "selected provider does not support harness-native tools")
+          (and requires-subscription
+               (not (load (field capabilities subscription-auth))))
+            (ModelRouteRejected "selected provider does not support subscription authentication")
+          :else
+            (let [(mut routing) (json-object allocator)]
+              (json-put-string! (mut routing) "policy" (if automatic profile "pinned"))
+              (json-put-string! (mut routing) "requested_provider" requested-provider)
+              (json-put-string! (mut routing) "requested_model" requested-model)
+              (json-put-string! (mut routing) "selected_provider" selected-provider)
+              (json-put-string! (mut routing) "selected_model" selected-model)
+              (json-put-string! (mut routing)
+                                "reason"
+                                (if automatic
+                                    (route-profile-reason profile)
+                                    "caller pinned provider and model"))
+              (json-object-put! (mut routing)
+                                "capabilities"
+                                (route-capabilities-json allocator capabilities))
+              (json-put-string! (mut command) "provider" selected-provider)
+              (json-put-string! (mut command) "model" selected-model)
+              (json-object-put! (mut command) "routing" (load routing))
+              (ModelRouteSelected)))))

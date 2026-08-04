@@ -554,6 +554,9 @@
   (provider-name [(self (ptr CodexAppServerContext))]
                  (-> (slice u8))
                  "codex-app-server")
+  (provider-capabilities [(self (ptr CodexAppServerContext))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "codex-app-server"))
   
   (execute-model [(self (ptr CodexAppServerContext))
                   (request (ptr ModelRequest))

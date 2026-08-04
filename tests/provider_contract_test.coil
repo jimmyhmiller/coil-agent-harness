@@ -195,6 +195,13 @@
            (store! (field deepseek-openai transport) transport)
            (store! (field deepseek-anthropic transport) transport)
            (store! (field (field claude messages) transport) transport)
+           (let [openai-capabilities (provider-capabilities openai)
+                 claude-capabilities (provider-capabilities claude)]
+             (assert (load (field openai-capabilities streaming)))
+             (assert (load (field openai-capabilities harness-tools)))
+             (assert (not (load (field openai-capabilities subscription-auth))))
+             (assert (load (field claude-capabilities subscription-auth)))
+             (assert (load (field claude-capabilities parallel-tools))))
            ;; OpenAI Responses SSE fixture.
            (store! (field transport payload)
                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{}}}\n\n")

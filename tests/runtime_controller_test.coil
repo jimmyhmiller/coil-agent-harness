@@ -22,6 +22,9 @@
 (defstruct ControllerFakeProvider [])
 (impl ModelProvider ControllerFakeProvider
   (provider-name [(self (ptr ControllerFakeProvider))] (-> (slice u8)) "fake")
+  (provider-capabilities [(self (ptr ControllerFakeProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "fake"))
   (execute-model [(self (ptr ControllerFakeProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
@@ -56,6 +59,9 @@
 
 (impl ModelProvider QueuedFakeProvider
   (provider-name [(self (ptr QueuedFakeProvider))] (-> (slice u8)) "queued-fake")
+  (provider-capabilities [(self (ptr QueuedFakeProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "queued-fake"))
   (execute-model [(self (ptr QueuedFakeProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))

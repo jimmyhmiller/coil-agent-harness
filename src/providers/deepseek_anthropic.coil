@@ -651,6 +651,9 @@
   (provider-name [(self (ptr DeepSeekAnthropicContext))]
                  (-> (slice u8))
                  (load (field self provider)))
+  (provider-capabilities [(self (ptr DeepSeekAnthropicContext))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for (load (field self provider))))
   
   (execute-model [(self (ptr DeepSeekAnthropicContext))
                   (request (ptr ModelRequest))

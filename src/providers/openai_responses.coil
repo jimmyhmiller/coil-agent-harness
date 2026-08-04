@@ -359,6 +359,9 @@
   (provider-name [(self (ptr OpenAIResponsesContext))]
                  (-> (slice u8))
                  "openai-responses")
+  (provider-capabilities [(self (ptr OpenAIResponsesContext))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "openai-responses"))
   
   (execute-model [(self (ptr OpenAIResponsesContext))
                   (request (ptr ModelRequest))
