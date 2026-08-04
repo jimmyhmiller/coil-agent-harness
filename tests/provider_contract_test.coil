@@ -13,6 +13,7 @@
 (import "harness-sse" :use *)
 (import "harness-tool" :use *)
 (import "codex-app-server" :use *)
+(import "claude-agent" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "openai-responses" :use *)
@@ -180,16 +181,20 @@
                transport (box allocator FixtureStreamingTransport (zeroed FixtureStreamingTransport))
                openai (alloc/stack OpenAIResponsesContext)
                deepseek-openai (alloc/stack DeepSeekOpenAIContext)
-               deepseek-anthropic (alloc/stack DeepSeekAnthropicContext)]
+               deepseek-anthropic (alloc/stack DeepSeekAnthropicContext)
+               claude (alloc/stack ClaudeAnthropicContext)]
            (store! openai (openai-context-default allocator))
            (store! deepseek-openai (deepseek-openai-context-default allocator))
            (store! deepseek-anthropic (deepseek-anthropic-context-default allocator))
+           (store! claude (claude-anthropic-context-default allocator))
            (store! (field (field openai credential) primary-env) c"PATH")
            (store! (field (field deepseek-openai credential) primary-env) c"PATH")
            (store! (field (field deepseek-anthropic credential) primary-env) c"PATH")
+           (store! (field (field (field claude messages) credential) primary-env) c"PATH")
            (store! (field openai transport) transport)
            (store! (field deepseek-openai transport) transport)
            (store! (field deepseek-anthropic transport) transport)
+           (store! (field (field claude messages) transport) transport)
            ;; OpenAI Responses SSE fixture.
            (store! (field transport payload)
                    "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{}}}\n\n")
@@ -220,7 +225,14 @@
                               (let [success response]
                                 (str-eq (load (field success response-id)) "msg-fixture")))
                      (ModelErr [failure] false)))
-           (assert-eq (load (field transport calls)) 3)))
+           ;; Native Claude OAuth uses the same stream and tool parser.
+           (assert (match (execute-model claude request emitter allocator)
+                     (ModelOk [response]
+                              (let [success response]
+                                (and (str-eq (load (field success response-id)) "msg-fixture")
+                                     (str-eq (load (field success provider)) "claude-anthropic"))))
+                     (ModelErr [failure] false)))
+           (assert-eq (load (field transport calls)) 4)))
 
 (deftest openai-responses-wire-contract
          (let [allocator (malloc-allocator)
@@ -450,6 +462,28 @@
                      (None [] false)))
            (assert (match (json-string-at interrupt "method")
                      (Some [value] (str-eq value "turn/interrupt"))
+                     (None [] false)))))
+
+(deftest claude-oauth-wire-contract-includes-identity-and-native-tools
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               wire (anthropic-request-json allocator request true)
+               system (json-get wire "system")
+               identity (json-array-get system 0)
+               instructions (json-array-get system 1)
+               tool (json-array-get (json-get wire "tools") 0)]
+           (assert (str-eq (anthropic-auth-header allocator "oauth-token" true)
+                           "Authorization: Bearer oauth-token"))
+           (assert-eq (json-array-length system) 2)
+           (assert (match (json-string-at identity "text")
+                     (Some [value]
+                           (str-eq value "You are Claude Code, Anthropic's official CLI for Claude."))
+                     (None [] false)))
+           (assert (match (json-string-at instructions "text")
+                     (Some [value] (str-eq value "Be exact."))
+                     (None [] false)))
+           (assert (match (json-string-at tool "name")
+                     (Some [value] (str-eq value "city_fact"))
                      (None [] false)))))
 
 (deftest codex-app-server-thread-id-contract

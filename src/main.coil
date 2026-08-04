@@ -21,6 +21,7 @@
 (import "harness-shutdown-signal" :use *)
 (import "harness-service-http-server" :use *)
 (import "codex-app-server" :use *)
+(import "claude-agent" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "openai-responses" :use *)
@@ -44,7 +45,7 @@
 
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
-  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex> <model> <prompt>")
+  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude> <model> <prompt>")
   (write-line 2 "       harness serve <port> <journal-path>")
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
   (write-line 2 "  tool  requires the model to call the echo tool")
@@ -190,7 +191,8 @@
           (match cwd-result
             (Ok [owned] (os/owned-string-slice owned))
             (Err [failure] "."))
-        codex-context-value (box allocator CodexAppServerContext (codex-context cwd))]
+        codex-context-value (box allocator CodexAppServerContext (codex-context cwd))
+        claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))]
     (tool-register! registry (echo-definition allocator))
     (if (and force-tool (str-eq provider-name "codex"))
         (do
@@ -204,6 +206,8 @@
                 (cli-run-provider allocator registry deepseek-anthropic-context model prompt force-tool)
               (str-eq provider-name "codex")
                 (cli-run-provider allocator registry codex-context-value model prompt force-tool)
+              (str-eq provider-name "claude")
+                (cli-run-provider allocator registry claude-context-value model prompt force-tool)
               :else
                 (do
                   (write-line 2 "unknown provider")

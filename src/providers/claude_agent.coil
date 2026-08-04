@@ -1,0 +1,37 @@
+(module claude-agent)
+
+(import "coil.alloc" :as alloc :use *)
+(import "harness-event" :use *)
+(import "harness-model" :use *)
+(import "harness-http" :use *)
+(import "deepseek-anthropic" :use *)
+
+;; Anthropic subscription traffic uses the native Messages API and the same
+;; provider-neutral tool loop as every other HTTP adapter. Authentication is a
+;; user-supplied OAuth token; the harness never reads Claude Code's credential store.
+(defstruct ClaudeAnthropicContext [(messages DeepSeekAnthropicContext)])
+
+(defn claude-anthropic-context-default [(allocator (ptr Allocator))] (-> ClaudeAnthropicContext)
+  (let [context (alloc/stack ClaudeAnthropicContext)
+        (mut messages) (deepseek-anthropic-context-default allocator)]
+    (store! (field messages endpoint) "https://api.anthropic.com/v1/messages")
+    (store! (field (field messages credential) primary-env) c"ANTHROPIC_OAUTH_TOKEN")
+    (store! (field (field messages credential) fallback-env) c"ANTHROPIC_AUTH_TOKEN")
+    (store! (field messages provider) "claude-anthropic")
+    (store! (field messages credential-error)
+            "ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_AUTH_TOKEN is not set")
+    (store! (field messages oauth) true)
+    (store! (field context messages) (load messages))
+    (load context)))
+
+(impl ModelProvider ClaudeAnthropicContext
+  (provider-name [(self (ptr ClaudeAnthropicContext))] (-> (slice u8)) "claude-anthropic")
+  (execute-model [(self (ptr ClaudeAnthropicContext))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (deepseek-anthropic-execute-stream (field self messages)
+                                                    request
+                                                    emitter
+                                                    allocator)))

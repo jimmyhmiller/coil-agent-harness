@@ -1,0 +1,21 @@
+(module harness-claude-live-integration)
+
+(import "harness-main" :use *)
+
+;; Opt-in live test. Set ANTHROPIC_OAUTH_TOKEN (for example, from
+;; `claude setup-token`) before running it.
+;; This file is outside configured source and test roots, so normal verification
+;; cannot discover it or consume subscription usage.
+(deftest claude-oauth-completes-a-real-subscription-backed-run
+         (assert-eq (cli-run "claude"
+                             "claude-sonnet-4-6"
+                             "Reply with exactly LIVE_CLAUDE_OK."
+                             false)
+                    0))
+
+(deftest claude-oauth-completes-a-real-tool-roundtrip
+         (assert-eq (cli-run "claude"
+                             "claude-sonnet-4-6"
+                             "Call echo with the text LIVE_CLAUDE_TOOL_OK."
+                             true)
+                    0))

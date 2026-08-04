@@ -9,6 +9,7 @@
 (import "coil.str" :use *)
 (import "coil.thread" :use *)
 (import "codex-app-server" :use *)
+(import "claude-agent" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "harness-agent-runner" :use *)
@@ -67,6 +68,10 @@
                                       (Some (box allocator
                                                  CodexAppServerContext
                                                  (codex-context cwd))))
+                                  (str-eq provider-name "claude")
+                                    (Some (box allocator
+                                               ClaudeAnthropicContext
+                                               (claude-anthropic-context-default allocator)))
                                   :else (None [(dyn ModelProvider)]))))
 
 (defstruct RuntimeRunController

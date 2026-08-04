@@ -10,6 +10,7 @@ The current slice can:
 - call OpenAI through the Responses API;
 - call DeepSeek through its OpenAI-compatible and Anthropic-compatible APIs;
 - use Codex as an external agent through the Codex App Server JSONL protocol;
+- use Claude subscriptions through native Anthropic Messages and OAuth authentication;
 - expose one provider-neutral model, continuation, tool, authorization, result, and
   event contract;
 - validate tool arguments before authorization;
@@ -40,8 +41,8 @@ stable `command_id`; replaying the same command does not repeat its effect.
 
 ## Build and verify
 
-Requirements are COIL with its bundled HTTP dependency installed and (for Codex) the
-`codex` CLI installed and authenticated.
+Requirements are COIL with its bundled HTTP dependency installed and the `codex` CLI
+installed and authenticated for Codex. Claude subscription use requires an OAuth token.
 
 ```sh
 coil build -O1
@@ -74,6 +75,9 @@ credentials:
 # ChatGPT subscription through the locally authenticated Codex CLI
 coil test integration/codex_live_integration.coil
 
+# Claude subscription; requires ANTHROPIC_OAUTH_TOKEN
+coil test integration/claude_live_integration.coil
+
 # OpenAI API billing; requires OPENAI_API_KEY or OPENAI_KEY
 coil test integration/openai_live_integration.coil
 
@@ -99,6 +103,9 @@ Provider credentials are read only inside provider adapters:
 - OpenAI: `OPENAI_API_KEY`, with `OPENAI_KEY` as a fallback;
 - DeepSeek: `DEEPSEEK_API_KEY`, with `DEEPSEEK_KEY` as a fallback;
 - Codex: the existing Codex CLI login/session.
+- Claude subscription: `ANTHROPIC_OAUTH_TOKEN`, with `ANTHROPIC_AUTH_TOKEN` as a
+  fallback. Generate a long-lived token with `claude setup-token`, then place it in the
+  environment; never pass it as a CLI argument.
 
 Credentials are used to construct request headers and are never included in emitted
 events. Do not pass a credential as a CLI argument.
@@ -110,6 +117,8 @@ events. Do not pass a credential as a CLI argument.
 ./harness tool deepseek-openai deepseek-v4-flash "Call echo with the text hello."
 ./harness tool deepseek-anthropic deepseek-v4-flash "Call echo with the text hello."
 ./harness run codex gpt-5.6-terra "Briefly describe this repository."
+./harness run claude claude-sonnet-4-6 "Briefly describe this repository."
+./harness tool claude claude-sonnet-4-6 "Call echo with the text hello."
 HARNESS_AUTH_TOKEN='replace-me' ./harness serve 8080 ./harness-events.jsonl
 ```
 
@@ -131,7 +140,7 @@ so deployments that need isolation must place the harness in an OS sandbox or co
 ```text
 src/core/       Provider-neutral JSON, events, models, tools, schema validation
 src/runtime/    Bounded model/tool loop, background handle, parallel tool executor
-src/providers/  OpenAI Responses, two DeepSeek dialects, Codex App Server
+src/providers/  OpenAI Responses, Anthropic Messages, DeepSeek dialects, Codex
 src/infra/      HTTP/time adapters plus a narrow POSIX lifecycle and allocator shim
 src/persistence/ Append-only event journal and recovery
 src/service/     Durable run projection, versioned API routing, and HTTP serving
@@ -152,6 +161,9 @@ production implementation uses libcurl with bounded synchronous chunk delivery;
 provider contract tests replace it with an in-memory byte stream while exercising the
 same SSE decoders and provider execution paths. Codex retains its separate JSONL
 subprocess transport because its bidirectional RPC lifecycle is not HTTP streaming.
+Claude uses native Anthropic Messages with OAuth identity headers. Structured
+`tool_use` and `tool_result` blocks flow through the harness's normal validation,
+authorization, execution, continuation, and event lifecycle.
 
 ## Important current behavior
 
