@@ -34,6 +34,12 @@ and `agent.created`, then schedules the child through the existing run controlle
 Children therefore inherit ordinary capacity limits, tool policy, cancellation,
 queries, journaling, and crash recovery.
 
+Version 1 workflows compose those same durable runs into incrementally admitted DAGs.
+Each node names already-created predecessors in the same workflow, which makes cycle
+prevention an admission invariant. The scheduler starts a node only after every
+predecessor succeeds and terminalizes downstream nodes whose dependencies fail or are
+cancelled. Workflow queries are journal projections, not a separate source of truth.
+
 ## Model turns and continuations
 
 `ModelRequest` is stable across providers. After a model returns tool calls, the
@@ -105,7 +111,6 @@ contains no application-owned native shim.
 
 - Approval round-trips for interactive Codex App Server requests.
 - Additional production tools and sandboxed execution capabilities.
-- Versioned workflow graphs and composable node transitions.
 - Supervisor assessments and interventions over the public event model.
 
 These extend current contracts; they must not introduce alternate model/tool

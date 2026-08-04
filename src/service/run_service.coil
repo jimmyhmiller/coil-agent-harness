@@ -117,6 +117,60 @@
                  (and (> (slice-len [u8] (command-string command "provider")) 0)
                       (> (slice-len [u8] (command-string command "model")) 0))))))
 
+(defn workflow-event-run-id [(events (ref (ArrayList Json)))
+                             (run-id (slice u8))
+                             (workflow-id (slice u8))] (-> bool)
+  (let [(mut found) false
+        (mut i) 0
+        n (al-len [Json] (load events))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [event (al-get [Json] (load events) (load i))
+                    payload (json-get event "payload")]
+                (when (and (str-eq (command-string event "event") "run.created")
+                           (and (str-eq (command-string event "run_id") run-id)
+                                (str-eq (command-string payload "workflow_id") workflow-id)))
+                  (store! found true)
+                  (break))
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+(defn workflow-dependencies-valid? [(events (ref (ArrayList Json)))
+                                    (command Json)
+                                    (workflow-id (slice u8))] (-> bool)
+  (match (json-array-items (json-get command "depends_on"))
+    (None [] false)
+    (Some [items]
+          (let [(mut valid) true
+                (mut i) 0
+                n (al-len [Json] (load items))
+                run-id (command-string command "run_id")]
+            (loop (if (or (>= (load i) n) (not (load valid)))
+                      (break)
+                      (do
+                        (match-else (al-get [Json] (load items) (load i))
+                                    (JsonString [dependency]
+                                                (if (or (str-eq dependency run-id)
+                                                        (not (workflow-event-run-id events
+                                                                                    dependency
+                                                                                    workflow-id)))
+                                                    (store! valid false)
+                                                    0))
+                                    (_ (store! valid false)))
+                        (store! i (+ (load i) 1)))))
+            (load valid)))))
+
+(defn workflow-command-valid? [(events (ref (ArrayList Json)))
+                               (command Json)] (-> bool)
+  (let [workflow-id (command-string command "workflow_id")]
+    (if (= (slice-len [u8] workflow-id) 0)
+        (match (json-array-items (json-get command "depends_on"))
+          (Some [items] false)
+          (None [] true))
+        (and (= (json-number-i64 (json-get command "workflow_version")) 1)
+             (and (> (slice-len [u8] (command-string command "node_id")) 0)
+                  (workflow-dependencies-valid? events command workflow-id))))))
+
 (defn service-recover [(service (ptr RunService))] (-> JournalRecovery)
   (event-journal-recover (load (field service allocator))
                          (load (field service journal-path))))
@@ -141,76 +195,98 @@
               (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
               (if (> (journal-command-sequence (field recovery events) command-id) 0)
                   (service-run-response service (field recovery events) run-id 200)
-                  (let [view (project-run (field recovery events) run-id)]
-                    (match-else (load (field view status))
-                                (RunNotFound []
-                                             (let [provider (command-string command "provider")
-                                                   model (command-string command "model")
-                                                   parent-run-id (command-string command "parent_run_id")
-                                                   parent-agent-id (command-string command "parent_agent_id")
-                                                   parent-view
-                                                     (project-run (field recovery events)
-                                                                  parent-run-id)]
-                                               (if (and (> (slice-len [u8] parent-run-id) 0)
-                                                        (match-else (load (field parent-view status))
-                                                                    (RunNotFound [] true)
-                                                                    (_ false)))
-                                                   (service-error allocator
-                                                                  404
-                                                                  "parent_run_not_found"
-                                                                  "delegation parent run does not exist")
-                                                   (do
-                                                     (emit-event (load (field service emitter))
-                                                                 (now-ms)
-                                                                 (RunCreated)
-                                                                 run-id
-                                                                 run-id
-                                                                 ""
-                                                                 provider
-                                                                 model
-                                                                 command)
-                                                     (when (> (slice-len [u8] parent-run-id) 0)
-                                                       (emit-event-for-agent (load (field service emitter))
-                                                                             (now-ms)
-                                                                             (AgentDelegated)
-                                                                             parent-run-id
-                                                                             parent-agent-id
-                                                                             run-id
-                                                                             parent-agent-id
-                                                                             provider
-                                                                             model
-                                                                             command)
-                                                       0)
-                                                     (emit-event-for-agent (load (field service emitter))
-                                                                           (now-ms)
-                                                                           (AgentCreated)
-                                                                           run-id
-                                                                           run-id
-                                                                           run-id
-                                                                           parent-agent-id
-                                                                           provider
-                                                                           model
-                                                                           command)
-                                                     (if (event-journal-failed? (load (field service journal)))
-                                                         (service-error allocator
-                                                                        500
-                                                                        "journal_write_failed"
-                                                                        "create command was not durable")
-                                                         (let [start-code (service-start-durable-run service command)
-                                                               refreshed (service-recover service)]
-                                                           (if (!= start-code 0)
-                                                               (service-error allocator
-                                                                              503
-                                                                              "run_start_failed"
-                                                                              "run was durably queued but could not start")
-                                                               (service-run-response service
-                                                                                     (field refreshed events)
-                                                                                     run-id
-                                                                                     202))))))))
-                                (_ (service-error allocator
-                                                  409
-                                                  "run_exists"
-                                                  "run_id already exists"))))))))))
+                  (if (and (> (slice-len [u8] (command-string command "workflow_id")) 0)
+                           (not (workflow-command-valid? (field recovery events) command)))
+                      (service-error allocator
+                                     400
+                                     "invalid_workflow_node"
+                                     "workflow nodes require version 1, a node ID, and already-created dependencies in the same workflow")
+                      (let [view (project-run (field recovery events) run-id)]
+                        (match-else (load (field view status))
+                                    (RunNotFound []
+                                                 (let [provider (command-string command "provider")
+                                                       model (command-string command "model")
+                                                       parent-run-id (command-string command "parent_run_id")
+                                                       parent-agent-id (command-string command "parent_agent_id")
+                                                       parent-view
+                                                         (project-run (field recovery events)
+                                                                      parent-run-id)]
+                                                   (if (and (> (slice-len [u8] parent-run-id) 0)
+                                                            (match-else (load (field parent-view status))
+                                                                        (RunNotFound [] true)
+                                                                        (_ false)))
+                                                       (service-error allocator
+                                                                      404
+                                                                      "parent_run_not_found"
+                                                                      "delegation parent run does not exist")
+                                                       (do
+                                                         (emit-event (load (field service emitter))
+                                                                     (now-ms)
+                                                                     (RunCreated)
+                                                                     run-id
+                                                                     run-id
+                                                                     ""
+                                                                     provider
+                                                                     model
+                                                                     command)
+                                                         (when (> (slice-len [u8] parent-run-id) 0)
+                                                           (emit-event-for-agent (load (field service emitter))
+                                                                                 (now-ms)
+                                                                                 (AgentDelegated)
+                                                                                 parent-run-id
+                                                                                 parent-agent-id
+                                                                                 run-id
+                                                                                 parent-agent-id
+                                                                                 provider
+                                                                                 model
+                                                                                 command)
+                                                           0)
+                                                         (emit-event-for-agent (load (field service emitter))
+                                                                               (now-ms)
+                                                                               (AgentCreated)
+                                                                               run-id
+                                                                               run-id
+                                                                               run-id
+                                                                               parent-agent-id
+                                                                               provider
+                                                                               model
+                                                                               command)
+                                                         (when (> (slice-len [u8]
+                                                                             (command-string command
+                                                                                             "workflow_id"))
+                                                                  0)
+                                                           (emit-event-for-agent (load (field service emitter))
+                                                                                 (now-ms)
+                                                                                 (WorkflowNodeCreated)
+                                                                                 run-id
+                                                                                 run-id
+                                                                                 (command-string command "node_id")
+                                                                                 (command-string command "workflow_id")
+                                                                                 provider
+                                                                                 model
+                                                                                 command)
+                                                           0)
+                                                         (if (event-journal-failed? (load (field service journal)))
+                                                             (service-error allocator
+                                                                            500
+                                                                            "journal_write_failed"
+                                                                            "create command was not durable")
+                                                             (let [start-code
+                                                                     (service-start-durable-run service command)
+                                                                   refreshed (service-recover service)]
+                                                               (if (!= start-code 0)
+                                                                   (service-error allocator
+                                                                                  503
+                                                                                  "run_start_failed"
+                                                                                  "run was durably queued but could not start")
+                                                                   (service-run-response service
+                                                                                         (field refreshed events)
+                                                                                         run-id
+                                                                                         202))))))))
+                                    (_ (service-error allocator
+                                                      409
+                                                      "run_exists"
+                                                      "run_id already exists")))))))))))
 
 (defn service-cancel-run [(service (ptr RunService))
                           (command Json)] (-> ServiceResponse)
@@ -305,6 +381,40 @@
                             (json-integer allocator
                                           (load (field recovery last-sequence))))
           (service-response 200 (load result))))))
+
+(defn service-query-workflow [(service (ptr RunService))
+                              (workflow-id (slice u8))] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        recovery (service-recover service)]
+    (if (not (load (field recovery ok)))
+        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (let [(mut result) (json-object allocator)
+              (mut nodes) (json-array allocator)
+              events (field recovery events)
+              (mut i) 0
+              n (al-len [Json] (load events))]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (let [event (al-get [Json] (load events) (load i))
+                          payload (json-get event "payload")]
+                      (when (and (str-eq (command-string event "event") "run.created")
+                                 (str-eq (command-string payload "workflow_id") workflow-id))
+                        (let [run-id (command-string event "run_id")
+                              (mut node) (run-view-json allocator (project-run events run-id))]
+                          (json-put-string! (mut node) "node_id" (command-string payload "node_id"))
+                          (json-object-put! (mut node)
+                                            "depends_on"
+                                            (json-clone allocator (json-get payload "depends_on")))
+                          (json-array-push! (mut nodes) (load node)))
+                        0)
+                      (store! i (+ (load i) 1)))))
+          (if (= (json-array-length (load nodes)) 0)
+              (service-error allocator 404 "workflow_not_found" "workflow does not exist")
+              (do
+                (json-object-put! (mut result) "version" (json-integer allocator 1))
+                (json-put-string! (mut result) "workflow_id" workflow-id)
+                (json-object-put! (mut result) "nodes" (load nodes))
+                (service-response 200 (load result))))))))
 
 (defn service-authorization-response [(service (ptr RunService))
                                       (run-id (slice u8))
@@ -597,6 +707,13 @@
                                                              "routing_rejected"
                                                              message))))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (starts-with target "/v1/workflows/")
+            (if (not can-observe)
+                (service-forbidden allocator)
+                (if (str-eq method "GET")
+                    (service-query-workflow service
+                                            (subslice [u8] target 14 (slice-len [u8] target)))
+                    (service-error allocator 404 "not_found" "route does not exist")))
           (starts-with target "/v1/runs/")
             (let [rest (service-target-parts target)
                   cancel-run-id (service-cancel-run-id rest)

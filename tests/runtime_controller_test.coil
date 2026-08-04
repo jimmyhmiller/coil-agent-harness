@@ -186,7 +186,7 @@
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 
-(deftest drains-durable-runs-in-fifo-order-within-the-capacity-limit
+(deftest drains-workflow-dependencies-only-after-predecessors-succeed
          (let [allocator (malloc-allocator)
                domains-before (allocation-domain-live-count)
                path "/tmp/coil-agent-harness-runtime-queue.jsonl"
@@ -245,6 +245,12 @@
              (json-put-string! (mut first) "provider" "queued-fake")
              (json-put-string! (mut second) "run_id" "queued-run-two")
              (json-put-string! (mut second) "provider" "queued-fake")
+             (json-put-string! (mut second) "workflow_id" "workflow-1")
+             (json-object-put! (mut second) "workflow_version" (json-integer allocator 1))
+             (json-put-string! (mut second) "node_id" "second")
+             (let [(mut dependencies) (json-array allocator)]
+               (json-array-push! (mut dependencies) (JsonString "queued-run-one"))
+               (json-object-put! (mut second) "depends_on" (load dependencies)))
              (emit-event emitter
                          0
                          (RunCreated)
@@ -302,7 +308,7 @@
              (sleep-ms 40)
              (runtime-controller-join-all! controller)
              (assert-eq (atomic-load (load (field state calls))) 3)
-             (assert-eq (atomic-load (load (field state max-active))) 2)
+             (assert-eq (atomic-load (load (field state max-active))) 1)
              (let [recovery (event-journal-recover allocator path)]
                (assert (load (field recovery ok)))
                (let [first-view (project-run (field recovery events) "queued-run-one")
@@ -315,7 +321,19 @@
                  (assert (load (field second-view valid)))
                  (assert (load (field second-view terminal)))
                  (assert (load (field race-view valid)))
-                 (assert (load (field race-view terminal))))))
+                 (assert (load (field race-view terminal)))
+                 (let [(mut saw-ready) false
+                       (mut i) 0
+                       n (al-len [Json] (load (field recovery events)))]
+                   (loop (if (>= (load i) n)
+                             (break)
+                             (let [event (al-get [Json] (load (field recovery events)) (load i))]
+                               (when (and (str-eq (command-string event "run_id") "queued-run-two")
+                                          (str-eq (command-string event "event") "workflow.node.ready"))
+                                 (store! saw-ready true)
+                                 0)
+                               (store! i (+ (load i) 1)))))
+                   (assert (load saw-ready))))))
            (assert-eq (allocation-domain-live-count) domains-before)
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))

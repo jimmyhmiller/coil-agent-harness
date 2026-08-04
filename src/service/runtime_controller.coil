@@ -16,10 +16,12 @@
 (import "harness-allocation-domain" :use *)
 (import "harness-authorization-mailbox" :use *)
 (import "harness-event" :use *)
+(import "harness-event-journal" :use *)
 (import "harness-interactive-authorizer" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
 (import "harness-run-service" :use *)
+(import "harness-run-state" :use *)
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
 (import "openai-responses" :use *)
@@ -32,7 +34,13 @@
 
 (defstruct PendingRuntimeRun
   [(command Json)
-   (allocation-domain (ptr AllocationDomain))])
+   (allocation-domain (ptr AllocationDomain))
+   (workflow i64)])
+
+(defsum RuntimeDependencyState
+  (RuntimeDependenciesReady [])
+  (RuntimeDependenciesWaiting [])
+  (RuntimeDependenciesFailed []))
 
 (deftrait RuntimeProviderFactory [Self]
   (resolve-runtime-provider [(self (ptr Self))
@@ -302,6 +310,57 @@
                                                               domain))
           (None [] -1)))))
 
+(defn runtime-dependency-view-state [(view DurableRunView)] (-> RuntimeDependencyState)
+  (match-else (load (field view status))
+              (RunSucceeded [] (RuntimeDependenciesReady))
+              (RunErrored [] (RuntimeDependenciesFailed))
+              (RunCancelledStatus [] (RuntimeDependenciesFailed))
+              (_ (RuntimeDependenciesWaiting))))
+
+(defn runtime-command-dependency-state [(controller (ptr RuntimeRunController))
+                                        (command Json)] (-> RuntimeDependencyState)
+  (match (json-array-items (json-get command "depends_on"))
+    (None [] (RuntimeDependenciesReady))
+    (Some [items]
+          (let [owner (load (field controller allocator))
+                domain (allocation-domain-open owner)]
+            (if (not (allocation-domain-valid? domain))
+                (do
+                  (allocation-domain-close! owner domain)
+                  (RuntimeDependenciesWaiting))
+                (let [recovery
+                        (event-journal-recover (allocation-domain-allocator domain)
+                                               (load (field controller journal-path)))
+                      (mut state) (RuntimeDependenciesReady)
+                      (mut i) 0
+                      n (al-len [Json] (load items))]
+                  (if (not (load (field recovery ok)))
+                      (store! state (RuntimeDependenciesWaiting))
+                      (loop (if (>= (load i) n)
+                                (break)
+                                (do
+                                  (match-else (al-get [Json] (load items) (load i))
+                                              (JsonString [dependency-run-id]
+                                                          (match (runtime-dependency-view-state (project-run (field recovery
+                                                                                                                    events)
+                                                                                                             dependency-run-id))
+                                                            (RuntimeDependenciesReady [] 0)
+                                                            (RuntimeDependenciesWaiting []
+                                                                                        (store! state
+                                                                                                (RuntimeDependenciesWaiting)))
+                                                            (RuntimeDependenciesFailed []
+                                                                                       (do
+                                                                                         (store! state
+                                                                                                 (RuntimeDependenciesFailed))
+                                                                                         (break)))))
+                                              (_ (do
+                                                   (store! state (RuntimeDependenciesFailed))
+                                                   (break))))
+                                  (store! i (+ (load i) 1))))))
+                  (let [result (load state)]
+                    (allocation-domain-close! owner domain)
+                    result)))))))
+
 (defn runtime-controller-launch! [(controller (ptr RuntimeRunController))
                                   (command Json)] (-> i64)
   (runtime-controller-reap! controller)
@@ -344,6 +403,8 @@
                 (store! (field pending command)
                         (json-clone (allocation-domain-allocator domain) command))
                 (store! (field pending allocation-domain) domain)
+                (store! (field pending workflow)
+                        (if (> (str-len (command-string command "workflow_id")) 0) 1 0))
                 (al-push! [PendingRuntimeRun]
                           (mut (field controller pending))
                           (load pending))
@@ -361,6 +422,54 @@
               (command-string command "model")
               (JsonString "queued run could not start")))
 
+;; Returns one only when the head node must remain queued for its predecessors.
+(defn runtime-controller-process-pending! [(controller (ptr RuntimeRunController))
+                                           (pending PendingRuntimeRun)] (-> i64)
+  (let [command (load (field pending command))
+        domain (load (field pending allocation-domain))]
+    (match (runtime-command-dependency-state controller command)
+      (RuntimeDependenciesWaiting [] 1)
+      (RuntimeDependenciesFailed []
+                                 (do
+                                   (emit-event-for-agent (load (field controller emitter))
+                                                         (now-ms)
+                                                         (WorkflowNodeSkipped)
+                                                         (command-string command "run_id")
+                                                         (command-string command "run_id")
+                                                         (command-string command "node_id")
+                                                         (command-string command "workflow_id")
+                                                         (command-string command "provider")
+                                                         (command-string command "model")
+                                                         (JsonString "workflow dependency did not succeed"))
+                                   (emit-event (load (field controller emitter))
+                                               (now-ms)
+                                               (RunFailed)
+                                               (command-string command "run_id")
+                                               (command-string command "run_id")
+                                               ""
+                                               (command-string command "provider")
+                                               (command-string command "model")
+                                               (JsonString "workflow dependency did not succeed"))
+                                   (allocation-domain-close! (load (field controller allocator)) domain)
+                                   0))
+      (RuntimeDependenciesReady []
+                                (do
+                                  (emit-event-for-agent (load (field controller emitter))
+                                                        (now-ms)
+                                                        (WorkflowNodeReady)
+                                                        (command-string command "run_id")
+                                                        (command-string command "run_id")
+                                                        (command-string command "node_id")
+                                                        (command-string command "workflow_id")
+                                                        (command-string command "provider")
+                                                        (command-string command "model")
+                                                        command)
+                                  (when (!= (runtime-controller-launch-domain! controller command domain) 0)
+                                    (runtime-controller-fail-launch! controller command)
+                                    (allocation-domain-close! (load (field controller allocator)) domain)
+                                    0)
+                                  0)))))
+
 (defn runtime-controller-drain-locked! [(controller (ptr RuntimeRunController))] (-> i64)
   (runtime-controller-reap! controller)
   (let [count (al-len [PendingRuntimeRun] (load (field controller pending)))]
@@ -374,17 +483,22 @@
                               (load (field controller pending))
                               index)
                     command (load (field pending command))]
-                (store! (field controller pending-next) (+ index 1))
-                (when (> (str-len (command-string command "run_id")) 0)
-                  (when (!= (runtime-controller-launch-domain! controller
-                                                               command
-                                                               (load (field pending allocation-domain)))
-                            0)
-                    (runtime-controller-fail-launch! controller command)
-                    (allocation-domain-close! (load (field controller allocator))
-                                              (load (field pending allocation-domain)))
-                    0)
-                  0))))
+                (if (> (str-len (command-string command "run_id")) 0)
+                    (if (= (load (field pending workflow)) 0)
+                        (do
+                          (store! (field controller pending-next) (+ index 1))
+                          (when (!= (runtime-controller-launch-domain! controller
+                                                                       command
+                                                                       (load (field pending allocation-domain)))
+                                    0)
+                            (runtime-controller-fail-launch! controller command)
+                            (allocation-domain-close! (load (field controller allocator))
+                                                      (load (field pending allocation-domain)))
+                            0))
+                        (if (= (runtime-controller-process-pending! controller pending) 1)
+                            (break)
+                            (store! (field controller pending-next) (+ index 1))))
+                    (store! (field controller pending-next) (+ index 1))))))
     (when (>= (load (field controller pending-next)) count)
       (al-clear! [PendingRuntimeRun] (mut (field controller pending)))
       (store! (field controller pending-next) 0)
@@ -411,6 +525,7 @@
                         (store! (field removed command) (JsonNull))
                         (store! (field removed allocation-domain)
                                 (cast (ptr AllocationDomain) 0))
+                        (store! (field removed workflow) 0)
                         (al-set! [PendingRuntimeRun]
                                  (mut (field controller pending))
                                  (load i)

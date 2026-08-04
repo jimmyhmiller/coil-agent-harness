@@ -201,6 +201,40 @@
              (assert (str-eq (command-string message "content") "research this"))
              (assert (str-eq (command-string created-agent-event "event") "agent.created"))
              (assert (str-eq (command-string created-agent-event "agent_id") "child-agent")))
+           (let [first-node
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"workflow-first\",\"run_id\":\"workflow-run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"first\",\"workflow_id\":\"workflow-1\",\"workflow_version\":1,\"node_id\":\"first\",\"depends_on\":[]}")
+                 second-node
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"workflow-second\",\"run_id\":\"workflow-run-2\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"second\",\"workflow_id\":\"workflow-1\",\"workflow_version\":1,\"node_id\":\"second\",\"depends_on\":[\"workflow-run-1\"]}")
+                 missing-dependency
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"workflow-invalid\",\"run_id\":\"workflow-run-3\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"invalid\",\"workflow_id\":\"workflow-1\",\"workflow_version\":1,\"node_id\":\"third\",\"depends_on\":[\"missing-run\"]}")
+                 graph (http-service-call service "GET" "/v1/workflows/workflow-1" "")]
+             (assert-eq (load (field first-node status)) 202)
+             (assert-eq (load (field second-node status)) 202)
+             (assert-eq (load (field missing-dependency status)) 400)
+             (assert-eq (load (field graph status)) 200)
+             (assert-eq (json-array-length (json-get (load (field graph body)) "nodes")) 2)
+             (assert-eq (load (field controller starts)) 5))
+           (let [recovery (event-journal-recover allocator path)
+                 (mut workflow-created) 0
+                 (mut i) 0
+                 n (al-len [Json] (load (field recovery events)))]
+             (loop (if (>= (load i) n)
+                       (break)
+                       (let [event (al-get [Json] (load (field recovery events)) (load i))]
+                         (when (str-eq (command-string event "event") "workflow.node.created")
+                           (store! workflow-created (+ (load workflow-created) 1))
+                           0)
+                         (store! i (+ (load i) 1)))))
+             (assert-eq (load workflow-created) 2))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 

@@ -232,9 +232,13 @@ authorization, execution, continuation, and event lifecycle.
   success cannot override cancellation or timeout. Tool handlers receive a
   `ToolExecutionContext` and overruns are returned as tool failures. In-process tools
   are cooperative and cannot be safely preempted by the hosted thread API.
+- Version 1 workflows compose ordinary durable runs into DAGs. Nodes are admitted in
+  topological order, wait for all predecessors, emit durable node lifecycle events,
+  and remain visible through `GET /v1/workflows/{workflow_id}`. Failed or cancelled
+  dependencies skip downstream nodes without invoking a provider.
 
 ## Next architectural slice
 
-The next slice should add workflow graph definitions and per-run graph state that
-compose durable agent runs without creating a second execution mechanism. All current
-provider adapters emit incremental text deltas with bounded synchronous backpressure.
+The next slice should add supervisor assessments and interventions over the public
+event model. All current provider adapters emit incremental text deltas with bounded
+synchronous backpressure.
