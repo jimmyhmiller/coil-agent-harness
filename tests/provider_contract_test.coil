@@ -3,10 +3,13 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-event" :use *)
 (import "harness-model" :use *)
+(import "harness-http" :use *)
 (import "harness-sse" :use *)
 (import "harness-tool" :use *)
 (import "codex-app-server" :use *)
@@ -16,6 +19,32 @@
 (import "provider-common" :use *)
 
 (defstruct UnusedTool [])
+
+(defstruct FixtureStreamingTransport
+  [(payload (slice u8))
+   (calls i64)])
+
+(impl StreamingHttpTransport FixtureStreamingTransport
+  (send-streaming-http [(self (ptr FixtureStreamingTransport))
+                        (allocator (ptr Allocator))
+                        (request (ptr HttpRequest))
+                        (response (mut HttpResponse))]
+                       (-> i64)
+                       (do
+                         (store! (field self calls) (+ (load (field self calls)) 1))
+                         (let [payload (load (field self payload))
+                               sink (field request chunks)
+                               consumed
+                                 (primitive/call-ptr (load (field sink consume))
+                                                     (slice-data [u8] payload)
+                                                     (cast usize (slice-len [u8] payload))
+                                                     (load (field sink context)))]
+                           (store! (field response transport-code)
+                                   (if (= (cast i64 consumed) (slice-len [u8] payload)) 0 -1)))
+                         (store! (field response status-code) 200)
+                         (store! (field response body) "")
+                         (store! (field response error) "fixture stream rejected")
+                         0)))
 
 (defstruct FakeCodexTransport
   [(send-code i64)
@@ -141,6 +170,57 @@
       (store! (field request timeout-ms) 10000)
       (store! (field (field request continuation) present) false)
       request)))
+
+(deftest shared-streaming-transport-drives-every-http-provider
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               sink (box allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               transport (box allocator FixtureStreamingTransport (zeroed FixtureStreamingTransport))
+               openai (alloc/stack OpenAIResponsesContext)
+               deepseek-openai (alloc/stack DeepSeekOpenAIContext)
+               deepseek-anthropic (alloc/stack DeepSeekAnthropicContext)]
+           (store! openai (openai-context-default allocator))
+           (store! deepseek-openai (deepseek-openai-context-default allocator))
+           (store! deepseek-anthropic (deepseek-anthropic-context-default allocator))
+           (store! (field (field openai credential) primary-env) c"PATH")
+           (store! (field (field deepseek-openai credential) primary-env) c"PATH")
+           (store! (field (field deepseek-anthropic credential) primary-env) c"PATH")
+           (store! (field openai transport) transport)
+           (store! (field deepseek-openai transport) transport)
+           (store! (field deepseek-anthropic transport) transport)
+           ;; OpenAI Responses SSE fixture.
+           (store! (field transport payload)
+                   "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-fixture\",\"model\":\"gpt-test\",\"output\":[],\"usage\":{}}}\n\n")
+           (assert (match (openai-execute-stream openai request emitter allocator)
+                     (ModelOk [response]
+                              (let [success response]
+                                (str-eq (load (field success response-id)) "resp-fixture")))
+                     (ModelErr [failure] false)))
+           ;; DeepSeek OpenAI-compatible SSE fixture.
+           (store! (field transport payload)
+                   "data: {\"id\":\"chat-fixture\",\"model\":\"deepseek-test\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n")
+           (assert (match (deepseek-openai-execute-stream deepseek-openai
+                                                          request
+                                                          emitter
+                                                          allocator)
+                     (ModelOk [response]
+                              (let [success response]
+                                (str-eq (load (field success response-id)) "chat-fixture")))
+                     (ModelErr [failure] false)))
+           ;; DeepSeek Anthropic-compatible SSE fixture.
+           (store! (field transport payload)
+                   "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-fixture\",\"model\":\"deepseek-test\",\"usage\":{}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+           (assert (match (deepseek-anthropic-execute-stream deepseek-anthropic
+                                                             request
+                                                             emitter
+                                                             allocator)
+                     (ModelOk [response]
+                              (let [success response]
+                                (str-eq (load (field success response-id)) "msg-fixture")))
+                     (ModelErr [failure] false)))
+           (assert-eq (load (field transport calls)) 3)))
 
 (deftest openai-responses-wire-contract
          (let [allocator (malloc-allocator)

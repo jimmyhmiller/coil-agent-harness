@@ -181,9 +181,10 @@
                (force-tool bool)] (-> i64)
   (let [allocator (malloc-allocator)
         registry (box allocator ToolRegistry (tool-registry-new allocator))
-        openai-context (box allocator OpenAIResponsesContext (openai-context-default))
-        deepseek-openai-context (box allocator DeepSeekOpenAIContext (deepseek-openai-context-default))
-        deepseek-anthropic-context (box allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default))
+        openai-context (box allocator OpenAIResponsesContext (openai-context-default allocator))
+        deepseek-openai-context (box allocator DeepSeekOpenAIContext (deepseek-openai-context-default allocator))
+        deepseek-anthropic-context
+          (box allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default allocator))
         cwd-result (os/current-dir allocator)
         cwd
           (match cwd-result

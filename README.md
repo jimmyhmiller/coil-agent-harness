@@ -63,6 +63,29 @@ shutdown. Its default mode makes no model calls. Run `sh scripts/e2e.sh --live-c
 to add two minimal live Codex App Server checks using the lower-cost
 `gpt-5.6-luna` model.
 
+## Opt-in live provider tests
+
+Real-network provider tests live under `integration/`, outside every configured source
+and test root. Consequently, neither plain `coil test` nor `coil verify` can discover
+or spend credits on them. Run each file explicitly when you want to exercise live
+credentials:
+
+```sh
+# ChatGPT subscription through the locally authenticated Codex CLI
+coil test integration/codex_live_integration.coil
+
+# OpenAI API billing; requires OPENAI_API_KEY or OPENAI_KEY
+coil test integration/openai_live_integration.coil
+
+# DeepSeek API billing; requires DEEPSEEK_API_KEY or DEEPSEEK_KEY
+coil test integration/deepseek_live_integration.coil
+```
+
+The OpenAI and Codex tests use the efficient `gpt-5.6-luna` model. API suites include
+both a minimal streaming completion and a forced `echo` tool roundtrip; Codex App
+Server owns its own tool registry, so its suite covers the full RPC streaming lifecycle
+without claiming to test the harness tool executor.
+
 The configured nesting metaprogram prints authored expression depth by function,
 module, and program. Run `coil lint src/main.coil --use harness.nesting-depth` for
 one application-graph report (file-mode lint requires the explicit `--use`).
@@ -123,6 +146,12 @@ Provider adapters own URLs, authentication, request/response formats, and preser
 of provider-specific continuation state. Runtime code never switches on a provider
 name. Tool proposal, schema validation, authorization, and execution are separate
 steps, each represented by lifecycle events.
+
+OpenAI and both DeepSeek dialects share an injectable streaming HTTP transport. The
+production implementation uses libcurl with bounded synchronous chunk delivery;
+provider contract tests replace it with an in-memory byte stream while exercising the
+same SSE decoders and provider execution paths. Codex retains its separate JSONL
+subprocess transport because its bidirectional RPC lifecycle is not HTTP streaming.
 
 ## Important current behavior
 

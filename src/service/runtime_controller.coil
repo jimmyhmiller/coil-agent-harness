@@ -49,15 +49,15 @@
                             (cond (str-eq provider-name "openai")
                                     (Some (box allocator
                                                OpenAIResponsesContext
-                                               (openai-context-default)))
+                                               (openai-context-default allocator)))
                                   (str-eq provider-name "deepseek-openai")
                                     (Some (box allocator
                                                DeepSeekOpenAIContext
-                                               (deepseek-openai-context-default)))
+                                               (deepseek-openai-context-default allocator)))
                                   (str-eq provider-name "deepseek-anthropic")
                                     (Some (box allocator
                                                DeepSeekAnthropicContext
-                                               (deepseek-anthropic-context-default)))
+                                               (deepseek-anthropic-context-default allocator)))
                                   (str-eq provider-name "codex")
                                     (let [cwd-result (os/current-dir allocator)
                                           cwd

@@ -1,0 +1,13 @@
+(module harness-codex-live-integration)
+
+(import "harness-main" :use *)
+
+;; Opt-in live test. This file deliberately does not end in `_test.coil`, so
+;; project-wide `coil test` and `coil verify` cannot discover it. The file also
+;; lives outside every configured source and test root.
+(deftest codex-app-server-completes-a-real-subscription-backed-run
+         (assert-eq (cli-run "codex"
+                             "gpt-5.6-luna"
+                             "Reply with exactly LIVE_CODEX_OK."
+                             false)
+                    0))

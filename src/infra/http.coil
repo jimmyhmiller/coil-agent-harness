@@ -45,6 +45,18 @@
    (body (slice u8))
    (error (slice u8))])
 
+;; Providers depend on this narrow streaming boundary rather than libcurl. Request
+;; and response aggregates cross dynamic dispatch by pointer to keep the ABI stable
+;; and to make complete byte-stream behavior injectable in contract tests.
+(deftrait StreamingHttpTransport [Self]
+  (send-streaming-http [(self (ptr Self))
+                        (allocator (ptr Allocator))
+                        (request (ptr HttpRequest))
+                        (response (mut HttpResponse))]
+                       (-> i64)))
+
+(defstruct CurlStreamingHttpTransport [])
+
 (defstruct StreamingCapture
   [(sink HttpChunkSink)
    (body (ArrayList u8))
@@ -212,3 +224,30 @@
             (curl_easy_cleanup easy)
             0)))
     (load result)))
+
+(impl StreamingHttpTransport CurlStreamingHttpTransport
+  (send-streaming-http [(self (ptr CurlStreamingHttpTransport))
+                        (allocator (ptr Allocator))
+                        (request (ptr HttpRequest))
+                        (response (mut HttpResponse))]
+                       (-> i64)
+                       (do
+                         (store! response (http-post-stream allocator request))
+                         0)))
+
+(defn streaming-http-send [(transport (dyn StreamingHttpTransport))
+                           (allocator (ptr Allocator))
+                           (request (ptr HttpRequest))] (-> HttpResponse)
+  (let [response (alloc/stack HttpResponse)]
+    (store! (field response transport-code) -1)
+    (store! (field response status-code) 0)
+    (store! (field response body) "")
+    (store! (field response error) "streaming transport did not produce a response")
+    (if (!= (send-streaming-http transport allocator request (mut response)) 0)
+        (do
+          (store! (field response transport-code) -1)
+          (when (= (slice-len [u8] (load (field response error))) 0)
+            (store! (field response error) "streaming transport failed")
+            0))
+        0)
+    (load response)))

@@ -17,13 +17,16 @@
 
 (defstruct DeepSeekAnthropicContext
   [(endpoint (slice u8))
-   (credential ApiCredential)])
+   (credential ApiCredential)
+   (transport (dyn StreamingHttpTransport))])
 
-(defn deepseek-anthropic-context-default [] (-> DeepSeekAnthropicContext)
+(defn deepseek-anthropic-context-default [(allocator (ptr Allocator))] (-> DeepSeekAnthropicContext)
   (let [context (alloc/stack DeepSeekAnthropicContext)]
     (store! (field context endpoint) "https://api.deepseek.com/anthropic/v1/messages")
     (store! (field (field context credential) primary-env) c"DEEPSEEK_API_KEY")
     (store! (field (field context credential) fallback-env) c"DEEPSEEK_KEY")
+    (store! (field context transport)
+            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
 (defn anthropic-base-messages [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
@@ -529,7 +532,10 @@
           (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
           (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
           (deepseek-anthropic-event emitter request (ModelRequestStarted) (JsonNull))
-          (let [http (http-post-stream allocator http-request)
+          (let [http
+                  (streaming-http-send (load (field context transport))
+                                       allocator
+                                       http-request)
                 status (load (field http status-code))]
             (sse-decoder-free! decoder)
             (if (or (!= (load (field http transport-code)) 0)

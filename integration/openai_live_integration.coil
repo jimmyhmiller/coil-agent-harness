@@ -1,0 +1,19 @@
+(module harness-openai-live-integration)
+
+(import "harness-main" :use *)
+
+;; Opt-in paid API tests. Requires OPENAI_API_KEY or OPENAI_KEY. This file
+;; deliberately lives outside every configured source and test root.
+(deftest openai-responses-completes-a-real-streaming-run
+         (assert-eq (cli-run "openai"
+                             "gpt-5.6-luna"
+                             "Reply with exactly LIVE_OPENAI_OK."
+                             false)
+                    0))
+
+(deftest openai-responses-completes-a-real-tool-roundtrip
+         (assert-eq (cli-run "openai"
+                             "gpt-5.6-luna"
+                             "Call echo once with text LIVE_OPENAI_TOOL_OK, then return that exact text."
+                             true)
+                    0))

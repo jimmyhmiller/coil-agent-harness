@@ -1,0 +1,33 @@
+(module harness-deepseek-live-integration)
+
+(import "harness-main" :use *)
+
+;; Opt-in paid API tests. Requires DEEPSEEK_API_KEY or DEEPSEEK_KEY. This file
+;; deliberately lives outside every configured source and test root.
+(deftest deepseek-openai-completes-a-real-streaming-run
+         (assert-eq (cli-run "deepseek-openai"
+                             "deepseek-v4-flash"
+                             "Reply with exactly LIVE_DEEPSEEK_OPENAI_OK."
+                             false)
+                    0))
+
+(deftest deepseek-openai-completes-a-real-tool-roundtrip
+         (assert-eq (cli-run "deepseek-openai"
+                             "deepseek-v4-flash"
+                             "Call echo once with text LIVE_DEEPSEEK_TOOL_OK, then return that exact text."
+                             true)
+                    0))
+
+(deftest deepseek-anthropic-completes-a-real-streaming-run
+         (assert-eq (cli-run "deepseek-anthropic"
+                             "deepseek-v4-flash"
+                             "Reply with exactly LIVE_DEEPSEEK_ANTHROPIC_OK."
+                             false)
+                    0))
+
+(deftest deepseek-anthropic-completes-a-real-tool-roundtrip
+         (assert-eq (cli-run "deepseek-anthropic"
+                             "deepseek-v4-flash"
+                             "Call echo once with text LIVE_DEEPSEEK_ANTHROPIC_TOOL_OK, then return that exact text."
+                             true)
+                    0))

@@ -2,9 +2,38 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-http" :use *)
+
+(defstruct FakeStreamingHttpTransport
+  [(return-code i64)
+   (calls i64)
+   (payload (slice u8))
+   (status i64)])
+
+(impl StreamingHttpTransport FakeStreamingHttpTransport
+  (send-streaming-http [(self (ptr FakeStreamingHttpTransport))
+                        (allocator (ptr Allocator))
+                        (request (ptr HttpRequest))
+                        (response (mut HttpResponse))]
+                       (-> i64)
+                       (do
+                         (store! (field self calls) (+ (load (field self calls)) 1))
+                         (let [payload (load (field self payload))
+                               sink (field request chunks)]
+                           (when (> (slice-len [u8] payload) 0)
+                             (primitive/call-ptr (load (field sink consume))
+                                                 (slice-data [u8] payload)
+                                                 (cast usize (slice-len [u8] payload))
+                                                 (load (field sink context)))
+                             0))
+                         (store! (field response transport-code) 0)
+                         (store! (field response status-code) (load (field self status)))
+                         (store! (field response body) (load (field self payload)))
+                         (store! (field response error) "fake transport error")
+                         (load (field self return-code)))))
 
 (defn accept-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
   (let [observed (cast (ptr i64) context)]
@@ -39,3 +68,34 @@
                                                      (cast (ptr i8) capture)))
                       0)
            (al-free! [u8] (mut (field capture body)))))
+
+(deftest injectable-streaming-transport-delivers-chunks-and-normalizes-failure
+         (let [allocator (malloc-allocator)
+               headers
+                 (box allocator
+                      (ArrayList (slice u8))
+                      (al-new [(slice u8)] allocator))
+               observed (box allocator i64 0)
+               request (alloc/stack HttpRequest)
+               transport
+                 (box allocator
+                      FakeStreamingHttpTransport
+                      (zeroed FakeStreamingHttpTransport))]
+           (store! (field request url) "https://example.invalid/stream")
+           (store! (field request headers) headers)
+           (store! (field request body) "{}")
+           (store! (field request timeout-ms) 25)
+           (store! (field (field request chunks) context) (cast (ptr i8) observed))
+           (store! (field (field request chunks) consume) (fnptr-of accept-http-chunk))
+           (store! (field transport payload) "two chunks")
+           (store! (field transport status) 202)
+           (let [response (streaming-http-send transport allocator request)]
+             (assert-eq (load (field transport calls)) 1)
+             (assert-eq (load observed) 10)
+             (assert-eq (load (field response transport-code)) 0)
+             (assert-eq (load (field response status-code)) 202)
+             (assert (str-eq (load (field response body)) "two chunks")))
+           (store! (field transport return-code) -7)
+           (let [failed (streaming-http-send transport allocator request)]
+             (assert-eq (load (field failed transport-code)) -1)
+             (assert (str-eq (load (field failed error)) "fake transport error")))))
