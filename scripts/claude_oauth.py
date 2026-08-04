@@ -11,6 +11,7 @@ import secrets
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
@@ -30,11 +31,21 @@ def request_token(payload):
     request = urllib.request.Request(
         TOKEN_URL,
         data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            # Cloudflare rejects urllib's default Python-urllib signature with
+            # error 1010 before Anthropic can evaluate the OAuth request.
+            "User-Agent": "coil-agent-harness/0.1",
+        },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors="replace")
+        raise RuntimeError(f"token endpoint returned HTTP {error.code}: {detail}") from error
 
 
 def credential(data):
