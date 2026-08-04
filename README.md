@@ -28,8 +28,9 @@ The current slice can:
   terminalize work whose in-process outcome can no longer be known;
 - hold a kernel-backed exclusive writer lease for each journal, rejecting a second
   harness process before it can duplicate recovery or side effects;
-- expose bounded `read_text_file` and `write_text_file` tools to service runs, with
-  traversal checks, effect metadata, deadlines, cancellation, and interactive approval.
+- expose bounded `read_text_file`, `write_text_file`, `create_directory`, `delete_file`,
+  and empty-only `remove_directory` tools to service runs, with traversal checks,
+  effect metadata, deadlines, cancellation, and interactive approval.
 
 The HTTP listener binds to IPv4 loopback and the CLI exposes a long-running `serve`
 command protected by capability-bearing credentials. Operator credentials can create,

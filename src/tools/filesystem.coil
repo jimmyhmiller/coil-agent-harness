@@ -13,9 +13,17 @@
 (import "provider-common" :use *)
 
 (const FILE_TOOL_MAX_BYTES 1048576)
+(const FILE_TOOL_DIRECTORY_MODE 493)
+
+(extern mkdir :cc c [(ptr i8) i32] (-> i32))
+(extern unlink :cc c [(ptr i8)] (-> i32))
+(extern rmdir :cc c [(ptr i8)] (-> i32))
 
 (defstruct ReadTextFileTool [(root (slice u8))])
 (defstruct WriteTextFileTool [(root (slice u8))])
+(defstruct CreateDirectoryTool [(root (slice u8))])
+(defstruct DeleteFileTool [(root (slice u8))])
+(defstruct RemoveDirectoryTool [(root (slice u8))])
 
 (defsum BoundedReadResult
   (BoundedReadOk [(bytes (slice u8)) (truncated bool)])
@@ -89,6 +97,21 @@
     (store! (field result error) message)
     (load result)))
 
+(defn file-tool-path-result [(allocator (ptr Allocator))
+                             (call (ptr ToolCall))
+                             (key (slice u8))
+                             (path (slice u8))] (-> ToolResult)
+  (let [(mut output) (json-object allocator)
+        (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+    (json-put-string! (mut output) key path)
+    (store! (field result output) (load output))
+    (load result)))
+
+(defn file-tool-relative-path [(call (ptr ToolCall))] (-> (slice u8))
+  (match (json-string-at (load (field call arguments)) "path")
+    (Some [value] value)
+    (None [] "")))
+
 (defn execute-read-text-file [(self (ptr ReadTextFileTool))
                               (call (ptr ToolCall))
                               (context (ptr ToolExecutionContext))
@@ -155,6 +178,68 @@
                     (store! (field result output) (load output))
                     (load result)))))))
 
+(defn execute-create-directory [(self (ptr CreateDirectoryTool))
+                                (call (ptr ToolCall))
+                                (context (ptr ToolExecutionContext))
+                                (allocator (ptr Allocator))] (-> ToolResult)
+  (let [relative (file-tool-relative-path call)]
+    (cond (cancellation-requested? (load (field context cancellation)))
+            (file-tool-error call "directory creation cancelled")
+          (not (file-tool-path-safe? relative))
+            (file-tool-error call "path must be workspace-relative without parent traversal")
+          :else
+            (let [path (file-tool-path allocator (load (field self root)) relative)
+                  c-path (str->cstr allocator path)
+                  code
+                    (if (= (cast i64 c-path) 0)
+                        -1
+                        (cast i64 (mkdir c-path (cast i32 FILE_TOOL_DIRECTORY_MODE))))]
+              (when (!= (cast i64 c-path) 0)
+                (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+                0)
+              (if (= code 0)
+                  (file-tool-path-result allocator call "created" relative)
+                  (file-tool-error call "could not create directory"))))))
+
+(defn execute-delete-file [(self (ptr DeleteFileTool))
+                           (call (ptr ToolCall))
+                           (context (ptr ToolExecutionContext))
+                           (allocator (ptr Allocator))] (-> ToolResult)
+  (let [relative (file-tool-relative-path call)]
+    (cond (cancellation-requested? (load (field context cancellation))) (file-tool-error call "file deletion cancelled")
+          (not (file-tool-path-safe? relative))
+            (file-tool-error call "path must be workspace-relative without parent traversal")
+          :else
+            (let [path (file-tool-path allocator (load (field self root)) relative)
+                  c-path (str->cstr allocator path)
+                  code (if (= (cast i64 c-path) 0) -1 (cast i64 (unlink c-path)))]
+              (when (!= (cast i64 c-path) 0)
+                (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+                0)
+              (if (= code 0)
+                  (file-tool-path-result allocator call "deleted" relative)
+                  (file-tool-error call "could not delete file"))))))
+
+(defn execute-remove-directory [(self (ptr RemoveDirectoryTool))
+                                (call (ptr ToolCall))
+                                (context (ptr ToolExecutionContext))
+                                (allocator (ptr Allocator))] (-> ToolResult)
+  (let [relative (file-tool-relative-path call)]
+    (cond (cancellation-requested? (load (field context cancellation)))
+            (file-tool-error call "directory removal cancelled")
+          (not (file-tool-path-safe? relative))
+            (file-tool-error call "path must be workspace-relative without parent traversal")
+          :else
+            (let [path (file-tool-path allocator (load (field self root)) relative)
+                  c-path (str->cstr allocator path)
+                  code (if (= (cast i64 c-path) 0) -1 (cast i64 (rmdir c-path)))]
+              (when (!= (cast i64 c-path) 0)
+                (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+                0)
+              (if (= code 0)
+                  (file-tool-path-result allocator call "removed" relative)
+                  (file-tool-error call "could not remove empty directory"))))))
+
 (impl ToolImplementation ReadTextFileTool
   (execute-tool [(self (ptr ReadTextFileTool))
                  (call (ptr ToolCall))
@@ -170,6 +255,30 @@
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
                 (execute-write-text-file self call context allocator)))
+
+(impl ToolImplementation CreateDirectoryTool
+  (execute-tool [(self (ptr CreateDirectoryTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-create-directory self call context allocator)))
+
+(impl ToolImplementation DeleteFileTool
+  (execute-tool [(self (ptr DeleteFileTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-delete-file self call context allocator)))
+
+(impl ToolImplementation RemoveDirectoryTool
+  (execute-tool [(self (ptr RemoveDirectoryTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-remove-directory self call context allocator)))
 
 (defn file-tool-schema [(allocator (ptr Allocator))
                         (include-content bool)] (-> Json)
@@ -226,6 +335,57 @@
     (store! (field definition implementation) implementation)
     (load definition)))
 
+(defn filesystem-path-definition [(allocator (ptr Allocator))
+                                  (root (slice u8))
+                                  (name (slice u8))
+                                  (description (slice u8))
+                                  (effect ToolEffect)
+                                  (implementation (dyn ToolImplementation))] (-> ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)]
+    (store! (field (field definition spec) name) name)
+    (store! (field (field definition spec) description) description)
+    (store! (field (field definition spec) input-schema)
+            (file-tool-schema allocator false))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) effect)
+    (store! (field (field definition spec) idempotent) false)
+    (store! (field (field definition spec) timeout-ms) 10000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn create-directory-definition [(allocator (ptr Allocator))
+                                   (root (slice u8))] (-> ToolDefinition)
+  (let [implementation (box allocator CreateDirectoryTool (zeroed CreateDirectoryTool))]
+    (store! (field implementation root) root)
+    (filesystem-path-definition allocator
+                                root
+                                "create_directory"
+                                "Create one workspace-relative directory. Its parent must exist."
+                                (Reversible)
+                                implementation)))
+
+(defn delete-file-definition [(allocator (ptr Allocator))
+                              (root (slice u8))] (-> ToolDefinition)
+  (let [implementation (box allocator DeleteFileTool (zeroed DeleteFileTool))]
+    (store! (field implementation root) root)
+    (filesystem-path-definition allocator
+                                root
+                                "delete_file"
+                                "Delete one workspace-relative file."
+                                (Destructive)
+                                implementation)))
+
+(defn remove-directory-definition [(allocator (ptr Allocator))
+                                   (root (slice u8))] (-> ToolDefinition)
+  (let [implementation (box allocator RemoveDirectoryTool (zeroed RemoveDirectoryTool))]
+    (store! (field implementation root) root)
+    (filesystem-path-definition allocator
+                                root
+                                "remove_directory"
+                                "Remove one empty workspace-relative directory."
+                                (Destructive)
+                                implementation)))
+
 (defn register-filesystem-tools! [(registry (mut ToolRegistry))
                                   (allocator (ptr Allocator))
                                   (root (slice u8))] (-> bool)
@@ -234,5 +394,16 @@
                           (read-text-file-definition allocator root))
         write-added
           (tool-register! (mut registry)
-                          (write-text-file-definition allocator root))]
-    (and read-added write-added)))
+                          (write-text-file-definition allocator root))
+        directory-added
+          (tool-register! (mut registry)
+                          (create-directory-definition allocator root))
+        delete-added
+          (tool-register! (mut registry)
+                          (delete-file-definition allocator root))
+        remove-added
+          (tool-register! (mut registry)
+                          (remove-directory-definition allocator root))]
+    (and read-added
+         (and write-added
+              (and directory-added (and delete-added remove-added))))))

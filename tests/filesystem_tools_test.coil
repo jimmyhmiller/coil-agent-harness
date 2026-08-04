@@ -31,6 +31,7 @@
          (let [allocator (malloc-allocator)
                reader (alloc/stack ReadTextFileTool)
                writer (alloc/stack WriteTextFileTool)
+               deleter (alloc/stack DeleteFileTool)
                context (alloc/stack ToolExecutionContext)
                write-call
                  (box allocator
@@ -50,6 +51,7 @@
                                        ""))]
            (store! (field reader root) "/tmp")
            (store! (field writer root) "/tmp")
+           (store! (field deleter root) "/tmp")
            (store! (field context cancellation)
                    (cast (ptr CancellationToken) 0))
            (store! (field context run-deadline-monotonic-ms) 0)
@@ -71,7 +73,43 @@
                                  (_ false)))
              (assert (str-eq (command-string output "content")
                              "hello from a tool"))
-             (assert-eq (json-number-i64 (json-get output "bytes")) 17))))
+             (assert-eq (json-number-i64 (json-get output "bytes")) 17))
+           (let [deleted (execute-delete-file deleter read-call context allocator)]
+             (assert (match-else (load (field deleted status))
+                                 (ToolSucceeded [] true)
+                                 (_ false))))
+           (let [missing (execute-read-text-file reader read-call context allocator)]
+             (assert (match-else (load (field missing status))
+                                 (ToolErrored [] true)
+                                 (_ false))))))
+
+(deftest creates-and-removes-only-empty-relative-directories
+         (let [allocator (malloc-allocator)
+               creator (alloc/stack CreateDirectoryTool)
+               remover (alloc/stack RemoveDirectoryTool)
+               context (alloc/stack ToolExecutionContext)
+               call
+                 (box allocator
+                      ToolCall
+                      (filesystem-call allocator
+                                       "directory-1"
+                                       "create_directory"
+                                       "coil-agent-harness-tool-directory"
+                                       ""))]
+           (store! (field creator root) "/tmp")
+           (store! (field remover root) "/tmp")
+           (store! (field context cancellation)
+                   (cast (ptr CancellationToken) 0))
+           ;; Clean up a directory left by an interrupted prior test.
+           (execute-remove-directory remover call context allocator)
+           (let [created (execute-create-directory creator call context allocator)]
+             (assert (match-else (load (field created status))
+                                 (ToolSucceeded [] true)
+                                 (_ false))))
+           (let [removed (execute-remove-directory remover call context allocator)]
+             (assert (match-else (load (field removed status))
+                                 (ToolSucceeded [] true)
+                                 (_ false))))))
 
 (deftest rejects-parent-traversal-and-registers-effect-metadata
          (let [allocator (malloc-allocator)
@@ -97,11 +135,18 @@
            (assert (register-filesystem-tools! (mut registry) allocator "/tmp"))
            (assert-eq (al-len [ToolDefinition]
                               (load (field registry definitions)))
-                      2)
+                      5)
            (match (tool-find (load registry) "write_text_file")
              (None [] (assert false))
              (Some [definition]
                    (let [selected definition]
                      (assert (match-else (load (field (field selected spec) effect))
                                          (Destructive [] true)
+                                         (_ false))))))
+           (match (tool-find (load registry) "create_directory")
+             (None [] (assert false))
+             (Some [definition]
+                   (let [selected definition]
+                     (assert (match-else (load (field (field selected spec) effect))
+                                         (Reversible [] true)
                                          (_ false))))))))
