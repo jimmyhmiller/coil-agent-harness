@@ -235,6 +235,43 @@
                            0)
                          (store! i (+ (load i) 1)))))
              (assert-eq (load workflow-created) 2))
+           (let [assessment
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs/workflow-run-1/assessments"
+                                      "{\"version\":1,\"command_id\":\"assessment-1\",\"run_id\":\"workflow-run-1\",\"verdict\":\"needs_attention\",\"score\":42,\"rationale\":\"output should be reviewed\"}")
+                 duplicate-assessment
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs/workflow-run-1/assessments"
+                                      "{\"version\":1,\"command_id\":\"assessment-1\",\"run_id\":\"workflow-run-1\",\"verdict\":\"needs_attention\"}")
+                 intervention
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs/workflow-run-1/interventions"
+                                      "{\"version\":1,\"command_id\":\"intervention-1\",\"run_id\":\"workflow-run-1\",\"action\":\"cancel\",\"reason\":\"supervisor stopped the run\"}")]
+             (assert-eq (load (field assessment status)) 202)
+             (assert-eq (load (field duplicate-assessment status)) 200)
+             (assert-eq (load (field intervention status)) 202)
+             (assert-eq (load (field controller cancels)) 3))
+           (let [events (service-query-events service "workflow-run-1" 0)
+                 records (json-get (load (field events body)) "events")
+                 (mut saw-assessment) false
+                 (mut saw-intervention) false
+                 (mut i) 0
+                 n (json-array-length records)]
+             (loop (if (>= (load i) n)
+                       (break)
+                       (let [event (json-array-get records (load i))]
+                         (when (str-eq (command-string event "event") "supervisor.assessment.recorded")
+                           (store! saw-assessment true)
+                           0)
+                         (when (str-eq (command-string event "event") "supervisor.intervention.applied")
+                           (store! saw-intervention true)
+                           0)
+                         (store! i (+ (load i) 1)))))
+             (assert (load saw-assessment))
+             (assert (load saw-intervention)))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 

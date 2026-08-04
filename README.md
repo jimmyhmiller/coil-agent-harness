@@ -236,9 +236,15 @@ authorization, execution, continuation, and event lifecycle.
   topological order, wait for all predecessors, emit durable node lifecycle events,
   and remain visible through `GET /v1/workflows/{workflow_id}`. Failed or cancelled
   dependencies skip downstream nodes without invoking a provider.
+- Operator-capable supervisors can record idempotent structured assessments and
+  request cancellation interventions through public HTTP commands. Assessment,
+  request, application, and rejection events remain visible in each run's journal;
+  interventions reuse the ordinary cancellation state machine.
 
 ## Next architectural slice
 
-The next slice should add supervisor assessments and interventions over the public
-event model. All current provider adapters emit incremental text deltas with bounded
+The implemented core now spans durable agents, workflow DAGs, explainable routing,
+production tools, and auditable supervision. The next roadmap pass should prioritize
+operational hardening and measured gaps rather than introducing another execution
+mechanism. All current provider adapters emit incremental text deltas with bounded
 synchronous backpressure.

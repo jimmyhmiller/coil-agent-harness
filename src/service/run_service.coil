@@ -416,6 +416,118 @@
                 (json-object-put! (mut result) "nodes" (load nodes))
                 (service-response 200 (load result))))))))
 
+(defn supervisor-command-valid? [(command Json) (field-name (slice u8))] (-> bool)
+  (and (= (json-number-i64 (json-get command "version")) 1)
+       (and (> (slice-len [u8] (command-string command "command_id")) 0)
+            (and (> (slice-len [u8] (command-string command "run_id")) 0)
+                 (> (slice-len [u8] (command-string command field-name)) 0)))))
+
+(defn service-record-assessment [(service (ptr RunService))
+                                 (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        recovery (service-recover service)
+        run-id (command-string command "run_id")]
+    (if (not (supervisor-command-valid? command "verdict"))
+        (service-error allocator 400 "invalid_assessment" "assessment requires a verdict")
+        (if (not (load (field recovery ok)))
+            (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+            (if (> (journal-command-sequence (field recovery events)
+                                             (command-string command "command_id"))
+                   0)
+                (service-query-events service run-id 0)
+                (let [view (project-run (field recovery events) run-id)]
+                  (match-else (load (field view status))
+                              (RunNotFound []
+                                           (service-error allocator 404 "run_not_found" "run does not exist"))
+                              (_ (if (< (emit-event (load (field service emitter))
+                                                    (now-ms)
+                                                    (SupervisorAssessmentRecorded)
+                                                    run-id
+                                                    (command-string command "command_id")
+                                                    ""
+                                                    (load (field view provider))
+                                                    (load (field view model))
+                                                    command)
+                                        0)
+                                     (service-error allocator
+                                                    500
+                                                    "journal_write_failed"
+                                                    "assessment was not durable")
+                                     (service-response 202 command))))))))))
+
+(defn service-request-intervention [(service (ptr RunService))
+                                    (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        recovery (service-recover service)
+        run-id (command-string command "run_id")]
+    (if (or (not (supervisor-command-valid? command "action"))
+            (not (str-eq (command-string command "action") "cancel")))
+        (service-error allocator 400 "invalid_intervention" "supported intervention action is cancel")
+        (if (not (load (field recovery ok)))
+            (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+            (if (> (journal-command-sequence (field recovery events)
+                                             (command-string command "command_id"))
+                   0)
+                (service-run-response service (field recovery events) run-id 200)
+                (let [view (project-run (field recovery events) run-id)]
+                  (match-else (load (field view status))
+                              (RunNotFound []
+                                           (service-error allocator 404 "run_not_found" "run does not exist"))
+                              (RunSucceeded []
+                                            (service-error allocator 409 "run_terminal" "run is already terminal"))
+                              (RunErrored []
+                                          (service-error allocator 409 "run_terminal" "run is already terminal"))
+                              (RunCancelledStatus []
+                                                  (service-error allocator 409 "run_terminal" "run is already terminal"))
+                              (_ (do
+                                   (emit-event (load (field service emitter))
+                                               (now-ms)
+                                               (SupervisorInterventionRequested)
+                                               run-id
+                                               (command-string command "command_id")
+                                               ""
+                                               (load (field view provider))
+                                               (load (field view model))
+                                               command)
+                                   (match (service-cancel-durable-run service command)
+                                     (RunCancellationAccepted []
+                                                              (do
+                                                                (emit-event (load (field service emitter))
+                                                                            (now-ms)
+                                                                            (SupervisorInterventionApplied)
+                                                                            run-id
+                                                                            (command-string command "command_id")
+                                                                            ""
+                                                                            (load (field view provider))
+                                                                            (load (field view model))
+                                                                            command)
+                                                                (let [refreshed (service-recover service)]
+                                                                  (service-run-response service
+                                                                                        (field refreshed events)
+                                                                                        run-id
+                                                                                        202))))
+                                     (RunCancellationTerminalOrMissing []
+                                                                       (do
+                                                                         (emit-event (load (field service emitter))
+                                                                                     (now-ms)
+                                                                                     (SupervisorInterventionRejected)
+                                                                                     run-id
+                                                                                     (command-string command
+                                                                                                     "command_id")
+                                                                                     ""
+                                                                                     (load (field view provider))
+                                                                                     (load (field view model))
+                                                                                     command)
+                                                                         (service-error allocator
+                                                                                        409
+                                                                                        "intervention_rejected"
+                                                                                        "run could not be cancelled")))
+                                     (RunCancellationFailed []
+                                                            (service-error allocator
+                                                                           500
+                                                                           "intervention_failed"
+                                                                           "intervention was not durable"))))))))))))
+
 (defn service-authorization-response [(service (ptr RunService))
                                       (run-id (slice u8))
                                       (authorization-id (slice u8))
@@ -662,6 +774,15 @@
               ""))
     (None [] "")))
 
+(defn service-suffixed-run-id [(rest (slice u8))
+                               (suffix (slice u8))] (-> (slice u8))
+  (match (str-find rest suffix)
+    (Some [position]
+          (if (= (+ position (slice-len [u8] suffix)) (slice-len [u8] rest))
+              (subslice [u8] rest 0 position)
+              ""))
+    (None [] "")))
+
 (defn service-authorization-marker [(rest (slice u8))] (-> i64)
   (match (str-find rest "/authorizations/")
     (Some [position] position)
@@ -718,9 +839,37 @@
             (let [rest (service-target-parts target)
                   cancel-run-id (service-cancel-run-id rest)
                   events-run-id (service-events-run-id rest)
+                  assessment-run-id (service-suffixed-run-id rest "/assessments")
+                  intervention-run-id (service-suffixed-run-id rest "/interventions")
                   authorization-run-id (service-authorization-run-id rest)
                   authorization-id (service-authorization-id rest)]
               (cond (and (str-eq method "POST")
+                         (> (slice-len [u8] assessment-run-id) 0))
+                      (if (not can-control)
+                          (service-forbidden allocator)
+                          (let [parsed (service-parse-command service (load (field request body)))]
+                            (if (not (load (field parsed ok)))
+                                (service-error allocator 400 "invalid_json" "request body is not valid JSON")
+                                (let [(mut command) (load (field parsed value))]
+                                  (service-command-actor! (mut command) principal)
+                                  (if (not (str-eq (command-string (load command) "run_id")
+                                                   assessment-run-id))
+                                      (service-error allocator 409 "run_id_mismatch" "path and command run IDs differ")
+                                      (service-record-assessment service (load command)))))))
+                    (and (str-eq method "POST")
+                         (> (slice-len [u8] intervention-run-id) 0))
+                      (if (not can-control)
+                          (service-forbidden allocator)
+                          (let [parsed (service-parse-command service (load (field request body)))]
+                            (if (not (load (field parsed ok)))
+                                (service-error allocator 400 "invalid_json" "request body is not valid JSON")
+                                (let [(mut command) (load (field parsed value))]
+                                  (service-command-actor! (mut command) principal)
+                                  (if (not (str-eq (command-string (load command) "run_id")
+                                                   intervention-run-id))
+                                      (service-error allocator 409 "run_id_mismatch" "path and command run IDs differ")
+                                      (service-request-intervention service (load command)))))))
+                    (and (str-eq method "POST")
                          (> (slice-len [u8] authorization-run-id) 0)
                          (> (slice-len [u8] authorization-id) 0))
                       (if (not can-control)

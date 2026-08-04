@@ -40,6 +40,11 @@ prevention an admission invariant. The scheduler starts a node only after every
 predecessor succeeds and terminalizes downstream nodes whose dependencies fail or are
 cancelled. Workflow queries are journal projections, not a separate source of truth.
 
+Supervisors consume that same public journal. Assessments append structured semantic
+events; cancellation interventions are durable, idempotent commands that pass through
+the existing run controller and cancellation lifecycle. This keeps observation,
+judgment, and action auditable without granting a supervisor a hidden execution path.
+
 ## Model turns and continuations
 
 `ModelRequest` is stable across providers. After a model returns tool calls, the
@@ -111,7 +116,6 @@ contains no application-owned native shim.
 
 - Approval round-trips for interactive Codex App Server requests.
 - Additional production tools and sandboxed execution capabilities.
-- Supervisor assessments and interventions over the public event model.
 
 These extend current contracts; they must not introduce alternate model/tool
 loops or UI-specific behavior into the core.
