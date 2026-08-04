@@ -23,10 +23,10 @@
 
 (defstruct RemoteFakeController [(starts i64)])
 (impl RunController RemoteFakeController
-  (start-durable-run [(self (ptr RemoteFakeController)) (command Json)]
+  (start-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                      (-> i64)
                      (do (store! (field self starts) (+ (load (field self starts)) 1)) 0))
-  (cancel-durable-run [(self (ptr RemoteFakeController)) (command Json)]
+  (cancel-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                       (-> RunCancellationResult)
                       (RunCancellationAccepted)))
 

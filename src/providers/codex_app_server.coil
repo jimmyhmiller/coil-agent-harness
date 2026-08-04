@@ -52,7 +52,7 @@
 (deftrait CodexTransport [Self]
   (codex-transport-send [(self (ptr Self))
                          (allocator (ptr Allocator))
-                         (message Json)]
+                         (message (ptr Json))]
                         (-> i64))
   (codex-transport-read [(self (ptr Self))
                          (allocator (ptr Allocator))
@@ -239,9 +239,9 @@
 (impl CodexTransport subprocess/Child
   (codex-transport-send [(self (ptr subprocess/Child))
                          (allocator (ptr Allocator))
-                         (message Json)]
+                         (message (ptr Json))]
                         (-> i64)
-                        (codex-child-send allocator self message))
+                        (codex-child-send allocator self (load message)))
   (codex-transport-read [(self (ptr subprocess/Child))
                          (allocator (ptr Allocator))
                          (timeout-ms i64)
@@ -257,7 +257,9 @@
 (defn codex-send [(allocator (ptr Allocator))
                   (connection (ptr CodexConnection))
                   (message Json)] (-> i64)
-  (codex-transport-send (load (field connection transport)) allocator message))
+  (let [message-ref (alloc/stack Json)]
+    (store! message-ref message)
+    (codex-transport-send (load (field connection transport)) allocator message-ref)))
 
 (defn codex-read [(allocator (ptr Allocator))
                   (connection (ptr CodexConnection))

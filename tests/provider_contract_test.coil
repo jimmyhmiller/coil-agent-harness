@@ -21,6 +21,7 @@
   [(send-code i64)
    (read-result CodexRead)
    (send-count i64)
+   (sent-valid-json bool)
    (read-count i64)
    (close-count i64)])
 
@@ -66,11 +67,15 @@
 (impl CodexTransport FakeCodexTransport
   (codex-transport-send [(self (ptr FakeCodexTransport))
                          (allocator (ptr Allocator))
-                         (message Json)]
+                         (message (ptr Json))]
                         (-> i64)
                         (do
                           (store! (field self send-count)
                                   (+ (load (field self send-count)) 1))
+                          (store! (field self sent-valid-json)
+                                  (match-else (load message)
+                                              (JsonObject [keys values] true)
+                                              (_ false)))
                           (load (field self send-code))))
   (codex-transport-read [(self (ptr FakeCodexTransport))
                          (allocator (ptr Allocator))
@@ -408,6 +413,7 @@
                      (Ok [message] (= (json-number-i64 (json-get message "id")) 1))
                      (Err [message] false)))
            (assert-eq (load (field successful send-count)) 1)
+           (assert (load (field successful sent-valid-json)))
            (assert-eq (load (field successful read-count)) 1)
            (codex-close successful-connection)
            (assert-eq (load (field successful close-count)) 1)

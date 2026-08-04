@@ -229,8 +229,8 @@
              (store! (field controller max-active-runs) 0)
              (json-put-string! (mut cancelled) "run_id" "queued-run-cancelled")
              (json-put-string! (mut cancelled) "provider" "queued-fake")
-             (assert-eq (start-durable-run controller (load cancelled)) 0)
-             (assert (match (cancel-durable-run controller (load cancelled))
+             (assert-eq (start-durable-run controller cancelled) 0)
+             (assert (match (cancel-durable-run controller cancelled)
                        (RunCancellationAccepted [] true)
                        (RunCancellationTerminalOrMissing [] false)
                        (RunCancellationFailed [] false)))
@@ -257,8 +257,8 @@
                          "queued-fake"
                          "fake-model"
                          (load second))
-             (assert-eq (start-durable-run controller (load first)) 0)
-             (assert-eq (start-durable-run controller (load second)) 0)
+             (assert-eq (start-durable-run controller first) 0)
+             (assert-eq (start-durable-run controller second) 0)
              (let [(mut attempt) 0]
                (loop (if (or (and (= (atomic-load (load (field state calls))) 2)
                                   (= (atomic-load (load (field state active))) 0))
@@ -280,7 +280,7 @@
                          "queued-fake"
                          "fake-model"
                          (load raced))
-             (assert-eq (start-durable-run controller (load raced)) 0)
+             (assert-eq (start-durable-run controller raced) 0)
              (let [(mut attempt) 0]
                (loop (if (or (= (atomic-load (load (field state calls))) 3)
                              (>= (load attempt) 200))
@@ -289,7 +289,7 @@
                            (sleep-ms 1)
                            (store! attempt (+ (load attempt) 1))))))
              (sleep-ms 20)
-             (assert (match (cancel-durable-run controller (load raced))
+             (assert (match (cancel-durable-run controller raced)
                        (RunCancellationAccepted [] true)
                        (RunCancellationTerminalOrMissing [] true)
                        (RunCancellationFailed [] false)))

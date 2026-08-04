@@ -18,11 +18,11 @@
 
 (defstruct AuthorizationFakeController [])
 (impl RunController AuthorizationFakeController
-  (start-durable-run [(self (ptr AuthorizationFakeController)) (command Json)]
+  (start-durable-run [(self (ptr AuthorizationFakeController)) (command (ptr Json))]
                      (-> i64)
                      0)
   (cancel-durable-run [(self (ptr AuthorizationFakeController))
-                       (command Json)]
+                       (command (ptr Json))]
                       (-> RunCancellationResult)
                       (RunCancellationAccepted)))
 

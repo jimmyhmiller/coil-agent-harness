@@ -20,8 +20,8 @@
   (RunCancellationFailed []))
 
 (deftrait RunController [Self]
-  (start-durable-run [(self (ptr Self)) (command Json)] (-> i64))
-  (cancel-durable-run [(self (ptr Self)) (command Json)] (-> RunCancellationResult)))
+  (start-durable-run [(self (ptr Self)) (command (ptr Json))] (-> i64))
+  (cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> RunCancellationResult)))
 
 (defstruct RunService
   [(allocator (ptr Allocator))
@@ -36,6 +36,19 @@
   [(method (slice u8))
    (target (slice u8))
    (body (slice u8))])
+
+;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
+;; by value through a trait object is not ABI-stable across Coil backends.
+(defn service-start-durable-run [(service (ptr RunService)) (command Json)] (-> i64)
+  (let [command-ref (alloc/stack Json)]
+    (store! command-ref command)
+    (start-durable-run (load (field service controller)) command-ref)))
+
+(defn service-cancel-durable-run [(service (ptr RunService))
+                                  (command Json)] (-> RunCancellationResult)
+  (let [command-ref (alloc/stack Json)]
+    (store! command-ref command)
+    (cancel-durable-run (load (field service controller)) command-ref)))
 
 (defn service-response [(status i64) (body Json)] (-> ServiceResponse)
   (let [response (alloc/stack ServiceResponse)]
@@ -106,9 +119,7 @@
                                                                   500
                                                                   "journal_write_failed"
                                                                   "create command was not durable")
-                                                   (let [start-code
-                                                           (start-durable-run (load (field service controller))
-                                                                              command)
+                                                   (let [start-code (service-start-durable-run service command)
                                                          refreshed (service-recover service)]
                                                      (if (!= start-code 0)
                                                          (service-error allocator
@@ -149,8 +160,7 @@
                                                                    409
                                                                    "run_terminal"
                                                                    "run is already terminal"))
-                                (_ (match (cancel-durable-run (load (field service controller))
-                                                              command)
+                                (_ (match (service-cancel-durable-run service command)
                                      (RunCancellationAccepted []
                                                               (let [refreshed (service-recover service)]
                                                                 (service-run-response service
@@ -397,8 +407,8 @@
                           (match-else (load (field view status))
                                       (RunQueued []
                                                  (let [start-code
-                                                         (start-durable-run (load (field service controller))
-                                                                            (json-get event "payload"))]
+                                                         (service-start-durable-run service
+                                                                                    (json-get event "payload"))]
                                                    (if (= start-code 0)
                                                        (store! recovered (+ (load recovered) 1))
                                                        (emit-event (load (field service emitter))

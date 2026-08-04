@@ -14,12 +14,12 @@
 (defstruct FakeRunController [(starts i64) (cancels i64)])
 
 (impl RunController FakeRunController
-  (start-durable-run [(self (ptr FakeRunController)) (command Json)]
+  (start-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                      (-> i64)
                      (do
                        (store! (field self starts) (+ (load (field self starts)) 1))
                        0))
-  (cancel-durable-run [(self (ptr FakeRunController)) (command Json)]
+  (cancel-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                       (-> RunCancellationResult)
                       (do
                         (store! (field self cancels) (+ (load (field self cancels)) 1))

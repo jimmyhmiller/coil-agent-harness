@@ -49,12 +49,19 @@ coil test --list
 coil test --jobs 4
 coil verify
 sh scripts/check_file_size.sh
+sh scripts/e2e.sh
 ```
 
 The test suites are declared in `Coil.toml`. `coil verify` validates the manifest,
 formatting, lint, every entry/test target graph, and all tests. The standalone
 size-check script enforces the repository's 4,000-line guard. Neither command spends
 model credits.
+
+The end-to-end script exercises the compiled binary over real sockets, including
+authentication, command replay, failure projection, journal recovery, and graceful
+shutdown. Its default mode makes no model calls. Run `sh scripts/e2e.sh --live-codex`
+to add two minimal live Codex App Server checks using the lower-cost
+`gpt-5.6-luna` model.
 
 The configured nesting metaprogram prints authored expression depth by function,
 module, and program. Run `coil lint src/main.coil --use harness.nesting-depth` for

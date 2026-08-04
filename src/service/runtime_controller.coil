@@ -595,10 +595,10 @@
   0)
 
 (impl RunController RuntimeRunController
-  (start-durable-run [(self (ptr RuntimeRunController)) (command Json)]
+  (start-durable-run [(self (ptr RuntimeRunController)) (command (ptr Json))]
                      (-> i64)
-                     (runtime-controller-enqueue! self command))
+                     (runtime-controller-enqueue! self (load command)))
   (cancel-durable-run [(self (ptr RuntimeRunController))
-                       (command Json)]
+                       (command (ptr Json))]
                       (-> RunCancellationResult)
-                      (runtime-controller-cancel! self command)))
+                      (runtime-controller-cancel! self (load command))))
