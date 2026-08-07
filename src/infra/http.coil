@@ -8,28 +8,9 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 
-;; Temporary bridge until coil.http.client exposes request-stream. Keep curl's
-;; untyped surface confined to this module; providers use StreamingHttpTransport.
-(extern curl_easy_init :cc c [] (-> (ptr i8)))
-(extern curl_easy_cleanup :cc c [(ptr i8)] (-> void))
-(extern curl_easy_perform :cc c [(ptr i8)] (-> i32))
-(extern curl_easy_setopt :cc c [(ptr i8) i32 ...] (-> i32))
-(extern curl_easy_getinfo :cc c [(ptr i8) i32 ...] (-> i32))
-(extern curl_easy_strerror :cc c [i32] (-> (ptr i8)))
-(extern curl_slist_append :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
-(extern curl_slist_free_all :cc c [(ptr i8)] (-> void))
-
-(const HARNESS_CURLOPT_WRITEDATA 10001)
-(const HARNESS_CURLOPT_URL 10002)
-(const HARNESS_CURLOPT_WRITEFUNCTION 20011)
-(const HARNESS_CURLOPT_POSTFIELDS 10015)
-(const HARNESS_CURLOPT_HTTPHEADER 10023)
-(const HARNESS_CURLOPT_CUSTOMREQUEST 10036)
-(const HARNESS_CURLOPT_NOSIGNAL 99)
-(const HARNESS_CURLOPT_POSTFIELDSIZE_LARGE 30120)
-(const HARNESS_CURLOPT_TIMEOUT_MS 155)
-(const HARNESS_CURLOPT_CONNECTTIMEOUT_MS 156)
-(const HARNESS_CURLINFO_RESPONSE_CODE 2097154)
+;; Providers reach HTTP only through StreamingHttpTransport; this module adapts
+;; that boundary to coil.http.client. There is no longer any libcurl surface here
+;; — both the buffered and the streaming path go through the client.
 
 (defstruct HttpChunkSink
   [(context (ptr i8))
@@ -68,41 +49,32 @@
 (defn discard-http-chunk [(data (ptr u8)) (len usize) (context (ptr i8))] (-> usize)
   len)
 
-(defn capture-streaming-chunk [(data (ptr i8))
-                               (size isize)
-                               (count isize)
-                               (opaque (ptr i8))] (-> isize)
+;; Adapts the harness chunk sink to `coil.http.client`'s `BodySink`, and keeps the
+;; capped copy of the body that the client does not: `request-stream` delivers
+;; bytes and never buffers them, while `HttpResponse.body` is still expected to
+;; hold the transcript up to `max-captured-bytes`.
+;;
+;; A harness sink reports how many bytes it accepted, and anything short of the
+;; whole chunk is how it asks to stop — that is what `BODY-STOP` means here. The
+;; bytes are transport-owned and only valid for this call, which is why the
+;; retained copy is made before the sink is given a chance to stop.
+(defn capture-streaming-chunk [(data (ptr u8))
+                               (length i64)
+                               (opaque (ptr i8))] (-> i64)
   (let [capture (cast (ptr StreamingCapture) opaque)
-        length (* (cast i64 size) (cast i64 count))
         current (al-len [u8] (load (field capture body)))
         available (- (load (field capture max-captured-bytes)) current)
         retained (if (< available length) available length)
         sink (field capture sink)]
     (when (> retained 0)
-      (al-extend! [u8]
-                  (mut (field capture body))
-                  (cast (ptr u8) data)
-                  retained)
+      (al-extend! [u8] (mut (field capture body)) data retained)
       0)
-    (cast isize
-          (primitive/call-ptr (load (field sink consume))
-                              (cast (ptr u8) data)
-                              (cast usize length)
-                              (load (field sink context))))))
-
-(defn curl-header-list [(allocator (ptr Allocator))
-                        (lines (ptr (ArrayList (slice u8))))] (-> (ptr i8))
-  (let [(mut list) (cast (ptr i8) 0)
-        (mut i) 0
-        count (al-len [(slice u8)] (load lines))]
-    (loop (if (>= (load i) count)
-              (break)
-              (let [line (al-get [(slice u8)] (load lines) (load i))
-                    c-line (str->cstr allocator line)]
-                (store! list (curl_slist_append (load list) c-line))
-                (raw-free allocator c-line (+ (slice-len [u8] line) 1) 1)
-                (store! i (+ (load i) 1)))))
-    (load list)))
+    (let [accepted (cast i64
+                         (primitive/call-ptr (load (field sink consume))
+                                             data
+                                             (cast usize length)
+                                             (load (field sink context))))]
+      (if (< accepted length) BODY-STOP BODY-CONTINUE))))
 
 (defn header-colon [(line (slice u8))] (-> i64)
   (let [(mut i) 0
@@ -165,71 +137,64 @@
              (store! (field result error) "HTTP transport failed"))))
     (load result)))
 
-;; Temporary incremental transport for provider SSE. Replace this implementation
-;; with coil.http.client/request-stream when that public API is available; see
-;; docs/feature-request-http-streaming.md.
+;; Incremental transport for provider SSE, on `coil.http.client/request-stream`.
+;;
+;; The retained body is still ours to build: the client hands bytes to the sink
+;; and buffers nothing, so `capture-streaming-chunk` keeps the capped copy that
+;; `HttpResponse.body` promises.
 (defn http-post-stream [(allocator (ptr Allocator))
                         (request (ptr HttpRequest))] (-> HttpResponse)
-  (let [easy (curl_easy_init)
+  (let [headers (request-headers allocator (load (field request headers)))
+        native-request (alloc/stack client/Request)
+        capture (alloc/stack StreamingCapture)
+        sink (alloc/stack client/BodySink)
         result (alloc/stack HttpResponse)]
     (store! (field result transport-code) 0)
     (store! (field result status-code) 0)
     (store! (field result body) "")
     (store! (field result error) "")
-    (if (= (cast i64 easy) 0)
-        (do
-          (store! (field result transport-code) -1)
-          (store! (field result error) "could not initialize HTTP transport")
-          0)
-        (let [capture (alloc/stack StreamingCapture)
-              url (str->cstr allocator (load (field request url)))
-              method (str->cstr allocator "POST")
-              headers (curl-header-list allocator (load (field request headers)))
-              body (load (field request body))]
-          (store! (field capture sink) (load (field request chunks)))
-          (store! (field capture body) (al-new [u8] allocator))
-          (store! (field capture max-captured-bytes) 1048576)
-          (curl_easy_setopt easy HARNESS_CURLOPT_URL url)
-          (curl_easy_setopt easy HARNESS_CURLOPT_CUSTOMREQUEST method)
-          (curl_easy_setopt easy HARNESS_CURLOPT_HTTPHEADER headers)
-          (curl_easy_setopt easy
-                            HARNESS_CURLOPT_POSTFIELDS
-                            (cast (ptr i8) (slice-data [u8] body)))
-          (curl_easy_setopt easy HARNESS_CURLOPT_POSTFIELDSIZE_LARGE (slice-len [u8] body))
-          (curl_easy_setopt easy
-                            HARNESS_CURLOPT_WRITEFUNCTION
-                            (fnptr-of capture-streaming-chunk))
-          (curl_easy_setopt easy HARNESS_CURLOPT_WRITEDATA (cast (ptr i8) capture))
-          (curl_easy_setopt easy HARNESS_CURLOPT_NOSIGNAL 1)
-          (curl_easy_setopt easy
-                            HARNESS_CURLOPT_CONNECTTIMEOUT_MS
-                            (load (field request timeout-ms)))
-          (curl_easy_setopt easy
-                            HARNESS_CURLOPT_TIMEOUT_MS
-                            (load (field request timeout-ms)))
-          (let [performed (curl_easy_perform easy)]
-            (if (= (cast i64 performed) 0)
-                (cast i64
-                      (curl_easy_getinfo easy
-                                         HARNESS_CURLINFO_RESPONSE_CODE
-                                         (field result status-code)))
-                (do
-                  (store! (field result transport-code) (cast i64 performed))
-                  (let [description (cstr->str (curl_easy_strerror performed))]
-                    (store! (field result error)
-                            (if (> (slice-len [u8] description) 0)
-                                description
-                                "HTTP streaming transport failed")))))
-            (store! (field result body)
-                    (al-into-slice [u8] (mut (field capture body))))
-            (raw-free allocator
-                      url
-                      (+ (slice-len [u8] (load (field request url))) 1)
-                      1)
-            (raw-free allocator method 5 1)
-            (curl_slist_free_all headers)
-            (curl_easy_cleanup easy)
-            0)))
+    (store! (field capture sink) (load (field request chunks)))
+    (store! (field capture body) (al-new [u8] allocator))
+    (store! (field capture max-captured-bytes) 1048576)
+    (store! (field sink context) (cast (ptr i8) capture))
+    (store! (field sink consume) (fnptr-of capture-streaming-chunk))
+    (store! (field native-request method) "POST")
+    (store! (field native-request url) (load (field request url)))
+    (store! (field native-request headers) headers)
+    (store! (field native-request body) (load (field request body)))
+    ;; One budget covered both the connect and the total deadline before, and
+    ;; `Request` splits them; keep them equal rather than quietly tightening one.
+    (store! (field native-request connect-timeout-ms) (load (field request timeout-ms)))
+    (store! (field native-request timeout-ms) (load (field request timeout-ms)))
+    (store! (field native-request follow-redirects) false)
+    (match (client/request-stream allocator native-request (load sink))
+      (Ok [response]
+          (do
+            ;; A consumer stop is a successful transfer that ended early, not a
+            ;; failure: the status and headers arrived before any body byte did.
+            (store! (field result status-code)
+                    (client/streaming-response-status response))
+            (client/streaming-response-free allocator response)
+            0))
+      (Err [failure]
+           (do
+             (store! (field result transport-code) -1)
+             (store! (field result error) "HTTP streaming transport failed")
+             (match failure
+               (client/Transport [code message]
+                                 (do
+                                   (store! (field result transport-code) code)
+                                   (when (> (slice-len [u8] message) 0)
+                                     (store! (field result error) message)
+                                     0)
+                                   0))
+               (client/OutOfMemory [] (store! (field result error) "out of memory"))
+               (client/InvalidRequest [] (store! (field result error) "invalid request")))
+             0)))
+    ;; Whatever arrived before a failure is still worth reporting — the old
+    ;; implementation returned it too, and a provider's error body is often the
+    ;; only explanation of what went wrong.
+    (store! (field result body) (al-into-slice [u8] (mut (field capture body))))
     (load result)))
 
 (impl StreamingHttpTransport CurlStreamingHttpTransport

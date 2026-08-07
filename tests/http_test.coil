@@ -52,21 +52,20 @@
            (store! (field (field capture sink) consume) (fnptr-of accept-http-chunk))
            (store! (field capture body) (al-new [u8] allocator))
            (store! (field capture max-captured-bytes) 6)
-           (assert-eq (cast i64
-                            (capture-streaming-chunk (cast (ptr i8) (slice-data [u8] input))
-                                                     (cast isize 1)
-                                                     (cast isize (slice-len [u8] input))
-                                                     (cast (ptr i8) capture)))
-                      (slice-len [u8] input))
+           ;; A sink that accepts the whole chunk keeps the transfer going, and the
+           ;; retained copy stops at max-captured-bytes.
+           (assert-eq (capture-streaming-chunk (slice-data [u8] input)
+                                               (slice-len [u8] input)
+                                               (cast (ptr i8) capture))
+                      BODY-CONTINUE)
            (assert-eq (load observed) (slice-len [u8] input))
            (assert (str-eq (al-slice [u8] (load (field capture body))) "stream"))
+           ;; A sink that accepts less than the chunk is asking to stop.
            (store! (field (field capture sink) consume) (fnptr-of reject-http-chunk))
-           (assert-eq (cast i64
-                            (capture-streaming-chunk (cast (ptr i8) (slice-data [u8] input))
-                                                     (cast isize 1)
-                                                     (cast isize (slice-len [u8] input))
-                                                     (cast (ptr i8) capture)))
-                      0)
+           (assert-eq (capture-streaming-chunk (slice-data [u8] input)
+                                               (slice-len [u8] input)
+                                               (cast (ptr i8) capture))
+                      BODY-STOP)
            (al-free! [u8] (mut (field capture body)))))
 
 (deftest injectable-streaming-transport-delivers-chunks-and-normalizes-failure
