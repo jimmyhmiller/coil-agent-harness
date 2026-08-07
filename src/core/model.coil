@@ -36,6 +36,10 @@
 (defstruct ModelContinuation
   [(present bool)
    (previous-response-id (slice u8))
+   ;; Provider-owned conversation/session handle (for example a Codex thread id).
+   ;; This is deliberately separate from a response id: the two have different
+   ;; continuation semantics and conflating them silently destroys cache reuse.
+   (provider-session-id (slice u8))
    (previous-output Json)
    (tool-results (ptr (ArrayList ToolResult)))])
 
@@ -44,8 +48,11 @@
    (operation-id (slice u8))
    (model (slice u8))
    (instructions (slice u8))
+   (cache-key (slice u8))
+   (prompt-cache-key (slice u8))
    (messages (ptr (ArrayList Message)))
    (tools (ptr ToolRegistry))
+   (tool-authorizer (dyn ToolAuthorizer))
    (tool-choice ModelToolChoice)
    (parallel-tool-calls bool)
    (reasoning ReasoningEffort)
@@ -69,6 +76,7 @@
   [(provider (slice u8))
    (model (slice u8))
    (response-id (slice u8))
+   (provider-session-id (slice u8))
    (output-text (slice u8))
    (tool-calls (ArrayList ToolCall))
    (usage ModelUsage)
@@ -95,6 +103,56 @@
   (ModelOk [(response ModelResponse)])
   (ModelErr [(failure ModelFailure)]))
 
+(defn model-response-clone-into [(target (ptr Allocator))
+                                 (source ModelResponse)] (-> ModelResponse)
+  (let [result (alloc/stack ModelResponse)
+        (mut calls) (al-new [ToolCall] target)
+        source-calls (field source tool-calls)
+        (mut at) 0
+        count (al-len [ToolCall] (load source-calls))]
+    (al-reserve! [ToolCall] (mut calls) count)
+    (loop (if (>= (load at) count)
+              (break)
+              (do
+                (al-push! [ToolCall]
+                          (mut calls)
+                          (tool-call-clone-into target
+                                                (al-get [ToolCall] (load source-calls) (load at))))
+                (store! at (+ (load at) 1)))))
+    (store! (field result provider)
+            (json-copy-string target (load (field source provider))))
+    (store! (field result model)
+            (json-copy-string target (load (field source model))))
+    (store! (field result response-id)
+            (json-copy-string target (load (field source response-id))))
+    (store! (field result provider-session-id)
+            (json-copy-string target (load (field source provider-session-id))))
+    (store! (field result output-text)
+            (json-copy-string target (load (field source output-text))))
+    (store! (field result tool-calls) (load calls))
+    (store! (field result usage) (load (field source usage)))
+    (store! (field result raw-output)
+            (json-clone target (load (field source raw-output))))
+    (load result)))
+
+(defn model-failure-clone-into [(target (ptr Allocator))
+                                (source ModelFailure)] (-> ModelFailure)
+  (let [result (alloc/stack ModelFailure)]
+    (store! (field result kind) (load (field source kind)))
+    (store! (field result provider)
+            (json-copy-string target (load (field source provider))))
+    (store! (field result status-code) (load (field source status-code)))
+    (store! (field result message)
+            (json-copy-string target (load (field source message))))
+    (store! (field result retryable) (load (field source retryable)))
+    (load result)))
+
+(defn model-result-clone-into [(target (ptr Allocator))
+                               (source ModelResult)] (-> ModelResult)
+  (match source
+    (ModelOk [response] (ModelOk (model-response-clone-into target response)))
+    (ModelErr [failure] (ModelErr (model-failure-clone-into target failure)))))
+
 ;; Capabilities are explicit provider-boundary facts used by routing and UIs. Cost
 ;; tier is a relative policy input (1 is cheapest), not a billing estimate.
 (defstruct ProviderCapabilities
@@ -110,8 +168,8 @@
         codex (or (str-eq name "codex") (str-eq name "codex-app-server"))
         claude (or (str-eq name "claude") (str-eq name "claude-anthropic"))]
     (store! (field capabilities streaming) true)
-    (store! (field capabilities harness-tools) (not codex))
-    (store! (field capabilities parallel-tools) (not codex))
+    (store! (field capabilities harness-tools) true)
+    (store! (field capabilities parallel-tools) true)
     (store! (field capabilities reasoning) true)
     (store! (field capabilities subscription-auth) (or codex claude))
     (store! (field capabilities cost-tier)

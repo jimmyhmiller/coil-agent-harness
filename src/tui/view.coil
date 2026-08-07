@@ -1,0 +1,107 @@
+(module harness-tui-view)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "harness-tui-frame" :use *)
+
+;; Declarative presentation nodes. They describe hierarchy and intent only; cell
+;; measurement, wrapping, row budgets, and terminal coordinates belong to layout.
+(defstruct ViewFlow
+  [(role StyleRole)
+   (first-prefix (slice u8))
+   (continuation-prefix (slice u8))
+   (text (slice u8))])
+
+(defstruct ViewInput
+  [(prompt (slice u8))
+   (text (slice u8))
+   (cursor-offset i64)
+   (row-budget i64)])
+
+(defstruct ViewDecoratedFlow
+  [(line-role StyleRole)
+   (first-prefix (slice u8))
+   (prefix-role StyleRole)
+   (continuation-prefix (slice u8))
+   (body (slice u8))
+   (body-role StyleRole)
+   (suffix (slice u8))
+   (suffix-role StyleRole)])
+
+(defsum ViewNode
+  (ViewFlowNode [(flow ViewFlow)])
+  (ViewDecoratedFlowNode [(flow ViewDecoratedFlow)])
+  (ViewInputNode [(input ViewInput)])
+  (ViewSpacerNode [(rows i64)])
+  (ViewTailNode [(rows i64) (child (ptr ViewNode))])
+  (ViewStackNode [(gap i64) (children (ptr (ArrayList ViewNode)))]))
+
+(defstruct TerminalView [(root ViewNode)])
+
+(defn view-flow [(role StyleRole)
+                 (first-prefix (slice u8))
+                 (continuation-prefix (slice u8))
+                 (text (slice u8))] (-> ViewNode)
+  (let [flow (alloc/stack ViewFlow)]
+    (store! (field flow role) role)
+    (store! (field flow first-prefix) first-prefix)
+    (store! (field flow continuation-prefix) continuation-prefix)
+    (store! (field flow text) text)
+    (ViewFlowNode (load flow))))
+
+(defn view-input [(prompt (slice u8))
+                  (text (slice u8))
+                  (cursor-offset i64)
+                  (row-budget i64)] (-> ViewNode)
+  (let [input (alloc/stack ViewInput)]
+    (store! (field input prompt) prompt)
+    (store! (field input text) text)
+    (store! (field input cursor-offset) cursor-offset)
+    (store! (field input row-budget) row-budget)
+    (ViewInputNode (load input))))
+
+(defn view-decorated-flow [(line-role StyleRole)
+                           (first-prefix (slice u8))
+                           (prefix-role StyleRole)
+                           (continuation-prefix (slice u8))
+                           (body (slice u8))
+                           (body-role StyleRole)
+                           (suffix (slice u8))
+                           (suffix-role StyleRole)] (-> ViewNode)
+  (let [flow (alloc/stack ViewDecoratedFlow)]
+    (store! (field flow line-role) line-role)
+    (store! (field flow first-prefix) first-prefix)
+    (store! (field flow prefix-role) prefix-role)
+    (store! (field flow continuation-prefix) continuation-prefix)
+    (store! (field flow body) body)
+    (store! (field flow body-role) body-role)
+    (store! (field flow suffix) suffix)
+    (store! (field flow suffix-role) suffix-role)
+    (ViewDecoratedFlowNode (load flow))))
+
+(defn view-spacer [(rows i64)] (-> ViewNode)
+  (ViewSpacerNode (if (< rows 0) 0 rows)))
+
+(defn view-tail [(allocator (ptr Allocator))
+                 (rows i64)
+                 (child ViewNode)] (-> ViewNode)
+  (ViewTailNode (if (< rows 0) 0 rows)
+                (box allocator ViewNode child)))
+
+(defn view-stack [(allocator (ptr Allocator)) (gap i64)] (-> ViewNode)
+  (ViewStackNode (if (< gap 0) 0 gap)
+                 (box allocator
+                      (ArrayList ViewNode)
+                      (al-new [ViewNode] allocator))))
+
+(defn view-stack-push! [(stack-node (ptr ViewNode)) (child ViewNode)] (-> i64)
+  (match-else (load stack-node)
+              (ViewStackNode [gap children]
+                             (do (al-push! [ViewNode] children child) 0))
+              (_ 0)))
+
+(defn terminal-view [(root ViewNode)] (-> TerminalView)
+  (let [view (alloc/stack TerminalView)]
+    (store! (field view root) root)
+    (load view)))

@@ -1,0 +1,4 @@
+{"version":1,"sequence":1,"event":"agent.delegated","run_id":"run-1","operation_id":"agent-2","payload":{}}
+{"version":1,"sequence":2,"event":"workflow.node.ready","run_id":"run-1","operation_id":"node-1","payload":{}}
+{"version":1,"sequence":3,"event":"model.response.delta","run_id":"run-1","operation_id":"model-1","payload":"Partial response"}
+{"version":1,"sequence":4,"event":"run.cancelled","run_id":"run-1","operation_id":"run-1","payload":null}

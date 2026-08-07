@@ -1,0 +1,103 @@
+(module codex-direct-cache-integration)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "codex-app-server" :use *)
+(import "codex-direct" :use *)
+(import "harness-event" :use *)
+(import "harness-model" :use *)
+(import "harness-main" :use *)
+(import "harness-tool" :use *)
+
+(defn cache-audit-request [(allocator (ptr Allocator))
+                           (messages (ptr (ArrayList Message)))] (-> (ptr ModelRequest))
+  (let [request (box allocator ModelRequest (zeroed ModelRequest))
+        registry (box allocator ToolRegistry (tool-registry-new allocator))]
+    (store! (field request run-id) "direct-cache-audit")
+    (store! (field request operation-id) "model")
+    (store! (field request model) "gpt-5.6-terra")
+    (store! (field request instructions) "Reply briefly and exactly.")
+    (store! (field request messages) messages)
+    (store! (field request tools) registry)
+    (store! (field request tool-choice) (ToolsNone))
+    (store! (field request parallel-tool-calls) true)
+    (store! (field request reasoning) (ReasoningLow))
+    (store! (field request cache-key) "coil-direct-cache-audit-v1")
+    (store! (field request prompt-cache-key) "coil-direct-cache-audit-v1")
+    (store! (field request max-output-tokens) 64)
+    (store! (field request timeout-ms) 120000)
+    request))
+
+(deftest direct-subscription-reports-cached-prefix-tokens
+         (let [allocator (malloc-allocator)
+               context (alloc/stack CodexDirectContext)
+               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+               first (alloc/stack Message)
+               (mut prefix) (sb-new allocator)
+               (mut i) 0
+               sink (box allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
+           (loop (if (>= (load i) 1400)
+                     (break)
+                     (do
+                       (sb-push-str! (mut prefix) "stable-prefix-token ")
+                       (store! i (+ (load i) 1)))))
+           (sb-push-str! (mut prefix) "Reply exactly CACHEMARKER.")
+           (store! (field first role) (UserRole))
+           (store! (field first content) (sb-finish! (mut prefix)))
+           (al-push! [Message] messages (load first))
+           (store! context (codex-direct-context allocator))
+           (let [request (cache-audit-request allocator messages)
+                 first-result (codex-direct-execute context request emitter allocator)]
+             (match first-result
+               (ModelErr [failure] (assert false))
+               (ModelOk [response]
+                        (let [first-response response
+                              assistant (alloc/stack Message)
+                              second (alloc/stack Message)]
+                          (store! (field assistant role) (AssistantRole))
+                          (store! (field assistant content)
+                                  (load (field first-response output-text)))
+                          (al-push! [Message] messages (load assistant))
+                          (store! (field second role) (UserRole))
+                          (store! (field second content)
+                                  "What marker did I ask for? Reply with only it.")
+                          (al-push! [Message] messages (load second))
+                          (let [(mut attempts) 0
+                                (mut cached) 0]
+                            (loop (if (or (>= (load attempts) 3) (> (load cached) 0))
+                                      (break)
+                                      (do
+                                        (match (codex-direct-execute context
+                                                                     request
+                                                                     emitter
+                                                                     allocator)
+                                          (ModelErr [failure] (assert false))
+                                          (ModelOk [response]
+                                                   (let [second-response response]
+                                                     (store! cached
+                                                             (load (field
+                                                                     (field second-response usage)
+                                                                     cached-input-tokens))))))
+                                        (store! attempts (+ (load attempts) 1)))))
+                            (assert (> (load cached) 0)))))))))
+
+(deftest direct-subscription-replays-reasoning-and-tool-output
+         (let [allocator (malloc-allocator)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               context (box allocator CodexDirectContext (codex-direct-context allocator))
+               strategy (box allocator (dyn CodexExecutionStrategy) context)
+               provider (alloc/stack CodexProvider)]
+           (tool-register! registry (echo-definition allocator))
+           (store! provider (zeroed CodexProvider))
+           (store! (field provider strategy) strategy)
+           (assert-eq (cli-run-provider allocator
+                                        registry
+                                        provider
+                                        "gpt-5.4"
+                                        "Call echo exactly once with {\"text\":\"CACHE_TOOL_OK\"}, then reply exactly CACHE_TOOL_OK."
+                                        true)
+                      0)))

@@ -9,6 +9,7 @@
 (import "coil.str" :use *)
 (import "coil.thread" :use *)
 (import "codex-app-server" :use *)
+(import "codex-direct" :use *)
 (import "claude-agent" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
@@ -26,6 +27,7 @@
 (import "harness-tool" :use *)
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
+(import "tui-fixture-provider" :use *)
 
 (defstruct ActiveRuntimeRun
   [(run-id (slice u8))
@@ -43,14 +45,81 @@
   (RuntimeDependenciesFailed []))
 
 (deftrait RuntimeProviderFactory [Self]
+  (prepare-runtime-provider [(self (ptr Self))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))]
+                            (-> i64))
   (resolve-runtime-provider [(self (ptr Self))
                              (allocator (ptr Allocator))
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))))
 
-(defstruct DefaultRuntimeProviderFactory [])
+(defstruct DefaultRuntimeProviderFactory
+  [(tui-fixture (ptr TuiFixtureProvider))
+   (codex (ptr CodexProvider))
+   (codex-strategy (ptr (dyn CodexExecutionStrategy)))])
+
+(defn default-codex-direct? [(allocator (ptr Allocator))] (-> bool)
+  (match (os/env-get allocator "HARNESS_CODEX_STRATEGY")
+    (Ok [found]
+        (match found
+          ;; Direct subscription HTTP is the product default. App Server remains
+          ;; an explicit compatibility fallback.
+          (Some [value] (not (str-eq (os/owned-string-slice value) "app-server")))
+          (None [] true)))
+    (Err [failure] true)))
+
+(defn default-codex-strategy [(allocator (ptr Allocator))
+                              (cwd (slice u8))]
+                             (-> (ptr (dyn CodexExecutionStrategy)))
+  (if (default-codex-direct? allocator)
+      (let [context
+              (box allocator CodexDirectContext (codex-direct-context allocator))]
+        (box allocator (dyn CodexExecutionStrategy) context))
+      (let [context
+              (box allocator CodexAppServerContext (zeroed CodexAppServerContext))]
+        (codex-context-init-persistent! context allocator cwd)
+        (box allocator (dyn CodexExecutionStrategy) context))))
+
+(defn default-runtime-provider-factory-init! [(factory (ptr DefaultRuntimeProviderFactory))
+                                              (allocator (ptr Allocator))] (-> i64)
+  (let [cwd-result (os/current-dir allocator)
+        cwd
+          (match cwd-result
+            (Ok [owned] (os/owned-string-slice owned))
+            (Err [failure] "."))
+        strategy (default-codex-strategy allocator cwd)
+        provider (box allocator CodexProvider (zeroed CodexProvider))]
+    (store! (field provider strategy) strategy)
+    (store! (field factory codex-strategy) strategy)
+    (store! (field factory codex) provider)
+    0))
+
+(defn default-runtime-provider-factory-prepare! [(factory (ptr DefaultRuntimeProviderFactory))
+                                                 (provider-name (slice u8))
+                                                 (allocator (ptr Allocator))] (-> i64)
+  (if (str-eq provider-name "codex")
+      (let [strategy (load (field factory codex-strategy))]
+        (if (= strategy (cast (ptr (dyn CodexExecutionStrategy)) 0))
+            -1
+            (codex-strategy-prepare! (load strategy) allocator)))
+      0))
+
+(defn default-runtime-provider-factory-close! [(factory (ptr DefaultRuntimeProviderFactory))] (-> i64)
+  (let [strategy (load (field factory codex-strategy))]
+    (when (!= strategy (cast (ptr (dyn CodexExecutionStrategy)) 0))
+      (codex-strategy-close! (load strategy))
+      0)
+    0))
 
 (impl RuntimeProviderFactory DefaultRuntimeProviderFactory
+  (prepare-runtime-provider [(self (ptr DefaultRuntimeProviderFactory))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))]
+                            (-> i64)
+                            (default-runtime-provider-factory-prepare! self
+                                                                       provider-name
+                                                                       allocator))
   (resolve-runtime-provider [(self (ptr DefaultRuntimeProviderFactory))
                              (allocator (ptr Allocator))
                              (provider-name (slice u8))]
@@ -68,18 +137,29 @@
                                                DeepSeekAnthropicContext
                                                (deepseek-anthropic-context-default allocator)))
                                   (str-eq provider-name "codex")
-                                    (let [cwd-result (os/current-dir allocator)
-                                          cwd
-                                            (match cwd-result
-                                              (Ok [owned] (os/owned-string-slice owned))
-                                              (Err [failure] "."))]
-                                      (Some (box allocator
-                                                 CodexAppServerContext
-                                                 (codex-context cwd))))
+                                    (let [provider (load (field self codex))]
+                                      (if (= provider (cast (ptr CodexProvider) 0))
+                                          (None [(dyn ModelProvider)])
+                                          (Some provider)))
                                   (str-eq provider-name "claude")
                                     (Some (box allocator
                                                ClaudeAnthropicContext
                                                (claude-anthropic-context-default allocator)))
+                                  (str-eq provider-name "tui-fixture")
+                                    (match (os/env-get allocator "HARNESS_TUI_TEST_PROVIDER")
+                                      (Ok [found]
+                                          (match found
+                                            (Some [owned]
+                                                  (let [(mut value) owned
+                                                        enabled
+                                                          (str-eq (os/owned-string-slice (load value))
+                                                                  "1")]
+                                                    (os/owned-string-free allocator value)
+                                                    (if enabled
+                                                        (Some (load (field self tui-fixture)))
+                                                        (None [(dyn ModelProvider)]))))
+                                            (None [] (None [(dyn ModelProvider)]))))
+                                      (Err [failure] (None [(dyn ModelProvider)])))
                                   :else (None [(dyn ModelProvider)]))))
 
 (defstruct RuntimeRunController
@@ -149,11 +229,31 @@
                              (command Json)
                              (allocator (ptr Allocator))] (-> (ptr ModelRequest))
   (let [request (box allocator ModelRequest (zeroed ModelRequest))
-        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        message (alloc/stack Message)]
-    (store! (field message role) (UserRole))
-    (store! (field message content) (command-string command "prompt"))
-    (al-push! [Message] messages (load message))
+        messages (box allocator (ArrayList Message) (al-new [Message] allocator))]
+    ;; Commands carry semantic messages as data. Keep the legacy prompt fallback
+    ;; for non-conversation clients, but never flatten roles into prompt prose.
+    (match (json-array-items (json-get command "messages"))
+      (Some [items]
+            (let [(mut i) 0
+                  n (al-len [Json] (load items))]
+              (loop (if (>= (load i) n)
+                        (break)
+                        (let [item (al-get [Json] (load items) (load i))
+                              role (command-string item "role")
+                              content (command-string item "content")
+                              message (alloc/stack Message)]
+                          (store! (field message role)
+                                  (cond (str-eq role "assistant") (AssistantRole)
+                                        (str-eq role "system") (SystemRole)
+                                        :else (UserRole)))
+                          (store! (field message content) content)
+                          (al-push! [Message] messages (load message))
+                          (store! i (+ (load i) 1)))))))
+      (None []
+            (let [message (alloc/stack Message)]
+              (store! (field message role) (UserRole))
+              (store! (field message content) (command-string command "prompt"))
+              (al-push! [Message] messages (load message)))))
     (store! (field request run-id) (command-string command "run_id"))
     (store! (field request operation-id) "model-1")
     (store! (field request model) (command-string command "model"))
@@ -163,13 +263,47 @@
     (store! (field request tool-choice) (ToolsAuto))
     (store! (field request parallel-tool-calls) true)
     (store! (field request reasoning) (ReasoningMedium))
+    (let [(mut cache) (json-object allocator)]
+      (json-object-put! (mut cache) "version" (json-integer allocator 1))
+      (json-put-string! (mut cache) "provider" (command-string command "provider"))
+      (json-put-string! (mut cache) "model" (load (field request model)))
+      ;; Cache routing is conversation-scoped. Sharing a provider prompt-cache
+      ;; key between unrelated chats reduces prefix locality and can couple
+      ;; continuation validation to the wrong conversation.
+      (json-put-string! (mut cache)
+                        "conversation_id"
+                        (command-string command "conversation_id"))
+      (json-put-string! (mut cache) "instructions" (load (field request instructions)))
+      (json-put-string! (mut cache)
+                        "reasoning"
+                        (reasoning-effort-name (load (field request reasoning))))
+      (store! (field request cache-key) (json-stringify allocator (load cache))))
+    (store! (field request prompt-cache-key)
+            (concat-or-empty allocator
+                             (command-string command "provider")
+                             (concat-or-empty allocator
+                                              "/"
+                                              (concat-or-empty allocator
+                                                               (load (field request model))
+                                                               (concat-or-empty
+                                                                 allocator
+                                                                 "/"
+                                                                 (command-string command
+                                                                                 "conversation_id"))))))
     (store! (field request max-output-tokens) 4096)
     (store! (field request timeout-ms) (runtime-command-timeout command))
     (store! (field request deadline-monotonic-ms)
             (deadline-from-timeout (load (field request timeout-ms))))
     (store! (field request cancellation) (cancellation-token-new allocator))
-    (store! (field (field request continuation) present) false)
-    (store! (field (field request continuation) previous-response-id) "")
+    (store! (field (field request continuation) present)
+            (and (str-eq (load (field request cache-key))
+                         (command-string command "continuation_cache_key"))
+                 (or (> (str-len (command-string command "previous_response_id")) 0)
+                     (> (str-len (command-string command "provider_session_id")) 0))))
+    (store! (field (field request continuation) previous-response-id)
+            (command-string command "previous_response_id"))
+    (store! (field (field request continuation) provider-session-id)
+            (command-string command "provider_session_id"))
     (store! (field (field request continuation) previous-output) (JsonNull))
     (store! (field (field request continuation) tool-results)
             (cast (ptr (ArrayList ToolResult)) 0))
@@ -178,25 +312,10 @@
 (defn runtime-authorizer [(controller (ptr RuntimeRunController))
                           (command Json)
                           (request (ptr ModelRequest))
-                          (allocator (ptr Allocator))] (-> (ptr InteractiveAuthorizer))
-  (let [authorizer (box allocator InteractiveAuthorizer (zeroed InteractiveAuthorizer))]
-    (store! (field authorizer allocator) allocator)
-    (store! (field authorizer journal-path)
-            (load (field controller journal-path)))
-    (store! (field authorizer emitter) (load (field controller emitter)))
-    (store! (field authorizer run-id) (load (field request run-id)))
-    (store! (field authorizer parent-operation-id)
-            (load (field request operation-id)))
-    (store! (field authorizer provider) (command-string command "provider"))
-    (store! (field authorizer model) (load (field request model)))
-    (store! (field authorizer cancellation)
-            (load (field request cancellation)))
-    (store! (field authorizer mailbox) (load (field controller mailbox)))
-    (store! (field authorizer run-deadline-monotonic-ms)
-            (load (field request deadline-monotonic-ms)))
-    (store! (field authorizer authorization-timeout-ms)
-            (load (field controller authorization-timeout-ms)))
-    authorizer))
+                          (allocator (ptr Allocator))] (-> (ptr AllowAllAuthorizer))
+  ;; Permissions will return as an explicit policy layer. Until then, every
+  ;; registered tool is authorized immediately after schema validation.
+  (box allocator AllowAllAuthorizer (zeroed AllowAllAuthorizer)))
 
 (defn runtime-controller-reap! [(controller (ptr RuntimeRunController))] (-> i64)
   (let [(mut i) 0]
@@ -470,6 +589,57 @@
                                     0)
                                   0)))))
 
+;; A dependency-blocked node must not reserve the queue head. Launch or terminalize
+;; one later runnable entry and leave a tombstone so the head can be reconsidered.
+(defn runtime-controller-process-later! [(controller (ptr RuntimeRunController))
+                                         (start i64)
+                                         (count i64)] (-> bool)
+  (let [(mut i) start
+        (mut processed) false]
+    (loop (if (or (>= (load i) count) (load processed))
+              (break)
+              (let [pending
+                      (al-get [PendingRuntimeRun]
+                              (load (field controller pending))
+                              (load i))
+                    command (load (field pending command))]
+                (if (= (str-len (command-string command "run_id")) 0)
+                    (store! i (+ (load i) 1))
+                    (do
+                      (if (= (load (field pending workflow)) 0)
+                          (do
+                            (when (!= (runtime-controller-launch-domain! controller
+                                                                         command
+                                                                         (load (field pending allocation-domain)))
+                                      0)
+                              (runtime-controller-fail-launch! controller command)
+                              (allocation-domain-close! (load (field controller allocator))
+                                                        (load (field pending allocation-domain)))
+                              0)
+                            (store! processed true))
+                          (match (runtime-command-dependency-state controller command)
+                            (RuntimeDependenciesWaiting [] (store! i (+ (load i) 1)))
+                            (RuntimeDependenciesReady []
+                                                      (do
+                                                        (runtime-controller-process-pending! controller pending)
+                                                        (store! processed true)))
+                            (RuntimeDependenciesFailed []
+                                                       (do
+                                                         (runtime-controller-process-pending! controller pending)
+                                                         (store! processed true)))))
+                      (when (load processed)
+                        (let [removed (alloc/stack PendingRuntimeRun)]
+                          (store! (field removed command) (JsonNull))
+                          (store! (field removed allocation-domain)
+                                  (cast (ptr AllocationDomain) 0))
+                          (store! (field removed workflow) 0)
+                          (al-set! [PendingRuntimeRun]
+                                   (mut (field controller pending))
+                                   (load i)
+                                   (load removed)))
+                        0))))))
+    (load processed)))
+
 (defn runtime-controller-drain-locked! [(controller (ptr RuntimeRunController))] (-> i64)
   (runtime-controller-reap! controller)
   (let [count (al-len [PendingRuntimeRun] (load (field controller pending)))]
@@ -496,7 +666,11 @@
                                                       (load (field pending allocation-domain)))
                             0))
                         (if (= (runtime-controller-process-pending! controller pending) 1)
-                            (break)
+                            (when (not (runtime-controller-process-later! controller
+                                                                          (+ index 1)
+                                                                          count))
+                              (break)
+                              0)
                             (store! (field controller pending-next) (+ index 1))))
                     (store! (field controller pending-next) (+ index 1))))))
     (when (>= (load (field controller pending-next)) count)
@@ -715,6 +889,13 @@
   0)
 
 (impl RunController RuntimeRunController
+  (prepare-durable-provider [(self (ptr RuntimeRunController))
+                             (provider-name (slice u8))]
+                            (-> i64)
+                            (prepare-runtime-provider
+                              (load (field self provider-factory))
+                              (load (field self allocator))
+                              provider-name))
   (start-durable-run [(self (ptr RuntimeRunController)) (command (ptr Json))]
                      (-> i64)
                      (runtime-controller-enqueue! self (load command)))

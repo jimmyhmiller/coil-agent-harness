@@ -1,0 +1,140 @@
+(module harness-tui-service-presenter)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-view" :use *)
+(import "harness-tui-view-layout" :use *)
+(import "provider-common" :use *)
+
+(defn service-json-string [(value Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [text] text)
+    (None [] "")))
+
+(defn service-view-error [(allocator (ptr Allocator))
+                          (body Json)] (-> ViewNode)
+  (let [message (service-json-string body "message")]
+    (view-flow (RoleFailure)
+               "! "
+               "  "
+               (if (> (slice-len [u8] message) 0)
+                   message
+                   "The request failed."))))
+
+(defn service-view-run [(allocator (ptr Allocator))
+                        (status i64)
+                        (body Json)
+                        (unicode bool)] (-> ViewNode)
+  (if (or (< status 200) (>= status 300))
+      (service-view-error allocator body)
+      (let [(mut root) (view-stack allocator 0)
+            run-id (service-json-string body "run_id")
+            state (service-json-string body "status")
+            provider (service-json-string body "provider")
+            model (service-json-string body "model")]
+        (view-stack-push! (mut root)
+                          (view-flow (RolePrimary)
+                                     (if unicode "● " "run: ")
+                                     "  "
+                                     (concat-or-empty allocator
+                                                      run-id
+                                                      (concat-or-empty allocator "  " state))))
+        (when (or (> (slice-len [u8] provider) 0)
+                  (> (slice-len [u8] model) 0))
+          (view-stack-push! (mut root)
+                            (view-flow (RoleMuted)
+                                       "  "
+                                       "  "
+                                       (concat-or-empty allocator
+                                                        provider
+                                                        (concat-or-empty allocator "/" model))))
+          0)
+        (load root))))
+
+(defn service-dependency-text [(allocator (ptr Allocator))
+                               (dependencies Json)] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut at) 0
+        count (json-array-length dependencies)]
+    (loop (if (>= (load at) count)
+              (break)
+              (do
+                (when (> (load at) 0) (sb-push-str! (mut output) ", ") 0)
+                (sb-push-str! (mut output)
+                              (match-else (json-array-get dependencies (load at))
+                                          (JsonString [value] value)
+                                          (_ "?")))
+                (store! at (+ (load at) 1)))))
+    (sb-finish! (mut output))))
+
+(defn service-view-workflow [(allocator (ptr Allocator))
+                             (status i64)
+                             (body Json)
+                             (unicode bool)] (-> ViewNode)
+  (if (or (< status 200) (>= status 300))
+      (service-view-error allocator body)
+      (let [(mut root) (view-stack allocator 0)
+            workflow-id (service-json-string body "workflow_id")
+            nodes (json-get body "nodes")
+            count (json-array-length nodes)
+            (mut at) 0]
+        (view-stack-push! (mut root)
+                          (view-flow (RolePrimary)
+                                     (if unicode "● " "workflow: ")
+                                     "  "
+                                     (concat-or-empty allocator
+                                                      "Workflow "
+                                                      workflow-id)))
+        (loop (if (>= (load at) count)
+                  (break)
+                  (let [node (json-array-get nodes (load at))
+                        node-id (service-json-string node "node_id")
+                        run-id (service-json-string node "run_id")
+                        state (service-json-string node "status")
+                        dependencies
+                          (service-dependency-text allocator
+                                                   (json-get node "depends_on"))
+                        branch
+                          (if unicode
+                              (if (= (+ (load at) 1) count) "  └─ " "  ├─ ")
+                              "  - ")]
+                    (view-stack-push! (mut root)
+                                      (view-flow (RolePrimary)
+                                                 branch
+                                                 "    "
+                                                 (concat-or-empty allocator
+                                                                  node-id
+                                                                  (concat-or-empty allocator
+                                                                                   "  "
+                                                                                   (concat-or-empty allocator
+                                                                                                    run-id
+                                                                                                    (concat-or-empty allocator
+                                                                                                                     "  "
+                                                                                                                     state))))))
+                    (when (> (slice-len [u8] dependencies) 0)
+                      (view-stack-push! (mut root)
+                                        (view-flow (RoleMuted)
+                                                   "      after "
+                                                   "        "
+                                                   dependencies))
+                      0)
+                    (store! at (+ (load at) 1)))))
+        (load root))))
+
+(defn service-view-generic [(allocator (ptr Allocator))
+                            (status i64)
+                            (body Json)
+                            (unicode bool)] (-> ViewNode)
+  (if (or (< status 200) (>= status 300))
+      (service-view-error allocator body)
+      (let [run-id (service-json-string body "run_id")
+            decision (service-json-string body "decision")
+            text
+              (cond (> (slice-len [u8] decision) 0) (concat-or-empty allocator "Authorization: " decision)
+                    (> (slice-len [u8] run-id) 0) (concat-or-empty allocator "Run accepted: " run-id)
+                    :else "Done")]
+        (view-flow (RoleSuccess) (if unicode "✓ " "ok: ") "  " text))))

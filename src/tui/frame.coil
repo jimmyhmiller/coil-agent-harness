@@ -1,0 +1,134 @@
+(module harness-tui-frame)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.str" :use *)
+
+(defsum StyleRole
+  (RolePrimary [])
+  (RoleMuted [])
+  (RoleSuccess [])
+  (RoleWarning [])
+  (RoleFailure []))
+
+(defstruct FrameSpan
+  [(text (slice u8))
+   (cells i64)
+   (role StyleRole)])
+
+(defstruct FrameLine
+  [(text (slice u8))
+   (cells i64)
+   (role StyleRole)
+   (spans (ArrayList FrameSpan))])
+
+(defstruct Frame
+  [(allocator (ptr Allocator))
+   (lines (ArrayList FrameLine))])
+
+(defn frame-new [(allocator (ptr Allocator))] (-> Frame)
+  (let [frame (alloc/stack Frame)]
+    (store! (field frame allocator) allocator)
+    (store! (field frame lines) (al-new [FrameLine] allocator))
+    (load frame)))
+
+(defn frame-push-line! [(frame (ptr Frame))
+                        (text (slice u8))
+                        (cells i64)
+                        (role StyleRole)] (-> i64)
+  (let [line (alloc/stack FrameLine)]
+    (store! (field line text) text)
+    (store! (field line cells) cells)
+    (store! (field line role) role)
+    (store! (field line spans)
+            (al-new [FrameSpan] (load (field frame allocator))))
+    (let [span (alloc/stack FrameSpan)]
+      (store! (field span text) text)
+      (store! (field span cells) cells)
+      (store! (field span role) role)
+      (al-push! [FrameSpan] (mut (field line spans)) (load span)))
+    (al-push! [FrameLine] (mut (field frame lines)) (load line))
+    (- (al-len [FrameLine] (load (field frame lines))) 1)))
+
+(defn frame-push-spans! [(frame (ptr Frame))
+                         (spans (ref (ArrayList FrameSpan)))] (-> i64)
+  (let [(mut text) (sb-new (load (field frame allocator)))
+        (mut cells) 0
+        (mut at) 0
+        count (al-len [FrameSpan] (load spans))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [span (al-get [FrameSpan] (load spans) (load at))]
+                (sb-push-str! (mut text) (load (field span text)))
+                (store! cells (+ (load cells) (load (field span cells))))
+                (store! at (+ (load at) 1)))))
+    (let [line (alloc/stack FrameLine)]
+      (store! (field line text) (sb-finish! (mut text)))
+      (store! (field line cells) (load cells))
+      (store! (field line role) (RolePrimary))
+      (store! (field line spans) (load spans))
+      (al-push! [FrameLine] (mut (field frame lines)) (load line))
+      (- (al-len [FrameLine] (load (field frame lines))) 1))))
+
+(defn frame-span [(text (slice u8))
+                  (cells i64)
+                  (role StyleRole)] (-> FrameSpan)
+  (let [span (alloc/stack FrameSpan)]
+    (store! (field span text) text)
+    (store! (field span cells) cells)
+    (store! (field span role) role)
+    (load span)))
+
+(defn frame-set-line-spans! [(frame (ptr Frame))
+                             (line-index i64)
+                             (spans (ref (ArrayList FrameSpan)))] (-> i64)
+  (let [line (index (load (field (field frame lines) data)) line-index)
+        (mut text) (sb-new (load (field frame allocator)))
+        (mut cells) 0
+        (mut at) 0
+        count (al-len [FrameSpan] (load spans))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [span (al-get [FrameSpan] (load spans) (load at))]
+                (sb-push-str! (mut text) (load (field span text)))
+                (store! cells (+ (load cells) (load (field span cells))))
+                (store! at (+ (load at) 1)))))
+    (store! (field line text) (sb-finish! (mut text)))
+    (store! (field line cells) (load cells))
+    (store! (field line spans) (load spans))
+    0))
+
+;; Bound a mutable footer to rows the process can continue to address. Committed
+;; transcript frames are never passed through this projection.
+(defn frame-tail-bounded [(allocator (ptr Allocator))
+                          (source (ref Frame))
+                          (maximum i64)] (-> Frame)
+  (let [count (al-len [FrameLine] (load (field source lines)))]
+    (if (or (<= maximum 0) (<= count maximum))
+        (load source)
+        (let [(mut result) (frame-new allocator)
+              kept (if (> maximum 1) (- maximum 1) 0)
+              start (- count kept)
+              (mut at) start]
+          (frame-push-line! (mut result) "  … earlier live output" 23 (RoleMuted))
+          (loop (if (>= (load at) count)
+                    (break)
+                    (do
+                      (let [line
+                              (al-get [FrameLine]
+                                      (load (field source lines))
+                                      (load at))]
+                        (frame-push-line! (mut result)
+                                          (load (field line text))
+                                          (load (field line cells))
+                                          (load (field line role)))
+                        ;; Preserve the source semantic spans in the bounded view.
+                        (let [slot
+                                (index (load (field (field result lines) data))
+                                       (- (al-len [FrameLine]
+                                                  (load (field result lines)))
+                                          1))]
+                          (store! (field slot spans) (load (field line spans))))
+                        0)
+                      (store! at (+ (load at) 1)))))
+          (load result)))))

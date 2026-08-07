@@ -98,10 +98,58 @@ wait_for_status() {
   fail "run $run_id did not reach $wanted: $(tr '\n' ' ' < "$output")"
 }
 
-echo "e2e: verifying deterministic suites"
-coil verify
+echo "e2e: checking the prebuilt harness and deterministic constraints"
+[ -x ./harness ] || fail "./harness is missing; run coil build first"
 sh scripts/check_file_size.sh
-coil build -O1
+
+echo "e2e: verifying optimized background arena and journal ownership"
+coil build integration/json_clone_model_provider_fixture.coil -O1 \
+  -o "$work_dir/json-clone-model-provider"
+"$work_dir/json-clone-model-provider"
+coil build integration/event_journal_background_fixture.coil -O1 \
+  -o "$work_dir/event-journal-background"
+"$work_dir/event-journal-background" "$work_dir/background-events.jsonl"
+
+echo "e2e: verifying inline startup and restoration in a pseudo-terminal"
+python3 scripts/tui_pty_test.py ./harness
+python3 scripts/tui_signal_pty_test.py ./harness
+python3 scripts/tui_suspend_pty_test.py ./harness
+python3 scripts/tui_approval_pty_test.py
+python3 scripts/tui_stream_pty_test.py
+python3 scripts/tui_typing_pty_test.py
+python3 scripts/tui_product_test.py
+python3 scripts/claude_wire_regression_test.py
+python3 scripts/tui_compat_pty_test.py ./harness
+
+echo "e2e: verifying the sequential non-TTY terminal fallback"
+printf '/quit\n' | TERM=dumb NO_COLOR=1 COIL_TUI_UNICODE=always ./harness tui "$work_dir/tui-events.jsonl" \
+  >"$work_dir/tui-plain.out"
+assert_contains "$work_dir/tui-plain.out" 'Coil · auto/auto · /help for commands'
+assert_contains "$work_dir/tui-plain.out" '❯ '
+escape_character=$(printf '\033')
+if grep -F "$escape_character" "$work_dir/tui-plain.out" >/dev/null; then
+  fail "plain TUI output contained an ANSI escape sequence"
+fi
+
+echo "e2e: verifying the explicit --plain terminal fallback"
+printf '/quit\n' | TERM=xterm-256color COIL_TUI_UNICODE=always ./harness tui --plain \
+  "$work_dir/tui-explicit-plain-events.jsonl" >"$work_dir/tui-explicit-plain.out"
+assert_contains "$work_dir/tui-explicit-plain.out" 'Coil · auto/auto · /help for commands'
+if grep -F "$escape_character" "$work_dir/tui-explicit-plain.out" >/dev/null; then
+  fail "explicit plain TUI output contained an ANSI escape sequence"
+fi
+
+echo "e2e: verifying the screen-reader terminal profile"
+printf '/quit\n' | TERM=xterm-256color COIL_TUI_SCREEN_READER=1 ./harness tui \
+  "$work_dir/tui-reader-events.jsonl" >"$work_dir/tui-reader.out"
+assert_contains "$work_dir/tui-reader.out" 'Coil | auto/auto | /help for commands'
+assert_contains "$work_dir/tui-reader.out" '> '
+if grep -F "$escape_character" "$work_dir/tui-reader.out" >/dev/null; then
+  fail "screen-reader TUI output contained an ANSI escape sequence"
+fi
+if grep -F '❯' "$work_dir/tui-reader.out" >/dev/null; then
+  fail "screen-reader TUI output contained the symbolic prompt"
+fi
 
 echo "e2e: exercising authenticated HTTP, idempotency, failure, events, and recovery"
 start_server
@@ -134,6 +182,9 @@ start_server
 wait_for_status e2e-missing failed "$work_dir/recovered-state.json"
 
 if [ "$live_codex" -eq 1 ]; then
+  echo "e2e: exercising the real Codex TUI through a pseudo-terminal"
+  python3 scripts/tui_live_pty_test.py ./harness
+
   echo "e2e: exercising live Codex app-server with gpt-5.6-luna"
   ./harness run codex gpt-5.6-luna 'Reply with exactly OK.' \
     >"$work_dir/codex-cli.out" 2>"$work_dir/codex-cli.events"

@@ -1,0 +1,55 @@
+(module harness-tui-approval-test)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-approval" :use *)
+(import "harness-tui-approval-input" :use *)
+(import "harness-tui-input-editor" :use *)
+
+(defn approval-test-string [(value Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [text] text)
+    (None [] "")))
+
+(deftest approval-is-default-deny-and-explicitly-allows-once
+         (assert (match-else (approval-choice "")
+                             (ApprovalReject [reason]
+                                             (str-eq reason "rejected in terminal"))
+                             (_ false)))
+         (assert (match-else (approval-choice "yes")
+                             (ApprovalAllowOnce [] true)
+                             (_ false))))
+
+(deftest builds-the-versioned-authorization-command-at-the-controller-boundary
+         (let [allocator (malloc-allocator)
+               allowed
+                 (approval-command allocator
+                                   "run-1"
+                                   "auth-1"
+                                   (ApprovalAllowOnce))]
+           (assert (str-eq (approval-test-string allowed "command_id")
+                           "tui-authorization:auth-1"))
+           (assert (str-eq (approval-test-string allowed "run_id") "run-1"))
+           (assert (str-eq (approval-test-string allowed "decision") "allow"))))
+
+(deftest approval-key-intents-are-explicit-and-default-deny
+         (assert (match-else (approval-input-intent (InputInsert "y"))
+                             (ApprovalInputResolve [choice]
+                                                   (match-else choice
+                                                               (ApprovalAllowOnce [] true)
+                                                               (_ false)))
+                             (_ false)))
+         (assert (match-else (approval-input-intent (InputInterrupt))
+                             (ApprovalInputResolve [choice]
+                                                   (match-else choice
+                                                               (ApprovalReject [reason] true)
+                                                               (_ false)))
+                             (_ false)))
+         (assert (match-else (approval-input-intent (InputSuspend))
+                             (ApprovalInputSuspend [] true)
+                             (_ false)))
+         (assert (match-else (approval-input-intent (InputLeft))
+                             (ApprovalInputContinue [] true)
+                             (_ false))))

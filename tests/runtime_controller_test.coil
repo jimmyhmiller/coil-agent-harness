@@ -20,6 +20,23 @@
 (import "provider-common" :use *)
 
 (defstruct ControllerFakeProvider [])
+
+(deftest runtime-default-authorizer-immediately-allows-destructive-tools
+         (let [allocator (malloc-allocator)
+               authorizer
+                 (runtime-authorizer (cast (ptr RuntimeRunController) 0)
+                                     (JsonNull)
+                                     (cast (ptr ModelRequest) 0)
+                                     allocator)
+               spec (alloc/stack ToolSpec)
+               call (alloc/stack ToolCall)]
+           (store! spec (zeroed ToolSpec))
+           (store! call (zeroed ToolCall))
+           (store! (field spec effect) (Destructive))
+           (assert (match (authorize-tool authorizer spec call)
+                     (Authorize [] true)
+                     (Reject [reason] false)))))
+
 (impl ModelProvider ControllerFakeProvider
   (provider-name [(self (ptr ControllerFakeProvider))] (-> (slice u8)) "fake")
   (provider-capabilities [(self (ptr ControllerFakeProvider))]
@@ -41,6 +58,9 @@
   [(provider (ptr ControllerFakeProvider))])
 
 (impl RuntimeProviderFactory ControllerFakeProviderFactory
+  (prepare-runtime-provider [(self (ptr ControllerFakeProviderFactory))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))] (-> i64) 0)
   (resolve-runtime-provider [(self (ptr ControllerFakeProviderFactory))
                              (allocator (ptr Allocator))
                              (provider-name (slice u8))]
@@ -86,6 +106,9 @@
   [(provider (ptr QueuedFakeProvider))])
 
 (impl RuntimeProviderFactory QueuedProviderFactory
+  (prepare-runtime-provider [(self (ptr QueuedProviderFactory))
+                             (allocator (ptr Allocator))
+                             (provider-name (slice u8))] (-> i64) 0)
   (resolve-runtime-provider [(self (ptr QueuedProviderFactory))
                              (allocator (ptr Allocator))
                              (provider-name (slice u8))]
@@ -125,7 +148,7 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
@@ -142,6 +165,19 @@
                  request (runtime-model-request controller command allocator)]
              (assert (str-eq (load (field request run-id)) "controller-run"))
              (assert (str-eq (load (field request instructions)) "test instructions"))
+             (assert (> (str-len (load (field request cache-key))) 0))
+             (let [(mut continued) command]
+               (json-put-string! (mut continued) "previous_response_id" "response-1")
+               (json-put-string! (mut continued)
+                                 "continuation_cache_key"
+                                 (load (field request cache-key)))
+               (let [continued-request
+                       (runtime-model-request controller (load continued) allocator)]
+                 (assert (load (field (field continued-request continuation) present))))
+               (json-put-string! (mut continued) "model" "different-model")
+               (let [invalidated-request
+                       (runtime-model-request controller (load continued) allocator)]
+                 (assert (not (load (field (field invalidated-request continuation) present))))))
              (assert-eq (load (field request timeout-ms)) 5000)
              (assert (> (load (field request deadline-monotonic-ms)) 0))
              (assert (!= (load (field request cancellation))
@@ -203,7 +239,7 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
@@ -230,6 +266,7 @@
                                                 path))
                  (mut first) (controller-command allocator)
                  (mut second) (controller-command allocator)
+                 (mut independent) (controller-command allocator)
                  (mut raced) (controller-command allocator)
                  (mut cancelled) (controller-command allocator)]
              (store! (field controller max-active-runs) 0)
@@ -251,6 +288,8 @@
              (let [(mut dependencies) (json-array allocator)]
                (json-array-push! (mut dependencies) (JsonString "queued-run-one"))
                (json-object-put! (mut second) "depends_on" (load dependencies)))
+             (json-put-string! (mut independent) "run_id" "independent-run")
+             (json-put-string! (mut independent) "provider" "queued-fake")
              (emit-event emitter
                          0
                          (RunCreated)
@@ -269,10 +308,20 @@
                          "queued-fake"
                          "fake-model"
                          (load second))
+             (emit-event emitter
+                         0
+                         (RunCreated)
+                         "independent-run"
+                         "independent-run"
+                         ""
+                         "queued-fake"
+                         "fake-model"
+                         (load independent))
              (assert-eq (start-durable-run controller first) 0)
              (assert-eq (start-durable-run controller second) 0)
+             (assert-eq (start-durable-run controller independent) 0)
              (let [(mut attempt) 0]
-               (loop (if (or (and (= (atomic-load (load (field state calls))) 2)
+               (loop (if (or (and (= (atomic-load (load (field state calls))) 3)
                                   (= (atomic-load (load (field state active))) 0))
                              (>= (load attempt) 300))
                          (break)
@@ -294,7 +343,7 @@
                          (load raced))
              (assert-eq (start-durable-run controller raced) 0)
              (let [(mut attempt) 0]
-               (loop (if (or (= (atomic-load (load (field state calls))) 3)
+               (loop (if (or (= (atomic-load (load (field state calls))) 4)
                              (>= (load attempt) 200))
                          (break)
                          (do
@@ -307,8 +356,8 @@
                        (RunCancellationFailed [] false)))
              (sleep-ms 40)
              (runtime-controller-join-all! controller)
-             (assert-eq (atomic-load (load (field state calls))) 3)
-             (assert-eq (atomic-load (load (field state max-active))) 1)
+             (assert-eq (atomic-load (load (field state calls))) 4)
+             (assert-eq (atomic-load (load (field state max-active))) 2)
              (let [recovery (event-journal-recover allocator path)]
                (assert (load (field recovery ok)))
                (let [first-view (project-run (field recovery events) "queued-run-one")
@@ -334,6 +383,6 @@
                                  0)
                                (store! i (+ (load i) 1)))))
                    (assert (load saw-ready))))))
-           (assert-eq (allocation-domain-live-count) domains-before)
            (authorization-mailbox-close! allocator mailbox)
-           (event-journal-close! journal)))
+           (event-journal-close! journal)
+           (assert-eq (allocation-domain-live-count) domains-before)))

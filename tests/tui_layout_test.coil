@@ -1,0 +1,115 @@
+(module harness-tui-layout-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-layout" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-model" :use *)
+(import "harness-tui-render-plain" :use *)
+(import "provider-common" :use *)
+
+(deftest lays-out-a-semantic-transcript-without-ansi-or-operation-ids
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut arguments) (json-object allocator)
+               options (layout-options 40 true false)]
+           (json-put-string! (mut arguments) "command" "ls")
+           (presentation-apply-action! (mut model) (AppendAssistant "model-secret" "I’ll inspect the root."))
+           (presentation-apply-action! (mut model) (FinishAssistant "model-secret"))
+           (presentation-apply-action! (mut model)
+                                       (ProposeTool "tool-secret" "bash" (load arguments)))
+           (presentation-apply-action! (mut model) (StartTool "tool-secret" "bash"))
+           (presentation-apply-action! (mut model)
+                                       (FinishTool "tool-secret" (JsonString "done")))
+           (let [(mut frame) (layout-model-range allocator (mut model) 0 2 options)
+                 text (render-frame-plain allocator (mut frame))
+                 tool-line (al-get [FrameLine] (load (field frame lines)) 1)]
+             (assert (str-eq text
+                             "● I’ll inspect the root.\n  ⏺ Bash  ls  done\n"))
+             (assert (= (al-len [FrameSpan] (load (field tool-line spans))) 3))
+             (let [status-span
+                     (al-get [FrameSpan]
+                             (load (field tool-line spans))
+                             2)]
+               (assert (match-else (load (field status-span role))
+                                   (RoleSuccess [] true)
+                                   (_ false)))))))
+
+(deftest wraps-by-display-cells-and-preserves-continuation-indentation
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               options (layout-options 12 true false)]
+           (presentation-apply-action! (mut model)
+                                       (AppendAssistant "model-1" "ab界🙂cdefgh"))
+           (let [(mut frame) (layout-model-range allocator (mut model) 0 1 options)
+                 text (render-frame-plain allocator (mut frame))
+                 first-line (al-get [FrameLine] (load (field frame lines)) 0)]
+             (assert (str-eq text "● ab界🙂cdef\n  gh\n"))
+             (assert (= (load (field first-line cells)) 12)))))
+
+(deftest visibly-escapes-controls-and-replaces-malformed-utf8
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               malformed (alloc/stack (array u8 3))
+               options (layout-options 40 false false)]
+           (store! (index malformed 0) (cast u8 65))
+           (store! (index malformed 1) (cast u8 27))
+           (store! (index malformed 2) (cast u8 192))
+           (presentation-apply-action! (mut model)
+                                       (AppendAssistant "model-1" (slice-new [u8] (index malformed 0) 3)))
+           (let [(mut frame) (layout-model-range allocator (mut model) 0 1 options)
+                 text (render-frame-plain allocator (mut frame))]
+             (assert (str-eq text "assistant: A\\x1B�\n")))))
+
+(deftest keeps-every-rendered-line-within-the-requested-width-matrix
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               widths (alloc/stack (array i64 3))]
+           (store! (index widths 0) 12)
+           (store! (index widths 1) 40)
+           (store! (index widths 2) 120)
+           (presentation-apply-action! (mut model)
+                                       (AppendAssistant "model-1"
+                                                        "A long Unicode response with combining é, CJK 界, and emoji 🙂 that must wrap safely."))
+           (let [(mut width-at) 0]
+             (loop (if (>= (load width-at) 3)
+                       (break)
+                       (let [width (load (index widths (load width-at)))
+                             options (layout-options width true false)
+                             (mut frame) (layout-model-range allocator (mut model) 0 1 options)
+                             (mut line-at) 0
+                             count (al-len [FrameLine] (load (field frame lines)))]
+                         (loop (if (>= (load line-at) count)
+                                   (break)
+                                   (let [line
+                                           (al-get [FrameLine]
+                                                   (load (field frame lines))
+                                                   (load line-at))]
+                                     (assert (<= (load (field line cells)) width))
+                                     (store! line-at (+ (load line-at) 1)))))
+                         (store! width-at (+ (load width-at) 1))))))))
+
+(deftest compact-and-verbose-profiles-change-detail-without-changing-the-model
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut arguments) (json-object allocator)
+               (mut result) (json-object allocator)]
+           (json-put-string! (mut arguments) "command" "pwd")
+           (json-object-put! (mut result) "exit_code" (json-integer allocator 0))
+           (presentation-apply-action! (mut model)
+                                       (ProposeTool "tool-1" "bash" (load arguments)))
+           (presentation-apply-action! (mut model)
+                                       (FinishTool "tool-1" (load result)))
+           (let [compact-options (layout-options-profile 80 true true false)
+                 verbose-options (layout-options-profile 80 true false true)
+                 (mut compact) (layout-model-range allocator (mut model) 0 1 compact-options)
+                 (mut verbose) (layout-model-range allocator (mut model) 0 1 verbose-options)
+                 compact-text (render-frame-plain allocator (mut compact))
+                 verbose-text (render-frame-plain allocator (mut verbose))]
+             (assert (str-eq compact-text "  ⏺ Bash  pwd\n"))
+             (assert (str-eq verbose-text
+                             "  ⏺ Bash  pwd  done\n    arguments: {\"command\":\"pwd\"}\n    result: {\"exit_code\":0}\n")))))

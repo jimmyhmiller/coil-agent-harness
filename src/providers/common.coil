@@ -158,11 +158,34 @@
     (store! (field response provider) "")
     (store! (field response model) "")
     (store! (field response response-id) "")
+    (store! (field response provider-session-id) "")
     (store! (field response output-text) "")
     (store! (field response tool-calls) (al-new [ToolCall] allocator))
     (store! (field response usage) (usage-empty))
     (store! (field response raw-output) (JsonNull))
     (load response)))
+
+(defn model-completion-payload [(allocator (ptr Allocator))
+                                (request (ptr ModelRequest))
+                                (response (ptr ModelResponse))] (-> Json)
+  (let [(mut usage) (json-object allocator)
+        (mut payload) (json-object allocator)]
+    (json-put-string! (mut payload) "response_id" (load (field response response-id)))
+    (json-put-string! (mut payload)
+                      "provider_session_id"
+                      (load (field response provider-session-id)))
+    (json-put-string! (mut payload) "cache_key" (load (field request cache-key)))
+    (json-object-put! (mut usage) "input_tokens"
+                      (json-integer allocator (load (field (field response usage) input-tokens))))
+    (json-object-put! (mut usage) "output_tokens"
+                      (json-integer allocator (load (field (field response usage) output-tokens))))
+    (json-object-put! (mut usage) "reasoning_tokens"
+                      (json-integer allocator (load (field (field response usage) reasoning-tokens))))
+    (json-object-put! (mut usage) "cached_input_tokens"
+                      (json-integer allocator
+                                    (load (field (field response usage) cached-input-tokens))))
+    (json-object-put! (mut payload) "usage" (load usage))
+    (load payload)))
 
 (defn model-failure [(provider (slice u8))
                      (status i64)

@@ -1,0 +1,507 @@
+(module harness-tui-model)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+
+(const PRESENTATION_ASSISTANT_TEXT_LIMIT 1048576)
+(const PRESENTATION_TRUNCATION_NOTICE "\n[output truncated]")
+
+;; Terminal-independent kinds and states. Renderers decide how these concepts look;
+;; journal adapters decide which wire events produce them.
+(defsum PresentationKind
+  (UserBlock [])
+  (AssistantBlock [])
+  (ToolBlock [])
+  (ApprovalBlock [])
+  (AgentBlock [])
+  (WorkflowBlock [])
+  (ErrorBlock []))
+
+(defsum PresentationState
+  (PresentationPending [])
+  (PresentationRunning [])
+  (PresentationSucceeded [])
+  (PresentationFailed [])
+  (PresentationRejected [])
+  (PresentationCancelled []))
+
+(defstruct PresentationBlock
+  [(id (slice u8))
+   (kind PresentationKind)
+   (state PresentationState)
+   (title (slice u8))
+   (body (slice u8))
+   (arguments Json)
+   (result Json)
+   (detail (slice u8))])
+
+(defstruct PresentationModel
+  [(allocator (ptr Allocator))
+   (blocks (ArrayList PresentationBlock))
+   (last-sequence i64)
+   (terminal bool)])
+
+;; Adapter output is semantic and contains no color, indentation, cursor position, or
+;; terminal-width decisions.
+(defsum PresentationAction
+  (IgnoreEvent [])
+  (SubmitUser [(id (slice u8)) (text (slice u8))])
+  (StartAssistant [(id (slice u8))])
+  (AppendAssistant [(id (slice u8)) (text (slice u8))])
+  (FinishAssistant [(id (slice u8))])
+  (FailAssistant [(id (slice u8)) (detail (slice u8))])
+  (ProposeTool [(id (slice u8)) (name (slice u8)) (arguments Json)])
+  (StartTool [(id (slice u8)) (name (slice u8))])
+  (FinishTool [(id (slice u8)) (result Json)])
+  (FailTool [(id (slice u8)) (detail (slice u8))])
+  (RejectTool [(id (slice u8)) (detail (slice u8))])
+  (RequestApproval [(id (slice u8))
+                    (tool (slice u8))
+                    (effect (slice u8))
+                    (arguments Json)])
+  (DecideApproval [(id (slice u8)) (allowed bool) (detail (slice u8))])
+  (DelegateAgent [(id (slice u8))])
+  (FinishAgent [(id (slice u8))])
+  (FailAgent [(id (slice u8)) (detail (slice u8))])
+  (CancelAgent [(id (slice u8))])
+  (ReadyWorkflowNode [(id (slice u8))])
+  (FailRun [(id (slice u8)) (detail (slice u8))])
+  (CancelRun [(id (slice u8))]))
+
+(defn presentation-model-new [(allocator (ptr Allocator))] (-> PresentationModel)
+  (let [model (alloc/stack PresentationModel)]
+    (store! (field model allocator) allocator)
+    (store! (field model blocks) (al-new [PresentationBlock] allocator))
+    (store! (field model last-sequence) 0)
+    (store! (field model terminal) false)
+    (load model)))
+
+(defn presentation-block-index [(model (ptr PresentationModel))
+                                (id (slice u8))
+                                (kind PresentationKind)] (-> i64)
+  (let [(mut found) -1
+        (mut i) 0
+        count (al-len [PresentationBlock] (load (field model blocks)))]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [block
+                      (al-get [PresentationBlock]
+                              (load (field model blocks))
+                              (load i))]
+                (when (and (str-eq (load (field block id)) id)
+                           (match kind
+                             (UserBlock []
+                                        (match-else (load (field block kind))
+                                                    (UserBlock [] true)
+                                                    (_ false)))
+                             (AssistantBlock []
+                                             (match-else (load (field block kind))
+                                                         (AssistantBlock [] true)
+                                                         (_ false)))
+                             (ToolBlock []
+                                        (match-else (load (field block kind))
+                                                    (ToolBlock [] true)
+                                                    (_ false)))
+                             (ApprovalBlock []
+                                            (match-else (load (field block kind))
+                                                        (ApprovalBlock [] true)
+                                                        (_ false)))
+                             (AgentBlock []
+                                         (match-else (load (field block kind))
+                                                     (AgentBlock [] true)
+                                                     (_ false)))
+                             (WorkflowBlock []
+                                            (match-else (load (field block kind))
+                                                        (WorkflowBlock [] true)
+                                                        (_ false)))
+                             (ErrorBlock []
+                                         (match-else (load (field block kind))
+                                                     (ErrorBlock [] true)
+                                                     (_ false)))))
+                  (store! found (load i))
+                  (break))
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+(defn presentation-push! [(model (ptr PresentationModel))
+                          (id (slice u8))
+                          (kind PresentationKind)
+                          (state PresentationState)
+                          (title (slice u8))
+                          (body (slice u8))
+                          (arguments Json)
+                          (result Json)
+                          (detail (slice u8))] (-> i64)
+  (let [block (alloc/stack PresentationBlock)]
+    (store! (field block id) (json-copy-string (load (field model allocator)) id))
+    (store! (field block kind) kind)
+    (store! (field block state) state)
+    (store! (field block title) (json-copy-string (load (field model allocator)) title))
+    (store! (field block body) (json-copy-string (load (field model allocator)) body))
+    (store! (field block arguments)
+            (json-clone (load (field model allocator)) arguments))
+    (store! (field block result)
+            (json-clone (load (field model allocator)) result))
+    (store! (field block detail) (json-copy-string (load (field model allocator)) detail))
+    (al-push! [PresentationBlock] (mut (field model blocks)) (load block))
+    (- (al-len [PresentationBlock] (load (field model blocks))) 1)))
+
+(defn presentation-block-slot [(model (ptr PresentationModel))
+                               (index-value i64)] (-> (ptr PresentationBlock))
+  (index (load (field (field model blocks) data)) index-value))
+
+(defn presentation-append [(allocator (ptr Allocator))
+                           (left (slice u8))
+                           (right (slice u8))] (-> (slice u8))
+  (let [(mut builder) (sb-new allocator)]
+    (sb-push-str! (mut builder) left)
+    (sb-push-str! (mut builder) right)
+    (sb-finish! (mut builder))))
+
+(defn presentation-utf8-boundary [(text (slice u8)) (candidate i64)] (-> i64)
+  (let [(mut end) candidate]
+    (loop (if (or (<= (load end) 0)
+                  (or (>= (load end) (slice-len [u8] text))
+                      (let [byte (cast i64 (slice-get [u8] text (load end)))]
+                        (or (< byte 128) (> byte 191)))))
+              (break)
+              (store! end (- (load end) 1))))
+    (load end)))
+
+(defn presentation-append-bounded [(allocator (ptr Allocator))
+                                   (left (slice u8))
+                                   (right (slice u8))
+                                   (limit i64)] (-> (slice u8))
+  (let [left-count (slice-len [u8] left)
+        right-count (slice-len [u8] right)
+        notice-count (slice-len [u8] PRESENTATION_TRUNCATION_NOTICE)]
+    (cond (>= left-count limit) left
+          (<= (+ left-count right-count) limit) (presentation-append allocator left right)
+          :else
+            (let [available
+                    (if (> limit (+ left-count notice-count))
+                        (- (- limit left-count) notice-count)
+                        0)
+                  end
+                    (presentation-utf8-boundary right
+                                                (if (> available right-count)
+                                                    right-count
+                                                    available))
+                  (mut builder) (sb-new allocator)]
+              (sb-push-str! (mut builder) left)
+              (when (> end 0)
+                (sb-push-str! (mut builder) (subslice [u8] right 0 end))
+                0)
+              (when (<= (+ left-count notice-count) limit)
+                (sb-push-str! (mut builder) PRESENTATION_TRUNCATION_NOTICE)
+                0)
+              (sb-finish! (mut builder))))))
+
+;; A terminal run event closes every still-open child block. Keeping those blocks
+;; running would be a false semantic state and would also prevent the transcript
+;; policy from committing the terminal result.
+(defn presentation-terminalize-open! [(model (ptr PresentationModel))
+                                      (state PresentationState)
+                                      (detail (slice u8))] (-> i64)
+  (let [(mut at) 0
+        count (al-len [PresentationBlock] (load (field model blocks)))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [block (presentation-block-slot model (load at))
+                    open
+                      (match (load (field block state))
+                        (PresentationPending [] true)
+                        (PresentationRunning [] true)
+                        (PresentationSucceeded [] false)
+                        (PresentationFailed [] false)
+                        (PresentationRejected [] false)
+                        (PresentationCancelled [] false))]
+                (when open
+                  (store! (field block state) state)
+                  (when (and (> (slice-len [u8] detail) 0)
+                             (= (slice-len [u8] (load (field block detail))) 0))
+                    (store! (field block detail)
+                            (json-copy-string (load (field model allocator)) detail))
+                    0)
+                  0)
+                (store! at (+ (load at) 1)))))
+    0))
+
+(defn presentation-apply-action! [(model (ptr PresentationModel))
+                                  (action PresentationAction)] (-> i64)
+  (match action
+    (IgnoreEvent [] 0)
+    (SubmitUser [id text]
+                (if (< (presentation-block-index model id (UserBlock)) 0)
+                    (presentation-push! model
+                                        id
+                                        (UserBlock)
+                                        (PresentationSucceeded)
+                                        "user"
+                                        text
+                                        (JsonNull)
+                                        (JsonNull)
+                                        "")
+                    0))
+    (StartAssistant [id]
+                    (if (< (presentation-block-index model id (AssistantBlock)) 0)
+                        (presentation-push! model
+                                            id
+                                            (AssistantBlock)
+                                            (PresentationRunning)
+                                            "assistant"
+                                            ""
+                                            (JsonNull)
+                                            (JsonNull)
+                                            "")
+                        0))
+    (AppendAssistant [id text]
+                     (let [found (presentation-block-index model id (AssistantBlock))
+                           at
+                             (if (< found 0)
+                                 (presentation-push! model
+                                                     id
+                                                     (AssistantBlock)
+                                                     (PresentationRunning)
+                                                     "assistant"
+                                                     ""
+                                                     (JsonNull)
+                                                     (JsonNull)
+                                                     "")
+                                 found)
+                           block (presentation-block-slot model at)]
+                       (store! (field block body)
+                               (presentation-append-bounded (load (field model allocator))
+                                                            (load (field block body))
+                                                            text
+                                                            PRESENTATION_ASSISTANT_TEXT_LIMIT))
+                       0))
+    (FinishAssistant [id]
+                     (let [found (presentation-block-index model id (AssistantBlock))]
+                       (when (>= found 0)
+                         (store! (field (presentation-block-slot model found) state)
+                                 (PresentationSucceeded))
+                         0)
+                       0))
+    (FailAssistant [id detail]
+                   (let [found (presentation-block-index model id (AssistantBlock))
+                         at
+                           (if (< found 0)
+                               (presentation-push! model
+                                                   id
+                                                   (AssistantBlock)
+                                                   (PresentationFailed)
+                                                   "assistant"
+                                                   ""
+                                                   (JsonNull)
+                                                   (JsonNull)
+                                                   detail)
+                               found)
+                         block (presentation-block-slot model at)]
+                     (store! (field block state) (PresentationFailed))
+                     (store! (field block detail)
+                             (json-copy-string (load (field model allocator)) detail))
+                     0))
+    (ProposeTool [id name arguments]
+                 (let [found (presentation-block-index model id (ToolBlock))]
+                   (if (< found 0)
+                       (presentation-push! model
+                                           id
+                                           (ToolBlock)
+                                           (PresentationPending)
+                                           name
+                                           ""
+                                           arguments
+                                           (JsonNull)
+                                           "")
+                       (let [block (presentation-block-slot model found)]
+                         (store! (field block title)
+                                 (json-copy-string (load (field model allocator)) name))
+                         (store! (field block arguments)
+                                 (json-clone (load (field model allocator)) arguments))
+                         0))))
+    (StartTool [id name]
+               (let [found (presentation-block-index model id (ToolBlock))]
+                 (if (< found 0)
+                     (presentation-push! model
+                                         id
+                                         (ToolBlock)
+                                         (PresentationRunning)
+                                         name
+                                         ""
+                                         (JsonNull)
+                                         (JsonNull)
+                                         "")
+                     (let [block (presentation-block-slot model found)]
+                       (store! (field block title)
+                               (json-copy-string (load (field model allocator)) name))
+                       (store! (field block state) (PresentationRunning))
+                       0))))
+    (FinishTool [id result]
+                (let [found (presentation-block-index model id (ToolBlock))
+                      at
+                        (if (< found 0)
+                            (presentation-push! model
+                                                id
+                                                (ToolBlock)
+                                                (PresentationSucceeded)
+                                                "tool"
+                                                ""
+                                                (JsonNull)
+                                                result
+                                                "")
+                            found)
+                      block (presentation-block-slot model at)]
+                  (store! (field block state) (PresentationSucceeded))
+                  (store! (field block result)
+                          (json-clone (load (field model allocator)) result))
+                  0))
+    (FailTool [id detail]
+              (let [found (presentation-block-index model id (ToolBlock))
+                    at
+                      (if (< found 0)
+                          (presentation-push! model
+                                              id
+                                              (ToolBlock)
+                                              (PresentationFailed)
+                                              "tool"
+                                              ""
+                                              (JsonNull)
+                                              (JsonNull)
+                                              detail)
+                          found)
+                    block (presentation-block-slot model at)]
+                (store! (field block state) (PresentationFailed))
+                (store! (field block detail)
+                        (json-copy-string (load (field model allocator)) detail))
+                0))
+    (RejectTool [id detail]
+                (let [found (presentation-block-index model id (ToolBlock))
+                      at
+                        (if (< found 0)
+                            (presentation-push! model
+                                                id
+                                                (ToolBlock)
+                                                (PresentationRejected)
+                                                "tool"
+                                                ""
+                                                (JsonNull)
+                                                (JsonNull)
+                                                detail)
+                            found)
+                      block (presentation-block-slot model at)]
+                  (store! (field block state) (PresentationRejected))
+                  (store! (field block detail)
+                          (json-copy-string (load (field model allocator)) detail))
+                  0))
+    (RequestApproval [id tool effect arguments]
+                     (let [found (presentation-block-index model id (ApprovalBlock))
+                           at
+                             (if (< found 0)
+                                 (presentation-push! model
+                                                     id
+                                                     (ApprovalBlock)
+                                                     (PresentationPending)
+                                                     tool
+                                                     effect
+                                                     arguments
+                                                     (JsonNull)
+                                                     "")
+                                 found)
+                           block (presentation-block-slot model at)]
+                       (store! (field block title)
+                               (json-copy-string (load (field model allocator)) tool))
+                       (store! (field block body)
+                               (json-copy-string (load (field model allocator)) effect))
+                       (store! (field block arguments)
+                               (json-clone (load (field model allocator)) arguments))
+                       0))
+    (DecideApproval [id allowed detail]
+                    (let [found (presentation-block-index model id (ApprovalBlock))]
+                      (when (>= found 0)
+                        (let [block (presentation-block-slot model found)]
+                          (store! (field block state)
+                                  (if allowed (PresentationSucceeded) (PresentationRejected)))
+                          (store! (field block detail)
+                                  (json-copy-string (load (field model allocator)) detail))
+                          0))
+                      0))
+    (DelegateAgent [id]
+                   (presentation-push! model
+                                       id
+                                       (AgentBlock)
+                                       (PresentationRunning)
+                                       "subagent"
+                                       ""
+                                       (JsonNull)
+                                       (JsonNull)
+                                       ""))
+    (FinishAgent [id]
+                 (let [found (presentation-block-index model id (AgentBlock))]
+                   (when (>= found 0)
+                     (store! (field (presentation-block-slot model found) state)
+                             (PresentationSucceeded))
+                     0)
+                   0))
+    (FailAgent [id detail]
+               (let [found (presentation-block-index model id (AgentBlock))]
+                 (when (>= found 0)
+                   (let [block (presentation-block-slot model found)]
+                     (store! (field block state) (PresentationFailed))
+                     (store! (field block detail)
+                             (json-copy-string (load (field model allocator)) detail)))
+                   0)
+                 0))
+    (CancelAgent [id]
+                 (let [found (presentation-block-index model id (AgentBlock))]
+                   (when (>= found 0)
+                     (store! (field (presentation-block-slot model found) state)
+                             (PresentationCancelled))
+                     0)
+                   0))
+    (ReadyWorkflowNode [id]
+                       (presentation-push! model
+                                           id
+                                           (WorkflowBlock)
+                                           (PresentationSucceeded)
+                                           "workflow node"
+                                           "ready"
+                                           (JsonNull)
+                                           (JsonNull)
+                                           ""))
+    (FailRun [id detail]
+             (do
+               (presentation-terminalize-open! model
+                                               (PresentationFailed)
+                                               detail)
+               (presentation-push! model
+                                   id
+                                   (ErrorBlock)
+                                   (PresentationFailed)
+                                   "error"
+                                   ""
+                                   (JsonNull)
+                                   (JsonNull)
+                                   detail)
+               (store! (field model terminal) true)
+               0))
+    (CancelRun [id]
+               (do
+                 (presentation-terminalize-open! model
+                                                 (PresentationCancelled)
+                                                 "run cancelled")
+                 (presentation-push! model
+                                     id
+                                     (ErrorBlock)
+                                     (PresentationCancelled)
+                                     "cancelled"
+                                     ""
+                                     (JsonNull)
+                                     (JsonNull)
+                                     "run cancelled")
+                 (store! (field model terminal) true)
+                 0))))

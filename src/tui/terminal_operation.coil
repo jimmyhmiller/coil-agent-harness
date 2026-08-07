@@ -1,0 +1,20 @@
+(module harness-tui-terminal-operation)
+
+(import "harness-tui-frame" :use *)
+
+;; Renderer output is data. Only the terminal driver interprets these operations.
+(defsum TerminalOperation
+  (TerminalWrite [(text (slice u8))])
+  (TerminalLineBreak [])
+  (TerminalCarriageReturn [])
+  (TerminalCursorUp [(rows i64)])
+  (TerminalCursorDown [(rows i64)])
+  (TerminalCursorRight [(columns i64)])
+  (TerminalEraseLine [])
+  (TerminalClearScreen [])
+  (TerminalSetRole [(role StyleRole)])
+  (TerminalResetStyle [])
+  (TerminalHideCursor [])
+  (TerminalShowCursor [])
+  (TerminalEnableBracketedPaste [])
+  (TerminalDisableBracketedPaste []))

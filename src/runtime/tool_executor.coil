@@ -3,6 +3,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.region" :as region)
 (import "coil.slice" :use *)
 (import "coil.thread" :use *)
 (import "harness-event" :use *)
@@ -27,7 +28,8 @@
 (defstruct ToolExecutionBatch [(results (ArrayList ToolResult))])
 
 (defstruct ToolJob
-  [(run-id (slice u8))
+  [(run-allocator (ptr Allocator))
+   (run-id (slice u8))
    (parent-operation-id (slice u8))
    (provider (slice u8))
    (model (slice u8))
@@ -66,14 +68,26 @@
               model
               payload))
 
+;; The proposal is the authoritative immutable description of a tool call. Later
+;; lifecycle and authorization events reference the same operation ID and do not need
+;; to duplicate or reconstruct these facts.
+(defn tool-proposal-payload [(allocator (ptr Allocator))
+                             (call (ref ToolCall))] (-> Json)
+  (let [(mut payload) (json-object allocator)]
+    (json-object-put! (mut payload) "name" (JsonString (load (field call name))))
+    (json-object-put! (mut payload) "arguments" (load (field call arguments)))
+    (load payload)))
+
 (defn tool-job-run [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr ToolJob) opaque)
+        call-region (alloc/stack region/Region)
         call (field job call)
         definition (field job definition)
         result-slot
           (index (load (field job results-data))
                  (load (field job result-index)))
         started (now-ms)]
+    (region/region-init call-region (load (field job run-allocator)))
     (tool-event (load (field job emitter))
                 (ToolCallStarted)
                 (load (field job run-id))
@@ -91,7 +105,7 @@
                 (execute-tool (load (field definition implementation))
                               call
                               (field job context)
-                              (malloc-allocator)))
+                              (region/region-allocator call-region)))
           finished (now-ms)]
       (let [stop-after (tool-context-stop-reason (field job context))]
         (when (> (slice-len [u8] stop-after) 0)
@@ -101,28 +115,32 @@
       (store! (field executed call-id) (load (field call id)))
       (store! (field executed started-at-ms) started)
       (store! (field executed finished-at-ms) finished)
-      (store! result-slot (load executed))
-      (match (load (field executed status))
-        (ToolSucceeded []
+      (let [promoted
+              (tool-result-clone-into (load (field job run-allocator))
+                                      (load executed))]
+        (region/region-close! call-region)
+        (store! result-slot promoted)
+        (match (load (field promoted status))
+          (ToolSucceeded []
+                         (tool-event (load (field job emitter))
+                                     (ToolCallCompleted)
+                                     (load (field job run-id))
+                                     (load (field job parent-operation-id))
+                                     (load (field job provider))
+                                     (load (field job model))
+                                     (load call)
+                                     (load (field promoted output))))
+          (ToolErrored []
                        (tool-event (load (field job emitter))
-                                   (ToolCallCompleted)
+                                   (ToolCallFailed)
                                    (load (field job run-id))
                                    (load (field job parent-operation-id))
                                    (load (field job provider))
                                    (load (field job model))
                                    (load call)
-                                   (load (field executed output))))
-        (ToolErrored []
-                     (tool-event (load (field job emitter))
-                                 (ToolCallFailed)
-                                 (load (field job run-id))
-                                 (load (field job parent-operation-id))
-                                 (load (field job provider))
-                                 (load (field job model))
-                                 (load call)
-                                 (JsonString (load (field executed error)))))
-        (ToolDenied [] 0)
-        (ToolUnknown [] 0)))
+                                   (JsonString (load (field promoted error)))))
+          (ToolDenied [] 0)
+          (ToolUnknown [] 0))))
     (cast (ptr i8) 0)))
 
 (defn denied-result [(call ToolCall) (reason (slice u8))] (-> ToolResult)
@@ -139,7 +157,8 @@
 
 ;; Execute all authorized calls, using at most `max-parallel` worker threads. Results
 ;; retain input order even though completion events reflect actual completion order.
-;; Handlers receive the process-wide malloc allocator, which is concurrency-safe.
+;; Each handler receives a thread-confined child region. Only the deeply promoted
+;; ToolResult survives in the synchronized run allocator after the worker joins.
 (defn execute-tools-parallel [(allocator (ptr Allocator)) (request (ptr ToolExecutionRequest))] (-> ToolExecutionBatch)
   (let [(mut results) (al-new [ToolResult] allocator)
         (mut jobs) (al-new [ToolJob] allocator)
@@ -161,7 +180,7 @@
                             (load (field request provider))
                             (load (field request model))
                             call
-                            (JsonString (load (field call name))))
+                            (tool-proposal-payload allocator call))
                 (match (tool-find (load (load (field request registry)))
                                   (load (field call name)))
                   (None []
@@ -214,6 +233,7 @@
                                                       (JsonString reason))))
                                 (Authorize []
                                            (let [job (alloc/stack ToolJob)]
+                                             (store! (field job run-allocator) allocator)
                                              (store! (field job run-id) (load (field request run-id)))
                                              (store! (field job parent-operation-id)
                                                      (load (field request parent-operation-id)))
@@ -221,6 +241,8 @@
                                              (store! (field job model) (load (field request model)))
                                              (store! (field job call) call)
                                              (store! (field job definition) selected)
+                                             (store! (field (field job context) run-id)
+                                                     (load (field request run-id)))
                                              (store! (field (field job context) cancellation)
                                                      (load (field request cancellation)))
                                              (store! (field (field job context)

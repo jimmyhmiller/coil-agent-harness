@@ -3,6 +3,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
+(import "coil.cancellation" :as native-cancellation)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
 (import "coil.slice" :use *)
@@ -22,22 +23,40 @@
     (Reversible [] "reversible")
     (Destructive [] "destructive")))
 
-(defstruct CancellationToken [(requested i64)])
+(defstruct CancellationToken
+  [(native native-cancellation/Cancellation)
+   (initialized bool)])
 
 (defn cancellation-token-new [(allocator (ptr Allocator))] (-> (ptr CancellationToken))
-  (box allocator CancellationToken (zeroed CancellationToken)))
+  (let [token (box allocator CancellationToken (zeroed CancellationToken))]
+    (match (native-cancellation/cancellation-init (field token native))
+      (Ok [opened] (store! (field token initialized) true))
+      (Err [failure] (store! (field token initialized) false)))
+    token))
 
 (defn cancellation-request! [(token (ptr CancellationToken))] (-> i64)
   (if (= token (cast (ptr CancellationToken) 0))
       0
-      (atomic-store (field token requested) 1)))
+      (if (load (field token initialized))
+          (native-cancellation/cancellation-request! (field token native))
+          0)))
 
 (defn cancellation-requested? [(token (ptr CancellationToken))] (-> bool)
   (and (!= token (cast (ptr CancellationToken) 0))
-       (= (atomic-load (field token requested)) 1)))
+       (and (load (field token initialized))
+            (native-cancellation/cancellation-requested? (field token native)))))
+
+(defn cancellation-token-close! [(token (ptr CancellationToken))] (-> i64)
+  (if (or (= token (cast (ptr CancellationToken) 0))
+          (not (load (field token initialized))))
+      0
+      (do
+        (store! (field token initialized) false)
+        (native-cancellation/cancellation-close! (field token native)))))
 
 (defstruct ToolExecutionContext
-  [(cancellation (ptr CancellationToken))
+  [(run-id (slice u8))
+   (cancellation (ptr CancellationToken))
    (run-deadline-monotonic-ms i64)
    (tool-deadline-monotonic-ms i64)])
 
@@ -98,7 +117,7 @@
                    (call (ptr ToolCall))]
                   (-> AuthorizationDecision)))
 
-(defstruct AllowAllAuthorizer [])
+(defstruct AllowAllAuthorizer [(reserved u8)])
 
 (impl ToolAuthorizer AllowAllAuthorizer
   (authorize-tool [(self (ptr AllowAllAuthorizer))
@@ -151,6 +170,35 @@
     (store! (field result error) "")
     (store! (field result started-at-ms) 0)
     (store! (field result finished-at-ms) 0)
+    (load result)))
+
+;; Promotion helpers make arena crossings explicit. A copied tagged Json value is
+;; still a borrow; these functions recursively own every retained field in `target`.
+(defn tool-call-clone-into [(target (ptr Allocator))
+                            (source ToolCall)] (-> ToolCall)
+  (let [result (alloc/stack ToolCall)]
+    (store! (field result id)
+            (json-copy-string target (load (field source id))))
+    (store! (field result name)
+            (json-copy-string target (load (field source name))))
+    (store! (field result arguments)
+            (json-clone target (load (field source arguments))))
+    (store! (field result raw-arguments)
+            (json-copy-string target (load (field source raw-arguments))))
+    (load result)))
+
+(defn tool-result-clone-into [(target (ptr Allocator))
+                              (source ToolResult)] (-> ToolResult)
+  (let [result (alloc/stack ToolResult)]
+    (store! (field result call-id)
+            (json-copy-string target (load (field source call-id))))
+    (store! (field result status) (load (field source status)))
+    (store! (field result output)
+            (json-clone target (load (field source output))))
+    (store! (field result error)
+            (json-copy-string target (load (field source error))))
+    (store! (field result started-at-ms) (load (field source started-at-ms)))
+    (store! (field result finished-at-ms) (load (field source finished-at-ms)))
     (load result)))
 
 ;; Validate the cross-provider subset required by strict function tools. Provider

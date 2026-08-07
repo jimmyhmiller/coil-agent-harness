@@ -21,6 +21,7 @@
   (RunCancellationFailed []))
 
 (deftrait RunController [Self]
+  (prepare-durable-provider [(self (ptr Self)) (provider-name (slice u8))] (-> i64))
   (start-durable-run [(self (ptr Self)) (command (ptr Json))] (-> i64))
   (cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> RunCancellationResult)))
 
@@ -40,6 +41,10 @@
    (principal (slice u8))
    (can-observe bool)
    (can-control bool)])
+
+(defn service-prepare-provider! [(service (ptr RunService))
+                                 (provider-name (slice u8))] (-> i64)
+  (prepare-durable-provider (load (field service controller)) provider-name))
 
 ;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
 ;; by value through a trait object is not ABI-stable across Coil backends.
@@ -82,16 +87,21 @@
 
 (defn service-command-agent! [(allocator (ptr Allocator))
                               (command (mut Json))] (-> i64)
-  (let [run-id (command-string (load command) "run_id")
-        parent-run-id (command-string (load command) "parent_run_id")
-        actor (command-string (load command) "actor")
+  ;; Snapshot every borrowed command string before mutating the object. JSON
+  ;; strings are slices, so retaining views into a mutable aggregate across
+  ;; object insertions makes their lifetime and aliasing optimizer-dependent.
+  (let [run-id (json-copy-string allocator (command-string (load command) "run_id"))
+        parent-run-id
+          (json-copy-string allocator
+                            (command-string (load command) "parent_run_id"))
+        actor (json-copy-string allocator (command-string (load command) "actor"))
+        command-id
+          (json-copy-string allocator
+                            (command-string (load command) "command_id"))
+        prompt (json-copy-string allocator (command-string (load command) "prompt"))
         (mut message) (json-object allocator)]
-    (json-put-string! (mut command) "agent_id" run-id)
-    (when (> (slice-len [u8] parent-run-id) 0)
-      (json-put-string! (mut command) "parent_agent_id" parent-run-id)
-      0)
     (json-object-put! (mut message) "version" (json-integer allocator 1))
-    (json-put-string! (mut message) "message_id" (command-string (load command) "command_id"))
+    (json-put-string! (mut message) "message_id" command-id)
     (json-put-string! (mut message)
                       "kind"
                       (if (> (slice-len [u8] parent-run-id) 0)
@@ -101,7 +111,13 @@
                       "from"
                       (if (> (slice-len [u8] parent-run-id) 0) parent-run-id actor))
     (json-put-string! (mut message) "to" run-id)
-    (json-put-string! (mut message) "content" (command-string (load command) "prompt"))
+    (json-put-string! (mut message) "content" prompt)
+    ;; Keep command mutation as a write-only phase after all reads and message
+    ;; construction are complete.
+    (json-put-string! (mut command) "agent_id" run-id)
+    (when (> (slice-len [u8] parent-run-id) 0)
+      (json-put-string! (mut command) "parent_agent_id" parent-run-id)
+      0)
     (json-object-put! (mut command) "message" (load message))
     0))
 
@@ -110,12 +126,15 @@
     (Some [value] value)
     (None [] "")))
 
-(defn command-valid? [(command Json)] (-> bool)
+(defn command-envelope-valid? [(command Json)] (-> bool)
   (and (= (json-number-i64 (json-get command "version")) 1)
        (and (> (slice-len [u8] (command-string command "command_id")) 0)
-            (and (> (slice-len [u8] (command-string command "run_id")) 0)
-                 (and (> (slice-len [u8] (command-string command "provider")) 0)
-                      (> (slice-len [u8] (command-string command "model")) 0))))))
+            (> (slice-len [u8] (command-string command "run_id")) 0))))
+
+(defn create-command-valid? [(command Json)] (-> bool)
+  (and (command-envelope-valid? command)
+       (and (> (slice-len [u8] (command-string command "provider")) 0)
+            (> (slice-len [u8] (command-string command "model")) 0))))
 
 (defn workflow-event-run-id [(events (ref (ArrayList Json)))
                              (run-id (slice u8))
@@ -171,9 +190,11 @@
              (and (> (slice-len [u8] (command-string command "node_id")) 0)
                   (workflow-dependencies-valid? events command workflow-id))))))
 
-(defn service-recover [(service (ptr RunService))] (-> JournalRecovery)
-  (event-journal-recover (load (field service allocator))
-                         (load (field service journal-path))))
+(defn service-recover-into [(service (ptr RunService))
+                            (allocator (ptr Allocator))] (-> JournalRecovery)
+  (event-journal-recover-synchronized (load (field service journal))
+                                      allocator
+                                      (load (field service journal-path))))
 
 (defn service-run-response [(service (ptr RunService))
                             (events (ref (ArrayList Json)))
@@ -186,17 +207,16 @@
 (defn service-create-run [(service (ptr RunService))
                           (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))]
-    (if (not (command-valid? command))
+    (if (not (create-command-valid? command))
         (service-error allocator 400 "invalid_command" "expected a versioned create command")
-        (let [recovery (service-recover service)
+        (let [recovery (service-recover-into service allocator)
               command-id (command-string command "command_id")
               run-id (command-string command "run_id")]
           (if (not (load (field recovery ok)))
               (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
               (if (> (journal-command-sequence (field recovery events) command-id) 0)
                   (service-run-response service (field recovery events) run-id 200)
-                  (if (and (> (slice-len [u8] (command-string command "workflow_id")) 0)
-                           (not (workflow-command-valid? (field recovery events) command)))
+                  (if (not (workflow-command-valid? (field recovery events) command))
                       (service-error allocator
                                      400
                                      "invalid_workflow_node"
@@ -273,7 +293,7 @@
                                                                             "create command was not durable")
                                                              (let [start-code
                                                                      (service-start-durable-run service command)
-                                                                   refreshed (service-recover service)]
+                                                                   refreshed (service-recover-into service allocator)]
                                                                (if (!= start-code 0)
                                                                    (service-error allocator
                                                                                   503
@@ -288,12 +308,243 @@
                                                       "run_exists"
                                                       "run_id already exists")))))))))))
 
+;; Rebuild a semantic conversation from durable events. The service, rather than
+;; a particular client, owns history and provider continuation handles. This also
+;; makes an explicit conversation_id resumable after a process restart.
+(defn service-enrich-conversation! [(service (ptr RunService))
+                                    (command (mut Json))] (-> i64)
+  (let [allocator (load (field service allocator))
+        conversation-id (command-string (load command) "conversation_id")]
+    (if (= (slice-len [u8] conversation-id) 0)
+        0
+        (let [recovery (service-recover-into service allocator)]
+          (if (not (load (field recovery ok)))
+              -1
+              (let [(mut messages) (json-array allocator)
+                    (mut run-ids) (zeroed (array (slice u8) 128))
+                    (mut assistant-text) (zeroed (array (slice u8) 128))
+                    (mut run-count) 0
+                    (mut previous-response-id) ""
+                    (mut provider-session-id) ""
+                    (mut continuation-provider) ""
+                    (mut continuation-model) ""
+                    (mut continuation-cache-key) ""
+                    events (field recovery events)
+                    (mut i) 0
+                    n (al-len [Json] (load events))]
+                (loop (if (>= (load i) n)
+                          (break)
+                          (let [event (al-get [Json] (load events) (load i))
+                                kind (command-string event "event")
+                                run-id (command-string event "run_id")
+                                payload (json-get event "payload")]
+                            (when (and (str-eq kind "run.created")
+                                       (and (str-eq (command-string payload "conversation_id")
+                                                    conversation-id)
+                                            (< (load run-count) 128)))
+                              (let [(mut item) (json-object allocator)]
+                                (json-put-string! (mut item) "role" "user")
+                                (json-put-string! (mut item)
+                                                  "content"
+                                                  (command-string payload "prompt"))
+                                (json-array-push! (mut messages) (load item)))
+                              (store! (index run-ids (load run-count))
+                                      (json-copy-string allocator run-id))
+                              (store! (index assistant-text (load run-count)) "")
+                              (store! run-count (+ (load run-count) 1))
+                              0)
+                            (let [(mut slot) 0
+                                  (mut matched) -1]
+                              (loop (if (>= (load slot) (load run-count))
+                                        (break)
+                                        (do
+                                          (when (str-eq (load (index run-ids (load slot))) run-id)
+                                            (store! matched (load slot))
+                                            (break))
+                                          (store! slot (+ (load slot) 1)))))
+                              (when (>= (load matched) 0)
+                                (when (str-eq kind "model.response.delta")
+                                  (match-else payload
+                                              (JsonString [text]
+                                                          (store! (index assistant-text (load matched))
+                                                                  (concat-or-empty allocator
+                                                                                   (load (index assistant-text
+                                                                                                (load matched)))
+                                                                                   text)))
+                                              (_ 0))
+                                  0)
+                                (when (or (str-eq kind "tool.call.proposed")
+                                          (or (str-eq kind "tool.call.completed")
+                                              (str-eq kind "tool.call.failed")))
+                                  (store! (index assistant-text (load matched))
+                                          (concat-or-empty allocator
+                                                           (load (index assistant-text (load matched)))
+                                                           (concat-or-empty allocator
+                                                                            "\n[harness "
+                                                                            (concat-or-empty allocator
+                                                                                             kind
+                                                                                             (concat-or-empty allocator
+                                                                                                              " "
+                                                                                                              (concat-or-empty allocator
+                                                                                                                               (command-string event
+                                                                                                                                               "operation_id")
+                                                                                                                               (concat-or-empty allocator
+                                                                                                                                                "] "
+                                                                                                                                                (json-stringify allocator
+                                                                                                                                                                payload))))))))
+                                  0)
+                                (when (str-eq kind "model.request.completed")
+                                  (store! continuation-provider
+                                          (json-copy-string allocator
+                                                            (command-string event "provider")))
+                                  (store! continuation-model
+                                          (json-copy-string allocator
+                                                            (command-string event "model")))
+                                  (match-else payload
+                                              (JsonString [response-id]
+                                                          (store! previous-response-id
+                                                                  (json-copy-string allocator response-id)))
+                                              (_ (do
+                                                   (store! continuation-cache-key
+                                                           (json-copy-string allocator
+                                                                             (command-string payload "cache_key")))
+                                                   (store! previous-response-id
+                                                           (json-copy-string allocator
+                                                                             (command-string payload "response_id")))
+                                                   (let [session-id
+                                                           (command-string payload
+                                                                           "provider_session_id")]
+                                                     (when (> (slice-len [u8] session-id) 0)
+                                                       (store! provider-session-id
+                                                               (json-copy-string allocator session-id))
+                                                       0)))))
+                                  0)
+                                (when (or (str-eq kind "run.completed")
+                                          (or (str-eq kind "run.failed")
+                                              (str-eq kind "run.cancelled")))
+                                  (let [text (load (index assistant-text (load matched)))]
+                                    (when (> (slice-len [u8] text) 0)
+                                      (let [(mut item) (json-object allocator)]
+                                        (json-put-string! (mut item) "role" "assistant")
+                                        (json-put-string! (mut item) "content" text)
+                                        (json-array-push! (mut messages) (load item)))
+                                      0))
+                                  0)))
+                            (store! i (+ (load i) 1)))))
+                (let [(mut current) (json-object allocator)]
+                  (json-put-string! (mut current) "role" "user")
+                  (json-put-string! (mut current)
+                                    "content"
+                                    (command-string (load command) "prompt"))
+                  (json-array-push! (mut messages) (load current)))
+                (json-object-put! (mut command) "messages" (load messages))
+                (when (and (str-eq (command-string (load command) "provider") "openai")
+                           (and (str-eq (load continuation-provider) "openai-responses")
+                                (and (str-eq (load continuation-model)
+                                             (command-string (load command) "model"))
+                                     (> (slice-len [u8] (load previous-response-id)) 0))))
+                  (json-put-string! (mut command)
+                                    "previous_response_id"
+                                    (load previous-response-id))
+                  0)
+                (when (and (str-eq (command-string (load command) "provider") "codex")
+                           (and (str-eq (load continuation-provider) "codex-app-server")
+                                (and (str-eq (load continuation-model)
+                                             (command-string (load command) "model"))
+                                     (> (slice-len [u8] (load provider-session-id)) 0))))
+                  (json-put-string! (mut command)
+                                    "provider_session_id"
+                                    (load provider-session-id))
+                  0)
+                (when (or (> (slice-len [u8]
+                                        (command-string (load command)
+                                                        "previous_response_id"))
+                             0)
+                          (> (slice-len [u8]
+                                        (command-string (load command)
+                                                        "provider_session_id"))
+                             0))
+                  (json-put-string! (mut command)
+                                    "continuation_cache_key"
+                                    (load continuation-cache-key))
+                  0)
+                0))))))
+
+;; Transport-neutral run submission shared by HTTP, the TUI, and orchestration
+;; tools. Every caller receives the same actor, agent, routing, and admission rules.
+(defn service-inherit-parent-route! [(service (ptr RunService))
+                                     (command (mut Json))] (-> i64)
+  (let [allocator (load (field service allocator))
+        parent-run-id (command-string (load command) "parent_run_id")]
+    (if (= (slice-len [u8] parent-run-id) 0)
+        0
+        (let [recovery (service-recover-into service allocator)]
+          (if (not (load (field recovery ok)))
+              -1
+              (let [events (field recovery events)
+                    requested-provider (command-string (load command) "provider")
+                    requested-model (command-string (load command) "model")
+                    inherit-provider
+                      (or (= (slice-len [u8] requested-provider) 0)
+                          (str-eq requested-provider "auto"))
+                    inherit-model
+                      (or (= (slice-len [u8] requested-model) 0)
+                          (str-eq requested-model "auto"))
+                    (mut i) (al-len [Json] (load events))
+                    (mut found) false]
+                (loop (if (<= (load i) 0)
+                          (break)
+                          (do
+                            (store! i (- (load i) 1))
+                            (let [event (al-get [Json] (load events) (load i))]
+                              (when (and (str-eq (command-string event "event") "run.created")
+                                         (str-eq (command-string event "run_id") parent-run-id))
+                                (let [parent (json-get event "payload")]
+                                  (when inherit-provider
+                                    (json-put-string! (mut command)
+                                                      "provider"
+                                                      (command-string parent "provider"))
+                                    0)
+                                  (when inherit-model
+                                    (json-put-string! (mut command)
+                                                      "model"
+                                                      (if (or inherit-provider
+                                                              (str-eq requested-provider
+                                                                      (command-string parent "provider")))
+                                                          (command-string parent "model")
+                                                          (route-default-model requested-provider)))
+                                    0)
+                                  (json-put-string! (mut command)
+                                                    "routing_profile"
+                                                    (command-string parent "routing_profile"))
+                                  (store! found true)
+                                  (break)))))))
+                0))))))
+
+(defn service-submit-run [(service (ptr RunService))
+                          (command (mut Json))
+                          (actor (slice u8))] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        ;; Commands cross a lifetime boundary here. Keep the caller's request or
+        ;; TUI arena out of the durable service object graph.
+        (mut owned-command) (json-clone allocator (load command))]
+    (service-command-actor! (mut owned-command) actor)
+    (service-command-agent! allocator (mut owned-command))
+    (service-inherit-parent-route! service (mut owned-command))
+    (match (model-route-command! allocator (mut owned-command))
+      (ModelRouteSelected []
+                          (do
+                            (service-enrich-conversation! service (mut owned-command))
+                            (service-create-run service (load owned-command))))
+      (ModelRouteRejected [message]
+                          (service-error allocator 400 "routing_rejected" message)))))
+
 (defn service-cancel-run [(service (ptr RunService))
                           (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))]
-    (if (not (command-valid? command))
+    (if (not (command-envelope-valid? command))
         (service-error allocator 400 "invalid_command" "expected a versioned cancellation command")
-        (let [recovery (service-recover service)
+        (let [recovery (service-recover-into service allocator)
               command-id (command-string command "command_id")
               run-id (command-string command "run_id")]
           (if (not (load (field recovery ok)))
@@ -315,13 +566,14 @@
                                                                    "run is already terminal"))
                                 (_ (match (service-cancel-durable-run service command)
                                      (RunCancellationAccepted []
-                                                              (let [refreshed (service-recover service)]
+                                                              (let [refreshed (service-recover-into service allocator)]
                                                                 (service-run-response service
                                                                                       (field refreshed events)
                                                                                       run-id
                                                                                       202)))
                                      (RunCancellationTerminalOrMissing []
-                                                                       (let [refreshed (service-recover service)
+                                                                       (let [refreshed
+                                                                               (service-recover-into service allocator)
                                                                              refreshed-view
                                                                                (project-run (field refreshed events)
                                                                                             run-id)]
@@ -343,7 +595,7 @@
 (defn service-query-run [(service (ptr RunService))
                          (run-id (slice u8))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        recovery (service-recover service)]
+        recovery (service-recover-into service allocator)]
     (if (not (load (field recovery ok)))
         (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
         (let [view (project-run (field recovery events) run-id)]
@@ -356,7 +608,7 @@
                             (run-id (slice u8))
                             (after-sequence i64)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        recovery (service-recover service)]
+        recovery (service-recover-into service allocator)]
     (if (not (load (field recovery ok)))
         (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
         (let [(mut result) (json-object allocator)
@@ -385,7 +637,7 @@
 (defn service-query-workflow [(service (ptr RunService))
                               (workflow-id (slice u8))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        recovery (service-recover service)]
+        recovery (service-recover-into service allocator)]
     (if (not (load (field recovery ok)))
         (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
         (let [(mut result) (json-object allocator)
@@ -422,10 +674,107 @@
             (and (> (slice-len [u8] (command-string command "run_id")) 0)
                  (> (slice-len [u8] (command-string command field-name)) 0)))))
 
+;; Zero means unseen, one requested, two applied, and three rejected. Intervention
+;; idempotency is based on the completed state, not merely the first audit record.
+(defn supervisor-intervention-state [(events (ref (ArrayList Json)))
+                                     (command-id (slice u8))] (-> i64)
+  (let [(mut state) 0
+        (mut i) 0
+        n (al-len [Json] (load events))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [event (al-get [Json] (load events) (load i))
+                    payload (json-get event "payload")]
+                (when (str-eq (command-string payload "command_id") command-id)
+                  (let [kind (command-string event "event")]
+                    (cond (str-eq kind "supervisor.intervention.applied") (store! state 2)
+                          (str-eq kind "supervisor.intervention.rejected") (store! state 3)
+                          (and (= (load state) 0)
+                               (str-eq kind "supervisor.intervention.requested"))
+                            (store! state 1)
+                          :else 0))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load state)))
+
+(defn service-emit-intervention-result [(service (ptr RunService))
+                                        (command Json)
+                                        (view (ref DurableRunView))
+                                        (kind EventKind)] (-> i64)
+  (emit-event (load (field service emitter))
+              (now-ms)
+              kind
+              (command-string command "run_id")
+              (command-string command "command_id")
+              ""
+              (load (field view provider))
+              (load (field view model))
+              command))
+
+(defn service-apply-intervention [(service (ptr RunService))
+                                  (command Json)
+                                  (events (ref (ArrayList Json)))
+                                  (intervention-state i64)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        run-id (command-string command "run_id")
+        view (project-run events run-id)]
+    (match-else (load (field view status))
+                (RunNotFound [] (service-error allocator 404 "run_not_found" "run does not exist"))
+                (RunSucceeded [] (service-error allocator 409 "run_terminal" "run is already terminal"))
+                (RunErrored [] (service-error allocator 409 "run_terminal" "run is already terminal"))
+                (RunCancelledStatus [] (service-error allocator 409 "run_terminal" "run is already terminal"))
+                (_ (let [requested
+                           (if (= intervention-state 1)
+                               1
+                               (service-emit-intervention-result service
+                                                                 command
+                                                                 view
+                                                                 (SupervisorInterventionRequested)))]
+                     (if (< requested 0)
+                         (service-error allocator
+                                        500
+                                        "intervention_failed"
+                                        "intervention request was not durable")
+                         (match (service-cancel-durable-run service command)
+                           (RunCancellationAccepted []
+                                                    (if (< (service-emit-intervention-result service
+                                                                                             command
+                                                                                             view
+                                                                                             (SupervisorInterventionApplied))
+                                                           0)
+                                                        (service-error allocator
+                                                                       500
+                                                                       "intervention_failed"
+                                                                       "intervention result was not durable")
+                                                        (let [refreshed (service-recover-into service allocator)]
+                                                          (service-run-response service
+                                                                                (field refreshed events)
+                                                                                run-id
+                                                                                202))))
+                           (RunCancellationTerminalOrMissing []
+                                                             (if (< (service-emit-intervention-result service
+                                                                                                      command
+                                                                                                      view
+                                                                                                      (SupervisorInterventionRejected))
+                                                                    0)
+                                                                 (service-error allocator
+                                                                                500
+                                                                                "intervention_failed"
+                                                                                "intervention result was not durable")
+                                                                 (service-error allocator
+                                                                                409
+                                                                                "intervention_rejected"
+                                                                                "run could not be cancelled")))
+                           (RunCancellationFailed []
+                                                  (service-error allocator
+                                                                 500
+                                                                 "intervention_failed"
+                                                                 "intervention was not durable")))))))))
+
 (defn service-record-assessment [(service (ptr RunService))
                                  (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        recovery (service-recover service)
+        recovery (service-recover-into service allocator)
         run-id (command-string command "run_id")]
     (if (not (supervisor-command-valid? command "verdict"))
         (service-error allocator 400 "invalid_assessment" "assessment requires a verdict")
@@ -458,82 +807,33 @@
 (defn service-request-intervention [(service (ptr RunService))
                                     (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        recovery (service-recover service)
-        run-id (command-string command "run_id")]
+        recovery (service-recover-into service allocator)
+        run-id (command-string command "run_id")
+        command-id (command-string command "command_id")]
     (if (or (not (supervisor-command-valid? command "action"))
             (not (str-eq (command-string command "action") "cancel")))
         (service-error allocator 400 "invalid_intervention" "supported intervention action is cancel")
         (if (not (load (field recovery ok)))
             (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
-            (if (> (journal-command-sequence (field recovery events)
-                                             (command-string command "command_id"))
-                   0)
-                (service-run-response service (field recovery events) run-id 200)
-                (let [view (project-run (field recovery events) run-id)]
-                  (match-else (load (field view status))
-                              (RunNotFound []
-                                           (service-error allocator 404 "run_not_found" "run does not exist"))
-                              (RunSucceeded []
-                                            (service-error allocator 409 "run_terminal" "run is already terminal"))
-                              (RunErrored []
-                                          (service-error allocator 409 "run_terminal" "run is already terminal"))
-                              (RunCancelledStatus []
-                                                  (service-error allocator 409 "run_terminal" "run is already terminal"))
-                              (_ (do
-                                   (emit-event (load (field service emitter))
-                                               (now-ms)
-                                               (SupervisorInterventionRequested)
-                                               run-id
-                                               (command-string command "command_id")
-                                               ""
-                                               (load (field view provider))
-                                               (load (field view model))
-                                               command)
-                                   (match (service-cancel-durable-run service command)
-                                     (RunCancellationAccepted []
-                                                              (do
-                                                                (emit-event (load (field service emitter))
-                                                                            (now-ms)
-                                                                            (SupervisorInterventionApplied)
-                                                                            run-id
-                                                                            (command-string command "command_id")
-                                                                            ""
-                                                                            (load (field view provider))
-                                                                            (load (field view model))
-                                                                            command)
-                                                                (let [refreshed (service-recover service)]
-                                                                  (service-run-response service
-                                                                                        (field refreshed events)
-                                                                                        run-id
-                                                                                        202))))
-                                     (RunCancellationTerminalOrMissing []
-                                                                       (do
-                                                                         (emit-event (load (field service emitter))
-                                                                                     (now-ms)
-                                                                                     (SupervisorInterventionRejected)
-                                                                                     run-id
-                                                                                     (command-string command
-                                                                                                     "command_id")
-                                                                                     ""
-                                                                                     (load (field view provider))
-                                                                                     (load (field view model))
-                                                                                     command)
-                                                                         (service-error allocator
-                                                                                        409
-                                                                                        "intervention_rejected"
-                                                                                        "run could not be cancelled")))
-                                     (RunCancellationFailed []
-                                                            (service-error allocator
-                                                                           500
-                                                                           "intervention_failed"
-                                                                           "intervention was not durable"))))))))))))
+            (let [intervention-state (supervisor-intervention-state (field recovery events) command-id)]
+              (if (= intervention-state 2)
+                  (service-run-response service (field recovery events) run-id 200)
+                  (if (= intervention-state 3)
+                      (service-error allocator
+                                     409
+                                     "intervention_rejected"
+                                     "run could not be cancelled")
+                      (service-apply-intervention service
+                                                  command
+                                                  (field recovery events)
+                                                  intervention-state))))))))
 
 (defn service-authorization-response [(service (ptr RunService))
                                       (run-id (slice u8))
                                       (authorization-id (slice u8))
                                       (status i64)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        recovery (service-recover service)
+        recovery (service-recover-into service allocator)
         decision
           (authorization-decision (field recovery events)
                                   run-id
@@ -552,7 +852,7 @@
     (service-response status (load body))))
 
 (defn authorization-command-valid? [(command Json)] (-> bool)
-  (and (command-valid? command)
+  (and (command-envelope-valid? command)
        (and (> (slice-len [u8] (command-string command "authorization_id")) 0)
             (match (json-string-at command "decision")
               (Some [value] (or (str-eq value "allow") (str-eq value "reject")))
@@ -567,7 +867,7 @@
         (mut response) (service-error allocator 500 "journal_recovery_failed" "authorization journal unavailable")
         (mut decided) false]
     (authorization-mailbox-lock! mailbox)
-    (let [recovery (service-recover service)]
+    (let [recovery (service-recover-into service allocator)]
       (if (not (load (field recovery ok)))
           (store! response
                   (service-error allocator
@@ -624,7 +924,7 @@
                        400
                        "invalid_command"
                        "expected an allow or reject authorization command")
-        (let [recovery (service-recover service)
+        (let [recovery (service-recover-into service allocator)
               command-id (command-string command "command_id")
               run-id (command-string command "run_id")
               authorization-id (command-string command "authorization_id")]
@@ -682,7 +982,8 @@
 ;; Recover all durable runs once at service startup. Queued work is safe to launch
 ;; because no run.started fact exists. In-flight work is never replayed blindly.
 (defn service-recover-runs! [(service (ptr RunService))] (-> i64)
-  (let [recovery (service-recover service)]
+  (let [allocator (load (field service allocator))
+        recovery (service-recover-into service allocator)]
     (if (not (load (field recovery ok)))
         -1
         (let [events (field recovery events)
@@ -817,16 +1118,7 @@
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (let [(mut command) (load (field parsed value))]
-                        (service-command-actor! (mut command) principal)
-                        (service-command-agent! allocator (mut command))
-                        (match (model-route-command! allocator (mut command))
-                          (ModelRouteSelected []
-                                              (service-create-run service (load command)))
-                          (ModelRouteRejected [message]
-                                              (service-error allocator
-                                                             400
-                                                             "routing_rejected"
-                                                             message))))
+                        (service-submit-run service (mut command) principal))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
           (starts-with target "/v1/workflows/")
             (if (not can-observe)

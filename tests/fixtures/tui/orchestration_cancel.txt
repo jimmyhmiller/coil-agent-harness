@@ -1,0 +1,6 @@
+  Subagents
+    • agent-2  cancelled
+  Workflow
+    • ready  done
+● Partial response
+  error: run cancelled

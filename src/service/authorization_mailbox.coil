@@ -1,55 +1,62 @@
 (module harness-authorization-mailbox)
 
 (import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.sync" :as sync)
+(import "coil.time" :as time)
 
-(extern harness_mailbox_open :cc c [] (-> (ptr i8)))
-(extern harness_mailbox_generation :cc c [(ptr i8)] (-> i64))
-(extern harness_mailbox_notify :cc c [(ptr i8)] (-> i64))
-(extern harness_mailbox_wait :cc c [(ptr i8) i64 i64] (-> i64))
-(extern harness_mailbox_lock :cc c [(ptr i8)] (-> i64))
-(extern harness_mailbox_unlock :cc c [(ptr i8)] (-> i64))
-(extern harness_mailbox_close :cc c [(ptr i8)] (-> i64))
-
-(defstruct AuthorizationMailbox
-  [(handle (ptr i8))])
+(defstruct AuthorizationMailbox [(event sync/Event)])
 
 (defsum AuthorizationMailboxOpenResult
   (AuthorizationMailboxOpened [(mailbox AuthorizationMailbox)])
   (AuthorizationMailboxOpenFailed [(message (slice u8))]))
 
 (defn authorization-mailbox-open [(allocator (ptr Allocator))] (-> AuthorizationMailboxOpenResult)
-  (let [handle (harness_mailbox_open)]
-    (if (= handle (cast (ptr i8) 0))
-        (AuthorizationMailboxOpenFailed "could not initialize authorization mailbox")
-        (let [mailbox (alloc/stack AuthorizationMailbox)]
-          (store! (field mailbox handle) handle)
-          (AuthorizationMailboxOpened (load mailbox))))))
+  (let [mailbox (alloc/stack AuthorizationMailbox)]
+    (match (sync/event-init-with-allocator (field mailbox event) allocator)
+      (Err [failure]
+           (AuthorizationMailboxOpenFailed "could not initialize authorization mailbox"))
+      (Ok [opened] (AuthorizationMailboxOpened (load mailbox))))))
 
 (defn authorization-mailbox-generation [(mailbox (ptr AuthorizationMailbox))] (-> i64)
-  (harness_mailbox_generation (load (field mailbox handle))))
+  (match (sync/event-generation (field mailbox event))
+    (Err [failure] -1)
+    (Ok [generation] generation)))
 
 (defn authorization-mailbox-notify! [(mailbox (ptr AuthorizationMailbox))] (-> i64)
-  (harness_mailbox_notify (load (field mailbox handle))))
+  (match (sync/event-notify-all! (field mailbox event))
+    (Err [failure] -1)
+    (Ok [generation] 0)))
 
 (defn authorization-mailbox-wait [(mailbox (ptr AuthorizationMailbox))
                                   (observed-generation i64)
                                   (timeout-ms i64)] (-> bool)
-  (= (harness_mailbox_wait (load (field mailbox handle))
-                           observed-generation
-                           timeout-ms)
-     1))
+  (match (time/duration-millis timeout-ms)
+    (Err [failure] false)
+    (Ok [duration]
+        (match (sync/event-wait-for! (field mailbox event)
+                                     observed-generation
+                                     duration)
+          (Err [failure] false)
+          (Ok [result]
+              (match result
+                (sync/Notified [generation] true)
+                (sync/Timeout [] false)))))))
 
+;; Authorization decisions mutate journal state while holding the Event's mutex so
+;; the subsequent generation bump cannot race a waiter between observation and sleep.
 (defn authorization-mailbox-lock! [(mailbox (ptr AuthorizationMailbox))] (-> i64)
-  (harness_mailbox_lock (load (field mailbox handle))))
+  (match (sync/mutex-lock! (field (field mailbox event) mutex))
+    (Err [failure] -1)
+    (Ok [value] 0)))
 
 (defn authorization-mailbox-unlock! [(mailbox (ptr AuthorizationMailbox))] (-> i64)
-  (harness_mailbox_unlock (load (field mailbox handle))))
+  (match (sync/mutex-unlock! (field (field mailbox event) mutex))
+    (Err [failure] -1)
+    (Ok [value] 0)))
 
 (defn authorization-mailbox-close! [(allocator (ptr Allocator))
                                     (mailbox (ptr AuthorizationMailbox))] (-> i64)
-  (let [handle (load (field mailbox handle))]
-    (if (= handle (cast (ptr i8) 0))
-        0
-        (do
-          (store! (field mailbox handle) (cast (ptr i8) 0))
-          (harness_mailbox_close handle)))))
+  (match (sync/event-destroy! (field mailbox event))
+    (Err [failure] -1)
+    (Ok [value] 0)))

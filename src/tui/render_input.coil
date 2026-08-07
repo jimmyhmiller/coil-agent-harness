@@ -1,0 +1,79 @@
+(module harness-tui-render-input)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-render-inline" :use *)
+(import "harness-tui-terminal-operation" :use *)
+(import "harness-tui-view-layout" :use *)
+
+(defstruct InputRenderer
+  [(previous-height i64)
+   (previous-cursor-row i64)])
+
+(defn input-renderer-new [] (-> InputRenderer)
+  (let [renderer (alloc/stack InputRenderer)]
+    (store! (field renderer previous-height) 0)
+    (store! (field renderer previous-cursor-row) 0)
+    (load renderer)))
+
+(defn input-renderer-final-row! [(renderer (ptr InputRenderer))
+                                 (operations (ptr (ArrayList TerminalOperation)))] (-> i64)
+  (let [height (load (field renderer previous-height))]
+    (when (> height 0)
+      (inline-push! operations (TerminalCarriageReturn))
+      (let [rows (- (- height 1) (load (field renderer previous-cursor-row)))]
+        (when (> rows 0)
+          (inline-push! operations (TerminalCursorDown rows))
+          0))
+      0)
+    0))
+
+(defn input-renderer-plan-with! [(renderer (ptr InputRenderer))
+                                 (scratch (ptr Allocator))
+                                 (layout (ptr ViewLayout))] (-> (ArrayList TerminalOperation))
+  (let [(mut operations) (inline-operations-new scratch)
+        frame (mut (field layout frame))
+        height (al-len [FrameLine] (load (field frame lines)))
+        cursor-row (load (field layout cursor-row))]
+    (input-renderer-final-row! renderer (mut operations))
+    (inline-plan-clear-live! (mut operations)
+                             (load (field renderer previous-height)))
+    (inline-plan-live-frame! (mut operations) frame)
+    (let [rows (- (- height 1) cursor-row)]
+      (when (> rows 0)
+        (inline-push! (mut operations) (TerminalCursorUp rows))
+        0))
+    (inline-push! (mut operations) (TerminalCarriageReturn))
+    (inline-push! (mut operations)
+                  (TerminalCursorRight (load (field layout cursor-column))))
+    (store! (field renderer previous-height) height)
+    (store! (field renderer previous-cursor-row) cursor-row)
+    (load operations)))
+
+(defn input-renderer-plan! [(renderer (ptr InputRenderer))
+                            (layout (ptr ViewLayout))] (-> (ArrayList TerminalOperation))
+  (input-renderer-plan-with! renderer
+                             (load (field (field layout frame) allocator))
+                             layout))
+
+(defn input-renderer-commit-plan! [(renderer (ptr InputRenderer))
+                                   (scratch (ptr Allocator))] (-> (ArrayList TerminalOperation))
+  (let [(mut operations) (inline-operations-new scratch)]
+    (input-renderer-final-row! renderer (mut operations))
+    (when (> (load (field renderer previous-height)) 0)
+      (inline-push! (mut operations) (TerminalLineBreak))
+      0)
+    (store! (field renderer previous-height) 0)
+    (store! (field renderer previous-cursor-row) 0)
+    (load operations)))
+
+(defn input-renderer-clear-plan! [(renderer (ptr InputRenderer))
+                                  (scratch (ptr Allocator))] (-> (ArrayList TerminalOperation))
+  (let [(mut operations) (inline-operations-new scratch)]
+    (input-renderer-final-row! renderer (mut operations))
+    (inline-plan-clear-live! (mut operations)
+                             (load (field renderer previous-height)))
+    (store! (field renderer previous-height) 0)
+    (store! (field renderer previous-cursor-row) 0)
+    (load operations)))

@@ -1,0 +1,102 @@
+(module harness-tui-cells)
+
+(import "coil.alloc" :as alloc)
+(import "coil.slice" :use *)
+(import "harness-tui-unicode-width" :use *)
+
+(defstruct Utf8Scalar
+  [(valid bool)
+   (codepoint i64)
+   (length i64)])
+
+(defn utf8-invalid [] (-> Utf8Scalar)
+  (let [scalar (alloc/stack Utf8Scalar)]
+    (store! (field scalar valid) false)
+    (store! (field scalar codepoint) 65533)
+    (store! (field scalar length) 1)
+    (load scalar)))
+
+(defn utf8-value [(codepoint i64) (length i64)] (-> Utf8Scalar)
+  (let [scalar (alloc/stack Utf8Scalar)]
+    (store! (field scalar valid) true)
+    (store! (field scalar codepoint) codepoint)
+    (store! (field scalar length) length)
+    (load scalar)))
+
+(defn utf8-byte [(text (slice u8)) (at i64)] (-> i64)
+  (cast i64 (slice-get [u8] text at)))
+
+(defn utf8-continuation? [(byte i64)] (-> bool)
+  (and (>= byte 128) (<= byte 191)))
+
+;; Strict decoding rejects overlong encodings, UTF-16 surrogates, truncated input,
+;; stray continuation bytes, and values above U+10FFFF.
+(defn utf8-decode [(text (slice u8)) (at i64)] (-> Utf8Scalar)
+  (let [count (slice-len [u8] text)]
+    (if (or (< at 0) (>= at count))
+        (utf8-invalid)
+        (let [b0 (utf8-byte text at)]
+          (cond (< b0 128) (utf8-value b0 1)
+                (and (>= b0 194) (<= b0 223))
+                  (if (and (< (+ at 1) count)
+                           (utf8-continuation? (utf8-byte text (+ at 1))))
+                      (utf8-value (+ (* (- b0 192) 64)
+                                     (- (utf8-byte text (+ at 1)) 128))
+                                  2)
+                      (utf8-invalid))
+                (and (>= b0 224) (<= b0 239))
+                  (if (and (< (+ at 2) count)
+                           (and (utf8-continuation? (utf8-byte text (+ at 1)))
+                                (utf8-continuation? (utf8-byte text (+ at 2)))))
+                      (let [b1 (utf8-byte text (+ at 1))
+                            codepoint
+                              (+ (* (- b0 224) 4096)
+                                 (+ (* (- b1 128) 64)
+                                    (- (utf8-byte text (+ at 2)) 128)))]
+                        (if (and (>= codepoint 2048)
+                                 (not (and (>= codepoint 55296)
+                                           (<= codepoint 57343))))
+                            (utf8-value codepoint 3)
+                            (utf8-invalid)))
+                      (utf8-invalid))
+                (and (>= b0 240) (<= b0 244))
+                  (if (and (< (+ at 3) count)
+                           (and (utf8-continuation? (utf8-byte text (+ at 1)))
+                                (and (utf8-continuation? (utf8-byte text (+ at 2)))
+                                     (utf8-continuation? (utf8-byte text (+ at 3))))))
+                      (let [codepoint
+                              (+ (* (- b0 240) 262144)
+                                 (+ (* (- (utf8-byte text (+ at 1)) 128) 4096)
+                                    (+ (* (- (utf8-byte text (+ at 2)) 128) 64)
+                                       (- (utf8-byte text (+ at 3)) 128))))]
+                        (if (and (>= codepoint 65536) (<= codepoint 1114111))
+                            (utf8-value codepoint 4)
+                            (utf8-invalid)))
+                      (utf8-invalid))
+                :else (utf8-invalid))))))
+
+;; Return -1 for terminal controls or invalid scalar values, matching the useful
+;; contract of wcwidth. Callers decide whether to reject or visibly escape them.
+(defn unicode-cell-width [(codepoint i64)] (-> i64)
+  (cond (= codepoint 0) 0
+        (or (< codepoint 32) (and (>= codepoint 127) (< codepoint 160))) -1
+        (unicode-zero-width? codepoint) 0
+        (unicode-wide? codepoint) 2
+        :else 1))
+
+(defn text-cell-width [(text (slice u8))] (-> i64)
+  (let [(mut at) 0
+        (mut width) 0
+        count (slice-len [u8] text)]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [scalar (utf8-decode text (load at))]
+                (if (not (load (field scalar valid)))
+                    (do (store! width -1) (break))
+                    (let [cell-width (unicode-cell-width (load (field scalar codepoint)))]
+                      (if (< cell-width 0)
+                          (do (store! width -1) (break))
+                          (do
+                            (store! width (+ (load width) cell-width))
+                            (store! at (+ (load at) (load (field scalar length)))))))))))
+    (load width)))

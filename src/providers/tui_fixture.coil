@@ -1,0 +1,65 @@
+(module tui-fixture-provider)
+
+;; Deterministic streaming provider for black-box TUI verification. The default
+;; runtime factory exposes it only when HARNESS_TUI_TEST_PROVIDER=1, so it cannot
+;; be selected accidentally in a normal harness process.
+
+(import "coil.alloc" :as alloc :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
+
+;; Dynamic trait objects require a real data address. A zero-sized boxed provider
+;; can become an invalid dyn.data target under optimization.
+(defstruct TuiFixtureProvider [(reserved u8)])
+
+(defn tui-fixture-event [(emitter (ptr EventEmitter))
+                         (request (ptr ModelRequest))
+                         (kind EventKind)
+                         (payload Json)] (-> i64)
+  (emit-event emitter
+              (now-ms)
+              kind
+              (load (field request run-id))
+              (load (field request operation-id))
+              ""
+              "tui-fixture"
+              (load (field request model))
+              payload))
+
+(defn tui-fixture-delta [(emitter (ptr EventEmitter))
+                         (request (ptr ModelRequest))
+                         (text (slice u8))] (-> i64)
+  (tui-fixture-event emitter request (ModelResponseDelta) (JsonString text))
+  (sleep-ms 80))
+
+(impl ModelProvider TuiFixtureProvider
+  (provider-name [(self (ptr TuiFixtureProvider))] (-> (slice u8)) "tui-fixture")
+  (provider-capabilities [(self (ptr TuiFixtureProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "tui-fixture"))
+  (execute-model [(self (ptr TuiFixtureProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (tui-fixture-event emitter request (ModelRequestStarted) (JsonNull))
+                 ;; Leave the pre-token state observable to black-box TUI tests.
+                 (sleep-ms 250)
+                 (tui-fixture-delta emitter request "It looks like ")
+                 (tui-fixture-delta emitter request "that may have been ")
+                 (tui-fixture-delta emitter request "accidental—what would ")
+                 (tui-fixture-delta emitter request "you like to work on?")
+                 (tui-fixture-event emitter
+                                    request
+                                    (ModelRequestCompleted)
+                                    (JsonString "tui-fixture-response"))
+                 (let [(mut response) (response-empty allocator)]
+                   (store! (field response provider) "tui-fixture")
+                   (store! (field response model) (load (field request model)))
+                   (store! (field response response-id) "tui-fixture-response")
+                   (store! (field response output-text)
+                           "It looks like that may have been accidental—what would you like to work on?")
+                   (ModelOk (load response)))))

@@ -1,0 +1,29 @@
+(module harness-tui-run-watch-test)
+
+(import "coil.alloc" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-run-watch" :use *)
+(import "provider-common" :use *)
+
+(defn run-watch-test-event [(allocator (ptr Allocator))
+                            (run-id (slice u8))
+                            (kind (slice u8))] (-> Json)
+  (let [(mut event) (json-object allocator)]
+    (json-put-string! (mut event) "run_id" run-id)
+    (json-put-string! (mut event) "event" kind)
+    (load event)))
+
+(deftest only-a-terminal-event-for-the-root-run-finishes-the-watch
+         (let [allocator (malloc-allocator)]
+           (assert (run-watch-event-finishes-root? (run-watch-test-event allocator
+                                                                         "root"
+                                                                         "run.completed")
+                                                   "root"))
+           (assert (not (run-watch-event-finishes-root? (run-watch-test-event allocator
+                                                                              "child"
+                                                                              "run.completed")
+                                                        "root")))
+           (assert (not (run-watch-event-finishes-root? (run-watch-test-event allocator
+                                                                              "root"
+                                                                              "model.request.completed")
+                                                        "root")))))

@@ -43,7 +43,7 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (let [emitter (alloc/stack EventEmitter)]
-             (store! emitter (event-emitter-new journal sequence))
+             (store! emitter (event-emitter-new allocator journal sequence))
              (assert-eq (emit-event emitter
                                     100
                                     (RunStarted)
@@ -89,25 +89,20 @@
              (assert (str-eq (load (field recovery error))
                              "event journal contains invalid JSON")))))
 
-(deftest admits-only-one-writer-for-a-journal
+(deftest opens-the-same-path-without-process-ownership
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-journal-owner.jsonl"
                first (alloc/stack EventJournal)
-               reopened (alloc/stack EventJournal)]
+               second (alloc/stack EventJournal)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [journal] (store! first journal)))
-           (assert (match (event-journal-open allocator path true)
-                     (JournalOpenFailed [message]
-                                        (str-eq message
-                                                "event journal is already owned by another harness process"))
-                     (JournalOpened [journal] false)))
-           (event-journal-close! first)
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
-             (JournalOpened [journal] (store! reopened journal)))
-           (event-journal-close! reopened)))
+             (JournalOpened [journal] (store! second journal)))
+           (event-journal-close! first)
+           (event-journal-close! second)))
 
 (deftest serializes-sequence-assignment-with-concurrent-publication
          (let [allocator (malloc-allocator)
@@ -123,7 +118,7 @@
            (match (event-journal-open allocator path false)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (store! (field first-job emitter) emitter)
            (store! (field first-job count) 200)
            (store! (field second-job emitter) emitter)

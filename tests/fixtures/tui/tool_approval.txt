@@ -1,0 +1,2 @@
+  ⏺ Bash  ls  done
+  approval: bash  read-only  done

@@ -1,0 +1,47 @@
+(module harness-json-clone-crash-fixture)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.slice" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-json" :use *)
+(import "harness-orchestration-tools" :use *)
+(import "harness-run-service" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+
+;; Retains the operation that crashed in codex-thread-start-request after the
+;; production path stopped cloning immutable registry schemas.
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [owner (malloc-allocator)
+        domain (allocation-domain-open owner)
+        allocator (allocation-domain-allocator domain)
+        registry (box owner ToolRegistry (tool-registry-new owner))
+        service (alloc/stack RunService)
+        (mut round) 0]
+    (store! service (zeroed RunService))
+    (register-filesystem-tools! registry owner ".")
+    (register-bash-tool! registry owner ".")
+    (register-orchestration-tools! registry owner service)
+    (loop (if (>= (load round) 1000)
+              (break)
+              (let [definitions (field registry definitions)
+                    (mut i) 0
+                    n (al-len [ToolDefinition] (load definitions))]
+                (loop (if (>= (load i) n)
+                          (break)
+                          (let [definition
+                                  (al-get [ToolDefinition]
+                                          (load definitions)
+                                          (load i))
+                                schema
+                                  (json-clone allocator
+                                              (load (field (field definition spec)
+                                                           input-schema)))
+                                encoded (json-stringify allocator schema)]
+                            (store! i (+ (load i) 1)))))
+                (store! round (+ (load round) 1)))))
+    (allocation-domain-close! owner domain)
+    0))

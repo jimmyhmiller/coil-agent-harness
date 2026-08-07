@@ -1,0 +1,157 @@
+(module harness-tui-render-inline)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-terminal-operation" :use *)
+
+;; While a live region exists, the cursor is left on its final row. A trailing LF
+;; would scroll the terminal whenever that row is at the bottom of the viewport,
+;; turning every streamed delta into another scrollback entry. Stable output is
+;; the only output allowed to advance beyond the final rendered row.
+(defstruct InlineRenderer [(previous-live-height i64)])
+
+(defn inline-renderer-new [] (-> InlineRenderer)
+  (let [renderer (alloc/stack InlineRenderer)]
+    (store! (field renderer previous-live-height) 0)
+    (load renderer)))
+
+(defn inline-operations-new [(allocator (ptr Allocator))] (-> (ArrayList TerminalOperation))
+  (al-new [TerminalOperation] allocator))
+
+(defn inline-push! [(operations (ptr (ArrayList TerminalOperation)))
+                    (operation TerminalOperation)] (-> i64)
+  (al-push! [TerminalOperation] operations operation)
+  0)
+
+(defn inline-plan-clear! [(operations (ptr (ArrayList TerminalOperation)))
+                          (height i64)] (-> i64)
+  (when (> height 0)
+    (inline-push! operations (TerminalCursorUp height))
+    (let [(mut row) 0]
+      (loop (if (>= (load row) height)
+                (break)
+                (do
+                  (inline-push! operations (TerminalCarriageReturn))
+                  (inline-push! operations (TerminalEraseLine))
+                  (inline-push! operations (TerminalLineBreak))
+                  (store! row (+ (load row) 1)))))))
+  0)
+
+;; Streaming output leaves the cursor on its final owned row, unlike the input
+;; renderer which leaves the cursor below its owned region.
+(defn inline-plan-clear-live! [(operations (ptr (ArrayList TerminalOperation)))
+                               (height i64)] (-> i64)
+  (when (> height 0)
+    (when (> height 1)
+      (inline-push! operations (TerminalCursorUp (- height 1)))
+      0)
+    (let [(mut row) 0]
+      (loop (if (>= (load row) height)
+                (break)
+                (do
+                  (inline-push! operations (TerminalCarriageReturn))
+                  (inline-push! operations (TerminalEraseLine))
+                  (when (< (+ (load row) 1) height)
+                    (inline-push! operations (TerminalCursorDown 1))
+                    0)
+                  (store! row (+ (load row) 1))))))
+    (when (> height 1)
+      (inline-push! operations (TerminalCursorUp (- height 1)))
+      0))
+  0)
+
+(defn inline-plan-frame! [(operations (ptr (ArrayList TerminalOperation)))
+                          (frame (ref Frame))] (-> i64)
+  (let [(mut at) 0
+        count (al-len [FrameLine] (load (field frame lines)))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [line (al-get [FrameLine] (load (field frame lines)) (load at))]
+                (let [(mut span-at) 0
+                      span-count (al-len [FrameSpan] (load (field line spans)))]
+                  (loop (if (>= (load span-at) span-count)
+                            (break)
+                            (let [span
+                                    (al-get [FrameSpan]
+                                            (load (field line spans))
+                                            (load span-at))]
+                              (inline-push! operations
+                                            (TerminalSetRole (load (field span role))))
+                              (inline-push! operations
+                                            (TerminalWrite (load (field span text))))
+                              (store! span-at (+ (load span-at) 1))))))
+                (inline-push! operations (TerminalResetStyle))
+                (inline-push! operations (TerminalLineBreak))
+                (store! at (+ (load at) 1)))))
+    0))
+
+;; Draw mutable rows without advancing past the final row. Inter-row CRLF is
+;; safe; only a line break after the last row would grow scrollback on redraw.
+(defn inline-plan-live-frame! [(operations (ptr (ArrayList TerminalOperation)))
+                               (frame (ref Frame))] (-> i64)
+  (let [(mut at) 0
+        count (al-len [FrameLine] (load (field frame lines)))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [line (al-get [FrameLine] (load (field frame lines)) (load at))]
+                (let [(mut span-at) 0
+                      span-count (al-len [FrameSpan] (load (field line spans)))]
+                  (loop (if (>= (load span-at) span-count)
+                            (break)
+                            (let [span
+                                    (al-get [FrameSpan]
+                                            (load (field line spans))
+                                            (load span-at))]
+                              (inline-push! operations
+                                            (TerminalSetRole (load (field span role))))
+                              (inline-push! operations
+                                            (TerminalWrite (load (field span text))))
+                              (store! span-at (+ (load span-at) 1))))))
+                (inline-push! operations (TerminalResetStyle))
+                (when (< (+ (load at) 1) count)
+                  (inline-push! operations (TerminalLineBreak))
+                  0)
+                (store! at (+ (load at) 1)))))
+    0))
+
+;; Make room for a growing live frame before painting any of its content. If the
+;; cursor is already on the terminal's bottom row, these line breaks scroll erased
+;; blank rows into scrollback. Painting first would instead make each partial first
+;; line immutable as the frame grows, which is the streamed-text duplication bug.
+(defn inline-plan-reserve-live! [(operations (ptr (ArrayList TerminalOperation)))
+                                 (height i64)] (-> i64)
+  (when (> height 1)
+    (let [(mut row) 1]
+      (loop (if (>= (load row) height)
+                (break)
+                (do
+                  (inline-push! operations (TerminalLineBreak))
+                  (store! row (+ (load row) 1))))))
+    (inline-push! operations (TerminalCursorUp (- height 1)))
+    0)
+  0)
+
+;; A committed frame is written once after the old live region is erased. The new
+;; live frame is then drawn beneath it and remains the only mutable terminal area.
+(defn inline-renderer-plan-with! [(renderer (ptr InlineRenderer))
+                                  (scratch (ptr Allocator))
+                                  (committed (ptr Frame))
+                                  (live (ptr Frame))] (-> (ArrayList TerminalOperation))
+  (let [(mut operations) (inline-operations-new scratch)
+        live-height (al-len [FrameLine] (load (field live lines)))]
+    (inline-plan-clear-live! (mut operations)
+                             (load (field renderer previous-live-height)))
+    (inline-plan-frame! (mut operations) committed)
+    (inline-plan-reserve-live! (mut operations) live-height)
+    (inline-plan-live-frame! (mut operations) live)
+    (store! (field renderer previous-live-height) live-height)
+    (load operations)))
+
+(defn inline-renderer-plan! [(renderer (ptr InlineRenderer))
+                             (committed (ptr Frame))
+                             (live (ptr Frame))] (-> (ArrayList TerminalOperation))
+  (inline-renderer-plan-with! renderer
+                              (load (field live allocator))
+                              committed
+                              live))

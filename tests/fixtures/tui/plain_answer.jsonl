@@ -1,0 +1,4 @@
+{"version":1,"sequence":1,"event":"run.created","run_id":"run-1","operation_id":"run-1","payload":{"prompt":"Say hello."}}
+{"version":1,"sequence":2,"event":"model.response.delta","run_id":"run-1","operation_id":"model-1","payload":"Hello "}
+{"version":1,"sequence":3,"event":"model.response.delta","run_id":"run-1","operation_id":"model-1","payload":"from Coil."}
+{"version":1,"sequence":4,"event":"model.request.completed","run_id":"run-1","operation_id":"model-1","payload":null}

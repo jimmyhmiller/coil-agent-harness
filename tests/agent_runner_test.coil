@@ -15,7 +15,9 @@
 
 (defstruct FakeProviderState
   [(calls (ptr i64))
-   (observed-continuation (ptr i64))])
+   (observed-continuation (ptr i64))
+   (first-operation-id (slice u8))
+   (second-operation-id (slice u8))])
 
 (defstruct FakeTool [])
 
@@ -86,12 +88,20 @@
                              (allocator (ptr Allocator))] (-> ModelResult)
   (let [call-number (+ (atomic-add (load (field state calls)) 1) 1)
         (mut response) (response-empty allocator)]
+    (if (= call-number 1)
+        (store! (field state first-operation-id)
+                (load (field request operation-id)))
+        (store! (field state second-operation-id)
+                (load (field request operation-id))))
     (store! (field response provider) "fake")
     (store! (field response model) "fake-model")
     (if (= call-number 1)
         (do
           (store! (field response response-id) "first-response")
-          (store! (field response raw-output) (JsonString "opaque-provider-state"))
+          ;; Both values are turn-owned and must be promoted before the provider
+          ;; scratch region closes.
+          (store! (field response raw-output)
+                  (JsonString (json-copy-string allocator "opaque-provider-state")))
           (al-push! [ToolCall]
                     (mut (field response tool-calls))
                     (fake-call allocator "call-a"))
@@ -107,7 +117,8 @@
             (atomic-store (load (field state observed-continuation)) 1)
             0)
           (store! (field response response-id) "final-response")
-          (store! (field response output-text) "done")))
+          (store! (field response output-text)
+                  (json-copy-string allocator "done"))))
     (ModelOk (load response))))
 
 (impl ModelProvider FakeProviderState
@@ -179,7 +190,7 @@
            (store! (field request timeout-ms) 1000)
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
-           (store! (field emitter sink) sink)
+           (store! (field emitter sink) (box allocator (dyn EventSink) sink))
            (store! (field emitter next-sequence) sequence)
            (store! (field policy max-model-turns) 3)
            (store! (field policy max-parallel-tools) 2)
@@ -194,6 +205,10 @@
              (assert (agent-run-finished? (mut handle)))
              (assert-eq (atomic-load calls) 2)
              (assert-eq (atomic-load observed) 1)
+             (assert (str-eq (load (field state first-operation-id))
+                             "model:model:1"))
+             (assert (str-eq (load (field state second-operation-id))
+                             "model:model:2"))
              (assert-eq (atomic-load events) 10)
              (assert-eq (atomic-load terminals) 1)
              (assert (match result
@@ -220,7 +235,7 @@
            (store! (field request timeout-ms) 1000)
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
-           (store! emitter (event-emitter-new sink sequence))
+           (store! emitter (event-emitter-new allocator sink sequence))
            (store! (field policy max-model-turns) 1)
            (store! (field policy max-parallel-tools) 1)
            (let [(mut handle)
@@ -261,7 +276,7 @@
            (store! (field request timeout-ms) 5)
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
-           (store! emitter (event-emitter-new sink sequence))
+           (store! emitter (event-emitter-new allocator sink sequence))
            (store! (field policy max-model-turns) 1)
            (store! (field policy max-parallel-tools) 1)
            (let [result

@@ -57,7 +57,7 @@
 (deftrait EventSink [Self]
   (publish-event [(self (ptr Self)) (event (ptr Event))] (-> i64)))
 
-(defstruct NoopEventSink [])
+(defstruct NoopEventSink [(reserved u8)])
 
 (impl EventSink NoopEventSink
   (publish-event [(self (ptr NoopEventSink)) (event (ptr Event))] (-> i64) 0))
@@ -65,18 +65,31 @@
 ;; An emitter owns global ordering for one run. `next-sequence` is atomic because
 ;; model and tool workers may publish concurrently.
 (defstruct EventEmitter
-  [(sink (dyn EventSink))
+  [(sink (ptr (dyn EventSink)))
    (next-sequence (ptr i64))
    (publish-lock i64)])
 
 ;; Create an emitter over caller-owned sequence storage. The sequence cell must
 ;; outlive every worker that uses the emitter.
-(defn event-emitter-new [(sink (dyn EventSink)) (next-sequence (ptr i64))] (-> EventEmitter)
+(defn event-emitter-new [(allocator (ptr alloc/Allocator))
+                         (sink (dyn EventSink))
+                         (next-sequence (ptr i64))] (-> EventEmitter)
   (let [emitter (alloc/stack EventEmitter)]
-    (store! (field emitter sink) sink)
+    (store! (field emitter sink) (alloc/box allocator (dyn EventSink) sink))
     (store! (field emitter next-sequence) next-sequence)
     (store! (field emitter publish-lock) 0)
     (load emitter)))
+
+;; Initialize long-lived emitters in their final storage. This avoids copying a
+;; dynamic trait object through a returned aggregate at an ownership boundary.
+(defn event-emitter-init! [(emitter (ptr EventEmitter))
+                           (allocator (ptr alloc/Allocator))
+                           (sink (dyn EventSink))
+                           (next-sequence (ptr i64))] (-> i64)
+  (store! (field emitter sink) (alloc/box allocator (dyn EventSink) sink))
+  (store! (field emitter next-sequence) next-sequence)
+  (store! (field emitter publish-lock) 0)
+  0)
 
 (defn event-emitter-lock! [(emitter (ptr EventEmitter))] (-> i64)
   (loop (if (= (atomic-cas (field emitter publish-lock) 0 1) 0)
@@ -101,7 +114,7 @@
   (event-emitter-lock! emitter)
   (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
         event (alloc/stack Event)
-        sink (field emitter sink)]
+        sink (load (field emitter sink))]
     (store! (field event version) 1)
     (store! (field event sequence) sequence)
     (store! (field event timestamp-ms) timestamp-ms)

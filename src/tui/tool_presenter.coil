@@ -1,0 +1,54 @@
+(module harness-tui-tool-presenter)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "provider-common" :use *)
+
+(defstruct ToolPresentation
+  [(label (slice u8))
+   (subject (slice u8))
+   (summary (slice u8))])
+
+(defn tool-json-string [(value Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [text] text)
+    (None [] "")))
+
+(defn tool-presentation-new [(label (slice u8))
+                             (subject (slice u8))
+                             (summary (slice u8))] (-> ToolPresentation)
+  (let [presentation (alloc/stack ToolPresentation)]
+    (store! (field presentation label) label)
+    (store! (field presentation subject) subject)
+    (store! (field presentation summary) summary)
+    (load presentation)))
+
+;; Tool-specific extraction stays outside both the event adapter and layout engine.
+(defn present-tool [(name (slice u8))
+                    (arguments Json)
+                    (result Json)] (-> ToolPresentation)
+  (cond (str-eq name "bash")
+          (tool-presentation-new "Bash"
+                                 (tool-json-string arguments "command")
+                                 (if (= (json-number-i64 (json-get result "exit_code")) 0)
+                                     "completed"
+                                     "failed"))
+        (str-eq name "spawn_subagent")
+          (tool-presentation-new "Subagent"
+                                 (tool-json-string arguments "prompt")
+                                 "delegated")
+        (str-eq name "create_workflow_node")
+          (tool-presentation-new "Workflow"
+                                 (tool-json-string arguments "node_id")
+                                 "node created")
+        (str-eq name "query_run")
+          (tool-presentation-new "Status"
+                                 (tool-json-string arguments "run_id")
+                                 "queried")
+        (str-eq name "query_workflow")
+          (tool-presentation-new "Workflow"
+                                 (tool-json-string arguments "workflow_id")
+                                 "queried")
+        :else (tool-presentation-new name "" "completed")))

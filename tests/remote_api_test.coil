@@ -5,6 +5,7 @@
 (import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
+(import "coil.socket" :as socket)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "coil.thread" :use *)
@@ -20,10 +21,9 @@
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
-(extern harness_open_partial_client :cc c [i32] (-> i64))
-
 (defstruct RemoteFakeController [(starts i64)])
 (impl RunController RemoteFakeController
+  (prepare-durable-provider [(self (ptr RemoteFakeController)) (provider-name (slice u8))] (-> i64) 0)
   (start-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                      (-> i64)
                      (do (store! (field self starts) (+ (load (field self starts)) 1)) 0))
@@ -127,7 +127,7 @@
              (match (event-journal-open allocator path true)
                (JournalOpenFailed [message] (assert false))
                (JournalOpened [opened] (store! journal opened)))
-             (store! emitter (event-emitter-new journal sequence))
+             (store! emitter (event-emitter-new allocator journal sequence))
              (match (authorization-mailbox-open allocator)
                (AuthorizationMailboxOpenFailed [message] (assert false))
                (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
@@ -138,7 +138,7 @@
              (store! (field service emitter) emitter)
              (store! (field service mailbox) mailbox)
              (store! (field service controller) controller)
-             (match (http-listener-open 0)
+             (match (http-listener-open allocator 0)
                (ListenerOpenFailed [message] (assert false))
                (ListenerOpened [opened] (store! listener opened)))
              (assert (> (load (field listener port)) 0))
@@ -211,14 +211,32 @@
                                             (fnptr-of remote-shutdown-server-thread)
                                             (cast (ptr i8) shutdown-job)))
                         0)
-             (let [partial-client (harness_open_partial_client (cast i32 (load (field listener port))))]
-               (assert (>= partial-client 0))
+             (let [partial-client (alloc/stack socket/TcpConnection)]
+               (assert (match (socket/tcp-connect allocator
+                                                  partial-client
+                                                  "127.0.0.1"
+                                                  (load (field listener port)))
+                         (Ok [connected]
+                             (match (socket/tcp-write connected
+                                                      (cast (ptr i8) (slice-data [u8] "GET /"))
+                                                      5)
+                               (Ok [written] (= written 5))
+                               (Err [failure] false)))
+                         (Err [failure] false)))
                (sleep-ms 50)
                (shutdown-signal-request! shutdown)
                (thread-join server-thread)
                (assert-eq (load server-result) 0)
-               (os/close (cast i32 partial-client)))
+               (socket/tcp-connection-close! partial-client))
              (shutdown-signal-close! shutdown)
              (http-listener-close! listener)
+             (let [reopened (alloc/stack HttpListener)]
+               (match (http-listener-open allocator
+                                          (load (field listener port)))
+                 (ListenerOpenFailed [message] (assert false))
+                 (ListenerOpened [opened]
+                                 (do
+                                   (store! reopened opened)
+                                   (http-listener-close! reopened)))))
              (authorization-mailbox-close! allocator mailbox)
              (event-journal-close! journal))))

@@ -15,6 +15,7 @@
 (defstruct FakeRunController [(starts i64) (cancels i64)])
 
 (impl RunController FakeRunController
+  (prepare-durable-provider [(self (ptr FakeRunController)) (provider-name (slice u8))] (-> i64) 0)
   (start-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                      (-> i64)
                      (do
@@ -79,7 +80,7 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
@@ -177,7 +178,7 @@
                    (http-service-call service
                                       "POST"
                                       "/v1/runs"
-                                      "{\"version\":1,\"command_id\":\"delegate-create\",\"run_id\":\"child-agent\",\"parent_run_id\":\"run-1\",\"parent_agent_id\":\"spoofed-parent\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"research this\"}")
+                                      "{\"version\":1,\"command_id\":\"delegate-create\",\"run_id\":\"child-agent\",\"parent_run_id\":\"run-1\",\"parent_agent_id\":\"spoofed-parent\",\"prompt\":\"research this\"}")
                  missing-parent
                    (http-service-call service
                                       "POST"
@@ -195,6 +196,8 @@
              (assert (str-eq (command-string delegated-event "run_id") "run-1"))
              (assert (str-eq (command-string delegated-event "agent_id") "run-1"))
              (assert (str-eq (command-string payload "parent_agent_id") "run-1"))
+             (assert (str-eq (command-string payload "provider") "fake"))
+             (assert (str-eq (command-string payload "model") "fake-model"))
              (assert (str-eq (command-string message "kind") "delegation"))
              (assert (str-eq (command-string message "from") "run-1"))
              (assert (str-eq (command-string message "to") "child-agent"))
@@ -235,6 +238,23 @@
                            0)
                          (store! i (+ (load i) 1)))))
              (assert-eq (load workflow-created) 2))
+           ;; Simulate a crash after the request audit record but before cancellation.
+           ;; Retrying the command must resume the intervention instead of treating it
+           ;; as complete.
+           (let [(mut pending-intervention) (json-object allocator)]
+             (json-object-put! (mut pending-intervention) "version" (json-integer allocator 1))
+             (json-put-string! (mut pending-intervention) "command_id" "intervention-1")
+             (json-put-string! (mut pending-intervention) "run_id" "workflow-run-1")
+             (json-put-string! (mut pending-intervention) "action" "cancel")
+             (emit-event emitter
+                         0
+                         (SupervisorInterventionRequested)
+                         "workflow-run-1"
+                         "intervention-1"
+                         ""
+                         "fake"
+                         "fake-model"
+                         (load pending-intervention)))
            (let [assessment
                    (http-service-call service
                                       "POST"
@@ -258,6 +278,7 @@
                  records (json-get (load (field events body)) "events")
                  (mut saw-assessment) false
                  (mut saw-intervention) false
+                 (mut intervention-requests) 0
                  (mut i) 0
                  n (json-array-length records)]
              (loop (if (>= (load i) n)
@@ -269,9 +290,13 @@
                          (when (str-eq (command-string event "event") "supervisor.intervention.applied")
                            (store! saw-intervention true)
                            0)
+                         (when (str-eq (command-string event "event") "supervisor.intervention.requested")
+                           (store! intervention-requests (+ (load intervention-requests) 1))
+                           0)
                          (store! i (+ (load i) 1)))))
              (assert (load saw-assessment))
-             (assert (load saw-intervention)))
+             (assert (load saw-intervention))
+             (assert-eq (load intervention-requests) 1))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 
@@ -288,7 +313,7 @@
            (match (event-journal-open allocator path false)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
@@ -299,12 +324,18 @@
            (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (let [invalid (http-service-call service "POST" "/v1/runs" "{")
+                 dependency-without-workflow
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"invalid-dependency\",\"run_id\":\"invalid-dependency\",\"provider\":\"fake\",\"model\":\"fake-model\",\"depends_on\":[\"other\"]}")
                  mismatch
                    (http-service-call service
                                       "POST"
                                       "/v1/runs/path-id/cancel"
                                       "{\"version\":1,\"command_id\":\"cancel\",\"run_id\":\"body-id\"}")]
              (assert-eq (load (field invalid status)) 400)
+             (assert-eq (load (field dependency-without-workflow status)) 400)
              (assert-eq (load (field mismatch status)) 409))
            (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
@@ -322,7 +353,7 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))

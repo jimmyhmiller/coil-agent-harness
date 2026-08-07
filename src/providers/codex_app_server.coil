@@ -9,6 +9,7 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "coil.subprocess" :as subprocess)
+(import "coil.sync" :as sync)
 (import "coil.time" :as time)
 (import "coil.try" :use *)
 (import "harness-event" :use *)
@@ -16,19 +17,44 @@
 (import "harness-model" :use *)
 (import "harness-http" :use *)
 (import "harness-system" :use *)
+(import "harness-tool" :use *)
+(import "harness-tool-executor" :use *)
 (import "provider-common" :use *)
 
 (defstruct CodexAppServerContext
   [(cwd (slice u8))
    (sandbox (slice u8))
-   (approval-policy (slice u8))])
+   (approval-policy (slice u8))
+   (owner (ptr Allocator))
+   (connection (ptr i8))
+   (mutex sync/Mutex)
+   (persistent bool)
+   (initialized bool)])
 
 (defn codex-context [(cwd (slice u8))] (-> CodexAppServerContext)
   (let [context (alloc/stack CodexAppServerContext)]
     (store! (field context cwd) cwd)
     (store! (field context sandbox) "workspace-write")
     (store! (field context approval-policy) "never")
+    (store! (field context owner) (cast (ptr Allocator) 0))
+    (store! (field context connection) (cast (ptr i8) 0))
+    (store! (field context persistent) false)
+    (store! (field context initialized) false)
     (load context)))
+
+;; Codex is a provider capability; App Server and direct subscription HTTP are
+;; interchangeable execution strategies behind this lifecycle boundary.
+(deftrait CodexExecutionStrategy [Self]
+  (codex-strategy-name [(self (ptr Self))] (-> (slice u8)))
+  (codex-strategy-prepare! [(self (ptr Self)) (allocator (ptr Allocator))] (-> i64))
+  (codex-strategy-execute [(self (ptr Self))
+                           (request (ptr ModelRequest))
+                           (emitter (ptr EventEmitter))
+                           (allocator (ptr Allocator))]
+                          (-> ModelResult))
+  (codex-strategy-close! [(self (ptr Self))] (-> i64)))
+
+(defstruct CodexProvider [(strategy (ptr (dyn CodexExecutionStrategy)))])
 
 (defstruct CodexRead
   [(ok bool)
@@ -62,6 +88,36 @@
   (codex-transport-close [(self (ptr Self))] (-> i64)))
 
 (defstruct CodexConnection [(transport (dyn CodexTransport))])
+
+;; A service-owned context keeps one initialized app-server process for all Codex
+;; turns. The mutex serializes the current fixed-ID JSON-RPC client over its single
+;; stdio stream.
+(defn codex-context-init-persistent! [(context (ptr CodexAppServerContext))
+                                     (owner (ptr Allocator))
+                                     (cwd (slice u8))] (-> i64)
+  (store! context (codex-context cwd))
+  (store! (field context owner) owner)
+  (match (sync/mutex-init-with-allocator (field context mutex) owner)
+    (Err [failure] -1)
+    (Ok [mutex]
+        (do
+          (store! (field context persistent) true)
+          0))))
+
+(defn codex-context-close! [(context (ptr CodexAppServerContext))] (-> i64)
+  (when (load (field context persistent))
+    (sync/mutex-lock! (field context mutex))
+    (let [opaque (load (field context connection))]
+      (when (!= opaque (cast (ptr i8) 0))
+        (codex-close (cast (ptr CodexConnection) opaque))
+        (store! (field context connection) (cast (ptr i8) 0))
+        (store! (field context initialized) false)
+        0))
+    (sync/mutex-unlock! (field context mutex))
+    (sync/mutex-destroy! (field context mutex))
+    (store! (field context persistent) false)
+    0)
+  0)
 
 (defn codex-spawn [(allocator (ptr Allocator))] (-> CodexSpawnResult)
   (let [result (alloc/stack CodexSpawnResult)
@@ -119,7 +175,7 @@
     (json-put-string! (mut client) "name" "coil-agent-harness")
     (json-put-string! (mut client) "title" "COIL Agent Harness")
     (json-put-string! (mut client) "version" "0.1.0")
-    (json-put-bool! (mut capabilities) "experimentalApi" false)
+    (json-put-bool! (mut capabilities) "experimentalApi" true)
     (json-object-put! (mut params) "clientInfo" (load client))
     (json-object-put! (mut params) "capabilities" (load capabilities))
     (codex-rpc-request allocator 1 "initialize" (load params))))
@@ -145,6 +201,28 @@
                         "developerInstructions"
                         (load (field request instructions)))
       0)
+    (let [(mut tools) (json-array allocator)
+          definitions (field (load (field request tools)) definitions)
+          (mut i) 0
+          n (al-len [ToolDefinition] (load definitions))]
+      (loop (if (>= (load i) n)
+                (break)
+                (let [definition (al-get [ToolDefinition] (load definitions) (load i))
+                      ;; Keep a value, not a reference into the temporary returned
+                      ;; by al-get. Building `tool` allocates and may reuse that
+                      ;; temporary's stack storage before the schema is read.
+                      spec (load (field definition spec))
+                      (mut tool) (json-object allocator)]
+                  (json-put-string! (mut tool) "type" "function")
+                  (json-put-string! (mut tool) "name" (load (field spec name)))
+                  (json-put-string! (mut tool) "description" (load (field spec description)))
+                  (json-object-put! (mut tool)
+                                    "inputSchema"
+                                    (json-clone allocator
+                                                (load (field spec input-schema))))
+                  (json-array-push! (mut tools) (load tool))
+                  (store! i (+ (load i) 1)))))
+      (json-object-put! (mut params) "dynamicTools" (load tools)))
     (codex-rpc-request allocator 2 "thread/start" (load params))))
 
 (defn codex-last-user-message [(request (ptr ModelRequest))] (-> (slice u8))
@@ -163,6 +241,18 @@
                     (AssistantRole [] 0))))))
     (load result)))
 
+(defn codex-conversation-input [(allocator (ptr Allocator))
+                                (request (ptr ModelRequest))] (-> (slice u8))
+  ;; Codex owns history in its durable thread. Replaying a flattened transcript
+  ;; creates a second, divergent history and defeats native prefix caching.
+  (codex-last-user-message request))
+
+(defn codex-thread-resume-request [(allocator (ptr Allocator))
+                                   (thread-id (slice u8))] (-> Json)
+  (let [(mut params) (json-object allocator)]
+    (json-put-string! (mut params) "threadId" thread-id)
+    (codex-rpc-request allocator 2 "thread/resume" (load params))))
+
 (defn codex-turn-start-request [(allocator (ptr Allocator))
                                 (thread-id (slice u8))
                                 (request (ptr ModelRequest))] (-> Json)
@@ -170,7 +260,7 @@
         (mut input) (json-array allocator)
         (mut params) (json-object allocator)]
     (json-put-string! (mut input-item) "type" "text")
-    (json-put-string! (mut input-item) "text" (codex-last-user-message request))
+    (json-put-string! (mut input-item) "text" (codex-conversation-input allocator request))
     (json-array-push! (mut input) (load input-item))
     (json-put-string! (mut params) "threadId" thread-id)
     (json-object-put! (mut params) "input" (load input))
@@ -274,6 +364,38 @@
 (defn codex-close [(connection (ptr CodexConnection))] (-> i64)
   (codex-transport-close (load (field connection transport))))
 
+(defn codex-bootstrap-wait [(allocator (ptr Allocator))
+                            (connection (ptr CodexConnection))
+                            (wanted-id i64)] (-> i64)
+  (let [(mut done) false
+        (mut result) -1]
+    (loop (if (load done)
+              (break)
+              (let [read-result (codex-read allocator connection 120000)]
+                (if (not (load (field read-result ok)))
+                    (store! done true)
+                    (let [message (load (field read-result message))]
+                      (when (= (json-number-i64 (json-get message "id")) wanted-id)
+                        (store! result
+                                (if (match-else (json-get message "error")
+                                                (JsonNull [] false)
+                                                (_ true))
+                                    -1
+                                    0))
+                        (store! done true)
+                        0))))))
+    (load result)))
+
+(defn codex-bootstrap-initialize! [(allocator (ptr Allocator))
+                                   (connection (ptr CodexConnection))] (-> i64)
+  (if (!= (codex-send allocator connection (codex-initialize-request allocator)) 0)
+      -1
+      (if (!= (codex-bootstrap-wait allocator connection 1) 0)
+          -1
+          (match (codex-notify-initialized allocator connection)
+            (Ok [value] 0)
+            (Err [message] -1)))))
+
 (defn codex-emit [(emitter (ptr EventEmitter))
                   (request (ptr ModelRequest))
                   (kind EventKind)
@@ -301,6 +423,68 @@
     (json-object-put! (mut response) "error" (load error))
     (codex-send allocator process (load response))))
 
+(defn codex-dynamic-tool-response [(allocator (ptr Allocator))
+                                   (process (ptr CodexConnection))
+                                   (message Json)
+                                   (result ToolResult)] (-> i64)
+  (let [success
+          (match-else (load (field result status))
+                      (ToolSucceeded [] true)
+                      (_ false))
+        text
+          (if success
+              (json-stringify allocator (load (field result output)))
+              (load (field result error)))
+        (mut content) (json-object allocator)
+        (mut content-items) (json-array allocator)
+        (mut payload) (json-object allocator)
+        (mut response) (json-object allocator)]
+    (json-put-string! (mut content) "type" "inputText")
+    (json-put-string! (mut content) "text" text)
+    (json-array-push! (mut content-items) (load content))
+    (json-object-put! (mut payload) "contentItems" (load content-items))
+    (json-put-bool! (mut payload) "success" success)
+    (json-object-put! (mut response) "id" (json-get message "id"))
+    (json-object-put! (mut response) "result" (load payload))
+    (codex-send allocator process (load response))))
+
+(defn codex-execute-dynamic-tool [(allocator (ptr Allocator))
+                                  (process (ptr CodexConnection))
+                                  (emitter (ptr EventEmitter))
+                                  (request (ptr ModelRequest))
+                                  (message Json)] (-> i64)
+  (let [params (json-get message "params")
+        call (alloc/stack ToolCall)
+        calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+        execution (alloc/stack ToolExecutionRequest)]
+    (store! (field call id)
+            (match (json-string-at params "callId")
+              (Some [value] value)
+              (None [] "codex-dynamic-tool")))
+    (store! (field call name)
+            (match (json-string-at params "tool")
+              (Some [value] value)
+              (None [] "")))
+    (store! (field call arguments) (json-get params "arguments"))
+    (store! (field call raw-arguments)
+            (json-stringify allocator (load (field call arguments))))
+    (al-push! [ToolCall] calls (load call))
+    (store! (field execution run-id) (load (field request run-id)))
+    (store! (field execution parent-operation-id) (load (field request operation-id)))
+    (store! (field execution provider) "codex-app-server")
+    (store! (field execution model) (load (field request model)))
+    (store! (field execution registry) (load (field request tools)))
+    (store! (field execution authorizer) (load (field request tool-authorizer)))
+    (store! (field execution calls) calls)
+    (store! (field execution emitter) emitter)
+    (store! (field execution cancellation) (load (field request cancellation)))
+    (store! (field execution run-deadline-monotonic-ms)
+            (load (field request deadline-monotonic-ms)))
+    (store! (field execution max-parallel) 1)
+    (let [batch (execute-tools-parallel allocator execution)
+          result (al-get [ToolResult] (load (field batch results)) 0)]
+      (codex-dynamic-tool-response allocator process message result))))
+
 (defn codex-observe-message [(allocator (ptr Allocator))
                              (process (ptr CodexConnection))
                              (emitter (ptr EventEmitter))
@@ -309,7 +493,8 @@
   (match (json-string-at message "method")
     (Some [method]
           (do
-            (codex-emit emitter request (CodexNotification) (JsonString method))
+            ;; App-server notifications are transport diagnostics, not durable
+            ;; domain facts. Semantic events below remain journaled.
             (when (str-eq method "item/agentMessage/delta")
               (match (json-string-at (json-get message "params") "delta")
                 (Some [delta]
@@ -318,7 +503,13 @@
               0)
             (match-else (json-get message "id")
                         (JsonNull [] 0)
-                        (_ (codex-reject-server-request allocator process message)))
+                        (_ (if (str-eq method "item/tool/call")
+                               (codex-execute-dynamic-tool allocator
+                                                           process
+                                                           emitter
+                                                           request
+                                                           message)
+                               (codex-reject-server-request allocator process message))))
             0))
     (None [] 0)))
 
@@ -366,7 +557,8 @@
   (let [(mut text) (sb-new allocator)
         (mut final) (JsonNull)
         (mut completed) false
-        (mut failure) ""]
+        (mut failure) ""
+        (mut usage) (zeroed ModelUsage)]
     (loop (if (or (load completed) (> (slice-len [u8] (load failure)) 0))
               (break)
               (let [read-result (codex-read allocator process (model-request-remaining-ms request))]
@@ -385,6 +577,18 @@
                         (match (json-string-at (json-get message "params") "delta")
                           (Some [delta] (sb-push-str! (mut text) delta))
                           (None [] 0))
+                        0)
+                      (when (str-eq method "thread/tokenUsage/updated")
+                        (let [last (json-get (json-get message "params") "tokenUsage")
+                              breakdown (json-get last "last")]
+                          (store! (field usage input-tokens)
+                                  (json-number-i64 (json-get breakdown "inputTokens")))
+                          (store! (field usage output-tokens)
+                                  (json-number-i64 (json-get breakdown "outputTokens")))
+                          (store! (field usage reasoning-tokens)
+                                  (json-number-i64 (json-get breakdown "reasoningOutputTokens")))
+                          (store! (field usage cached-input-tokens)
+                                  (json-number-i64 (json-get breakdown "cachedInputTokens"))))
                         0)
                       (when (str-eq method "turn/completed")
                         (store! final (json-get message "params"))
@@ -410,6 +614,8 @@
                     (Some [turn-id] turn-id)
                     (None [] thread-id)))
           (store! (field response output-text) (sb-finish! (mut text)))
+          (store! (field response provider-session-id) thread-id)
+          (store! (field response usage) (load usage))
           (store! (field response raw-output) (load final))
           (ModelOk (load response))))))
 
@@ -465,11 +671,10 @@
 ;; The fixed App Server handshake is intentionally linear. Each failed operation
 ;; short-circuits with the message for that operation; process ownership stays with
 ;; codex-execute, which closes it exactly once.
-(defn codex-open-thread [(context (ptr CodexAppServerContext))
-                         (request (ptr ModelRequest))
-                         (emitter (ptr EventEmitter))
-                         (allocator (ptr Allocator))
-                         (process (ptr CodexConnection))] (-> (Result (slice u8) (slice u8)))
+(defn codex-initialize-connection [(request (ptr ModelRequest))
+                                   (emitter (ptr EventEmitter))
+                                   (allocator (ptr Allocator))
+                                   (process (ptr CodexConnection))] (-> (Result i64 (slice u8)))
   (try (try! (codex-call allocator
                          process
                          emitter
@@ -477,15 +682,26 @@
                          (codex-initialize-request allocator)
                          1
                          "could not initialize Codex app-server"))
-       (try! (codex-notify-initialized allocator process))
-       (let [started
+       (codex-notify-initialized allocator process)))
+
+(defn codex-open-thread [(context (ptr CodexAppServerContext))
+                         (request (ptr ModelRequest))
+                         (emitter (ptr EventEmitter))
+                         (allocator (ptr Allocator))
+                         (process (ptr CodexConnection))] (-> (Result (slice u8) (slice u8)))
+  (try (let [session-id (load (field (field request continuation) provider-session-id))
+             started
                (try! (codex-call allocator
                                  process
                                  emitter
                                  request
-                                 (codex-thread-start-request allocator context request)
+                                 (if (> (slice-len [u8] session-id) 0)
+                                     (codex-thread-resume-request allocator session-id)
+                                     (codex-thread-start-request allocator context request))
                                  2
-                                 "could not send thread/start"))]
+                                 (if (> (slice-len [u8] session-id) 0)
+                                     "could not send thread/resume"
+                                     "could not send thread/start")))]
          (codex-thread-id started))))
 
 (defn codex-run-session [(context (ptr CodexAppServerContext))
@@ -501,14 +717,40 @@
 ;; Translate the terminal result into exactly one request lifecycle event.
 (defn codex-finish [(emitter (ptr EventEmitter))
                     (request (ptr ModelRequest))
+                    (allocator (ptr Allocator))
                     (result ModelResult)] (-> ModelResult)
   (match result
     (ModelOk [response]
              (let [completed response]
-               (codex-emit emitter
-                           request
-                           (ModelRequestCompleted)
-                           (JsonString (load (field completed response-id))))
+               (let [(mut usage) (json-object allocator)
+                     (mut payload) (json-object allocator)]
+                 (json-put-string! (mut payload)
+                                   "response_id"
+                                   (load (field completed response-id)))
+                 (json-put-string! (mut payload)
+                                   "provider_session_id"
+                                   (load (field completed provider-session-id)))
+                 (json-put-string! (mut payload)
+                                   "cache_key"
+                                   (load (field request cache-key)))
+                 (json-object-put! (mut usage)
+                                   "input_tokens"
+                                   (json-integer allocator
+                                                 (load (field (field completed usage) input-tokens))))
+                 (json-object-put! (mut usage)
+                                   "output_tokens"
+                                   (json-integer allocator
+                                                 (load (field (field completed usage) output-tokens))))
+                 (json-object-put! (mut usage)
+                                   "reasoning_tokens"
+                                   (json-integer allocator
+                                                 (load (field (field completed usage) reasoning-tokens))))
+                 (json-object-put! (mut usage)
+                                   "cached_input_tokens"
+                                   (json-integer allocator
+                                                 (load (field (field completed usage) cached-input-tokens))))
+                 (json-object-put! (mut payload) "usage" (load usage))
+                 (codex-emit emitter request (ModelRequestCompleted) (load payload)))
                (ModelOk completed)))
     (ModelErr [failure]
               (let [failed failure]
@@ -527,9 +769,108 @@
                                 (allocator (ptr Allocator))
                                 (connection (ptr CodexConnection))] (-> ModelResult)
   (codex-emit emitter request (ModelRequestStarted) (JsonNull))
-  (let [result (codex-run-session context request emitter allocator connection)]
+  (let [result
+          (match (codex-initialize-connection request emitter allocator connection)
+            (Err [message] (model-failure "codex-app-server" 0 message))
+            (Ok [value] (codex-run-session context request emitter allocator connection)))]
     (codex-close connection)
-    (codex-finish emitter request result)))
+    (codex-finish emitter request allocator result)))
+
+(defn codex-open-persistent! [(context (ptr CodexAppServerContext))
+                              (request (ptr ModelRequest))
+                              (emitter (ptr EventEmitter))
+                              (allocator (ptr Allocator))] (-> (Result (ptr CodexConnection) (slice u8)))
+  (let [existing (load (field context connection))]
+    (if (and (!= existing (cast (ptr i8) 0))
+             (load (field context initialized)))
+        (Ok (cast (ptr CodexConnection) existing))
+        (if (!= existing (cast (ptr i8) 0))
+            (let [connection (cast (ptr CodexConnection) existing)]
+              (match (codex-initialize-connection request emitter allocator connection)
+                (Err [message] (Err message))
+                (Ok [value]
+                    (do
+                      (store! (field context initialized) true)
+                      (Ok connection)))))
+            (let [spawn-result (codex-spawn (load (field context owner)))]
+          (if (!= (load (field spawn-result code)) 0)
+              (Err (load (field spawn-result error)))
+              (let [process
+                      (box (load (field context owner))
+                           subprocess/Child
+                           (load (field spawn-result process)))
+                    connection
+                      (box (load (field context owner))
+                           CodexConnection
+                           (zeroed CodexConnection))]
+                (store! (field connection transport) process)
+                (match (codex-initialize-connection request emitter allocator connection)
+                  (Err [message]
+                       (do
+                         (codex-close connection)
+                         (Err message)))
+                  (Ok [value]
+                      (do
+                        (store! (field context connection) (cast (ptr i8) connection))
+                        (store! (field context initialized) true)
+                        (Ok connection)))))))))))
+
+(defn codex-context-prepare-persistent! [(context (ptr CodexAppServerContext))
+                                        (allocator (ptr Allocator))] (-> i64)
+  (match (sync/mutex-lock! (field context mutex))
+    (Err [failure] -1)
+    (Ok [locked]
+        (let [existing (load (field context connection))
+              (mut result) 0]
+          (when (= existing (cast (ptr i8) 0))
+            (let [spawn-result (codex-spawn (load (field context owner)))]
+              (if (!= (load (field spawn-result code)) 0)
+                  (store! result -1)
+                  (let [process
+                          (box (load (field context owner))
+                               subprocess/Child
+                               (load (field spawn-result process)))
+                        connection
+                          (box (load (field context owner))
+                               CodexConnection
+                               (zeroed CodexConnection))]
+                    (store! (field connection transport) process)
+                    (if (= (codex-bootstrap-initialize! allocator connection) 0)
+                        (do
+                          (store! (field context connection) (cast (ptr i8) connection))
+                          (store! (field context initialized) true))
+                        (do
+                          (codex-close connection)
+                          (store! result -1)))))))
+          (sync/mutex-unlock! (field context mutex))
+          (load result)))))
+
+(defn codex-execute-persistent [(context (ptr CodexAppServerContext))
+                                (request (ptr ModelRequest))
+                                (emitter (ptr EventEmitter))
+                                (allocator (ptr Allocator))] (-> ModelResult)
+  (match (sync/mutex-lock! (field context mutex))
+    (Err [failure] (model-failure "codex-app-server" 0 "could not lock Codex app-server"))
+    (Ok [locked]
+        (let [result
+                (do
+                  (codex-emit emitter request (ModelRequestStarted) (JsonNull))
+                  (match (codex-open-persistent! context request emitter allocator)
+                    (Err [message] (model-failure "codex-app-server" 0 message))
+                    (Ok [connection]
+                        (codex-run-session context request emitter allocator connection))))]
+          (match result
+            (ModelOk [response] 0)
+            (ModelErr [failure]
+                      (let [opaque (load (field context connection))]
+                        (when (!= opaque (cast (ptr i8) 0))
+                          (codex-close (cast (ptr CodexConnection) opaque))
+                          (store! (field context connection) (cast (ptr i8) 0))
+                          (store! (field context initialized) false)
+                          0)
+                        0)))
+          (sync/mutex-unlock! (field context mutex))
+          (codex-finish emitter request allocator result)))))
 
 (defn codex-execute [(context (ptr CodexAppServerContext))
                      (request (ptr ModelRequest))
@@ -563,7 +904,44 @@
                   (emitter (ptr EventEmitter))
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
-                 (codex-execute self request emitter allocator)))
+                 (if (load (field self persistent))
+                     (codex-execute-persistent self request emitter allocator)
+                     (codex-execute self request emitter allocator))))
+
+(impl CodexExecutionStrategy CodexAppServerContext
+  (codex-strategy-name [(self (ptr CodexAppServerContext))]
+                       (-> (slice u8))
+                       "codex-app-server")
+  (codex-strategy-prepare! [(self (ptr CodexAppServerContext))
+                            (allocator (ptr Allocator))]
+                           (-> i64)
+                           (codex-context-prepare-persistent! self allocator))
+  (codex-strategy-execute [(self (ptr CodexAppServerContext))
+                           (request (ptr ModelRequest))
+                           (emitter (ptr EventEmitter))
+                           (allocator (ptr Allocator))]
+                          (-> ModelResult)
+                          (codex-execute-persistent self request emitter allocator))
+  (codex-strategy-close! [(self (ptr CodexAppServerContext))]
+                         (-> i64)
+                         (codex-context-close! self)))
+
+(impl ModelProvider CodexProvider
+  (provider-name [(self (ptr CodexProvider))]
+                 (-> (slice u8))
+                 (codex-strategy-name (load (load (field self strategy)))))
+  (provider-capabilities [(self (ptr CodexProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "codex-app-server"))
+  (execute-model [(self (ptr CodexProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (codex-strategy-execute (load (load (field self strategy)))
+                                         request
+                                         emitter
+                                         allocator)))
 
 ;; Build a request that appends input to an active turn without starting a new turn.
 (defn codex-steer-request [(allocator (ptr Allocator))

@@ -13,6 +13,7 @@
 (import "harness-sse" :use *)
 (import "harness-tool" :use *)
 (import "codex-app-server" :use *)
+(import "codex-direct" :use *)
 (import "claude-agent" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
@@ -20,6 +21,42 @@
 (import "provider-common" :use *)
 
 (defstruct UnusedTool [])
+
+(defstruct FakeCodexExecutionStrategy
+  [(prepare-count i64)
+   (execute-count i64)
+   (close-count i64)])
+
+(impl CodexExecutionStrategy FakeCodexExecutionStrategy
+  (codex-strategy-name [(self (ptr FakeCodexExecutionStrategy))]
+                       (-> (slice u8))
+                       "fake-codex-strategy")
+  (codex-strategy-prepare! [(self (ptr FakeCodexExecutionStrategy))
+                            (allocator (ptr Allocator))]
+                           (-> i64)
+                           (do
+                             (store! (field self prepare-count)
+                                     (+ (load (field self prepare-count)) 1))
+                             0))
+  (codex-strategy-execute [(self (ptr FakeCodexExecutionStrategy))
+                           (request (ptr ModelRequest))
+                           (emitter (ptr EventEmitter))
+                           (allocator (ptr Allocator))]
+                          (-> ModelResult)
+                          (do
+                            (store! (field self execute-count)
+                                    (+ (load (field self execute-count)) 1))
+                            (let [(mut response) (response-empty allocator)]
+                              (store! (field response provider) "codex")
+                              (store! (field response model) (load (field request model)))
+                              (store! (field response output-text) "strategy response")
+                              (ModelOk (load response)))))
+  (codex-strategy-close! [(self (ptr FakeCodexExecutionStrategy))]
+                         (-> i64)
+                         (do
+                           (store! (field self close-count)
+                                   (+ (load (field self close-count)) 1))
+                           0)))
 
 (defstruct FixtureStreamingTransport
   [(payload (slice u8))
@@ -177,7 +214,7 @@
                request (test-request allocator)
                sink (box allocator NoopEventSink (zeroed NoopEventSink))
                sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
                transport (box allocator FixtureStreamingTransport (zeroed FixtureStreamingTransport))
                openai (alloc/stack OpenAIResponsesContext)
                deepseek-openai (alloc/stack DeepSeekOpenAIContext)
@@ -270,7 +307,7 @@
                request (test-request allocator)
                sink (alloc/stack DeltaEventSink)
                sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
                state (alloc/stack OpenAIStreamState)
                decoder (alloc/stack SseDecoder)]
            (store! (field sink deltas) 0)
@@ -342,7 +379,7 @@
                request (test-request allocator)
                sink (alloc/stack DeltaEventSink)
                sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
                state (alloc/stack DeepSeekOpenAIStreamState)
                decoder (alloc/stack SseDecoder)]
            (store! (field sink deltas) 0)
@@ -410,7 +447,7 @@
                request (test-request allocator)
                sink (alloc/stack DeltaEventSink)
                sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new sink sequence))
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
                state (alloc/stack DeepSeekAnthropicStreamState)
                decoder (alloc/stack SseDecoder)]
            (store! (field sink deltas) 0)
@@ -462,8 +499,39 @@
 
 (deftest codex-app-server-control-contract
          (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               context (alloc/stack CodexAppServerContext)
+               capabilities-model (provider-capabilities-for "codex-app-server")
+               initialize (codex-initialize-request allocator)
+               capabilities (json-get (json-get initialize "params") "capabilities")
                steer (codex-steer-request allocator 8 "thread-1" "turn-1" "new direction")
                interrupt (codex-interrupt-request allocator 9 "thread-1" "turn-1")]
+           (store! context (codex-context "."))
+           (assert (load (field capabilities-model harness-tools)))
+           (assert (load (field capabilities-model parallel-tools)))
+           (assert (match (json-bool-value (json-get capabilities "experimentalApi"))
+                     (Some [enabled] enabled)
+                     (None [] false)))
+           (let [resume (codex-thread-resume-request allocator "thread-1")]
+             (assert (match (json-string-at resume "method")
+                       (Some [value] (str-eq value "thread/resume"))
+                       (None [] false)))
+             (assert (match (json-string-at (json-get resume "params") "threadId")
+                       (Some [value] (str-eq value "thread-1"))
+                       (None [] false))))
+           (let [thread-start (codex-thread-start-request allocator context request)
+                 dynamic-tools (json-get (json-get thread-start "params") "dynamicTools")
+                 dynamic-tool (json-array-get dynamic-tools 0)]
+             (assert-eq (json-array-length dynamic-tools) 1)
+             (assert (match (json-string-at dynamic-tool "type")
+                       (Some [value] (str-eq value "function"))
+                       (None [] false)))
+             (assert (match (json-string-at dynamic-tool "name")
+                       (Some [value] (str-eq value "city_fact"))
+                       (None [] false)))
+             (assert (match-else (json-get dynamic-tool "inputSchema")
+                                 (JsonObject [keys values] true)
+                                 (_ false))))
            (assert (match (json-string-at steer "method")
                      (Some [value] (str-eq value "turn/steer"))
                      (None [] false)))
@@ -478,12 +546,14 @@
          (let [allocator (malloc-allocator)
                request (test-request allocator)
                wire (anthropic-request-json allocator request true)
+               encoded (json-stringify allocator wire)
                system (json-get wire "system")
                identity (json-array-get system 0)
                instructions (json-array-get system 1)
                tool (json-array-get (json-get wire "tools") 0)]
            (assert (str-eq (anthropic-auth-header allocator "oauth-token" true)
                            "Authorization: Bearer oauth-token"))
+           (assert (> (slice-len [u8] encoded) 0))
            (assert-eq (json-array-length system) 2)
            (assert (match (json-string-at identity "text")
                      (Some [value]
@@ -509,6 +579,44 @@
                      (Ok [thread-id] false)
                      (Err [message] (str-eq message "thread/start omitted thread id"))))))
 
+(deftest codex-conversation-input-sends-only-the-new-turn-to-native-thread-history
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               messages (load (field request messages))
+               assistant (alloc/stack Message)
+               user (alloc/stack Message)]
+           (store! (field assistant role) (AssistantRole))
+           (store! (field assistant content) "The code is in src/main.coil.")
+           (al-push! [Message] messages (load assistant))
+           (store! (field user role) (UserRole))
+           (store! (field user content) "What did you just say?")
+           (al-push! [Message] messages (load user))
+           (let [input (codex-conversation-input allocator request)]
+             (assert (str-eq input "What did you just say?")))))
+
+(deftest completion-payload-exposes-provider-cache-telemetry
+         (let [allocator (malloc-allocator)
+               (mut response) (response-empty allocator)]
+           (store! (field response response-id) "resp-cache")
+           (store! (field response provider-session-id) "thread-cache")
+           (store! (field (field response usage) input-tokens) 100)
+           (store! (field (field response usage) cached-input-tokens) 80)
+           (let [request (test-request allocator)]
+             (store! (field request cache-key) "cache-key-v1")
+             (let [payload (model-completion-payload allocator request (mut response))]
+             (assert (match (json-string-at payload "response_id")
+                       (Some [value] (str-eq value "resp-cache"))
+                       (None [] false)))
+             (assert (match (json-string-at payload "provider_session_id")
+                       (Some [value] (str-eq value "thread-cache"))
+                       (None [] false)))
+             (assert (match (json-string-at payload "cache_key")
+                       (Some [value] (str-eq value "cache-key-v1"))
+                       (None [] false)))
+             (assert-eq (json-number-i64
+                          (json-get (json-get payload "usage") "cached_input_tokens"))
+                        80)))))
+
 (deftest codex-transport-call-and-close-contract
          (let [allocator (malloc-allocator)
                request (test-request allocator)
@@ -520,7 +628,7 @@
                failed-connection (box allocator CodexConnection (zeroed CodexConnection))
                sink (box allocator NoopEventSink (zeroed NoopEventSink))
                sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new sink sequence))]
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
            (store! (field read-result ok) true)
            (store! (field read-result eof) false)
            (store! (field read-result message) (load (field parsed value)))
@@ -555,6 +663,80 @@
            (assert-eq (load (field failed send-count)) 1)
            (assert-eq (load (field failed read-count)) 0)))
 
+(deftest codex-provider-delegates-through-pluggable-execution-strategy
+         (let [allocator (malloc-allocator)
+               strategy (box allocator
+                             FakeCodexExecutionStrategy
+                             (zeroed FakeCodexExecutionStrategy))
+               strategy-view (box allocator (dyn CodexExecutionStrategy) strategy)
+               provider (alloc/stack CodexProvider)
+               request (test-request allocator)
+               sink (box allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box allocator i64 1)
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
+           (store! provider (zeroed CodexProvider))
+           (store! (field provider strategy) strategy-view)
+           (assert-eq (codex-strategy-prepare! (load strategy-view) allocator) 0)
+           (assert (match (execute-model provider request emitter allocator)
+                     (ModelOk [response]
+                              (let [success response]
+                                (str-eq (load (field success output-text))
+                                        "strategy response")))
+                     (ModelErr [failure] false)))
+           (assert-eq (codex-strategy-close! (load strategy-view)) 0)
+           (assert-eq (load (field strategy prepare-count)) 1)
+           (assert-eq (load (field strategy execute-count)) 1)
+           (assert-eq (load (field strategy close-count)) 1)))
+
+(deftest codex-direct-wire-contract-is-explicitly-subscription-shaped
+         (let [allocator (malloc-allocator)
+               context (alloc/stack CodexDirectContext)
+               request (test-request allocator)
+               previous
+                 (json-parse allocator
+                             "{\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"},{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"city_fact\",\"arguments\":\"{}\"}]}")
+               results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+               result (alloc/stack ToolResult)]
+           (store! context (codex-direct-context allocator))
+           (store! (field request prompt-cache-key) "conversation-cache-key")
+           (store! (field result call-id) "call-1")
+           (store! (field result status) (ToolSucceeded))
+           (store! (field result output) (JsonString "ok"))
+           (store! (field result error) "")
+           (al-push! [ToolResult] results (load result))
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) previous-response-id) "not-replayed")
+           (store! (field (field request continuation) previous-output)
+                   (load (field previous value)))
+           (store! (field (field request continuation) tool-results) results)
+           (let [wire (codex-direct-request-json allocator request)
+                 input (json-get wire "input")
+                 include (json-get wire "include")]
+           (assert (str-eq (load (field context endpoint))
+                           "https://chatgpt.com/backend-api/codex/responses"))
+           (assert (not (json-object-has? wire "max_output_tokens")))
+           (assert (not (json-object-has? wire "previous_response_id")))
+           (assert (match (json-bool-value (json-get wire "store"))
+                     (Some [enabled] (not enabled))
+                     (None [] false)))
+           (assert (match (json-string-at wire "prompt_cache_key")
+                     (Some [value] (str-eq value "conversation-cache-key"))
+                     (None [] false)))
+           (assert-eq (json-array-length input) 4)
+           (assert (match (json-string-at (json-array-get input 1) "encrypted_content")
+                     (Some [value] (str-eq value "opaque"))
+                     (None [] false)))
+           (assert (match (json-string-at (json-array-get input 3) "type")
+                     (Some [value] (str-eq value "function_call_output"))
+                     (None [] false)))
+           (assert (match-else (json-array-get include 0)
+                               (JsonString [value]
+                                           (str-eq value "reasoning.encrypted_content"))
+                               (_ false)))
+           (assert (match (json-bool-value (json-get wire "stream"))
+                     (Some [enabled] enabled)
+                     (None [] false))))))
+
 (deftest codex-connection-closes-and-emits-one-terminal-failure
          (let [allocator (malloc-allocator)
                context (alloc/stack CodexAppServerContext)
@@ -563,7 +745,7 @@
                connection (box allocator CodexConnection (zeroed CodexConnection))
                counts (box allocator CodexEventCounts (zeroed CodexEventCounts))
                sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new counts sequence))]
+               emitter (box allocator EventEmitter (event-emitter-new allocator counts sequence))]
            (store! context (codex-context "."))
            (store! (field transport send-code) -1)
            (store! (field connection transport) transport)

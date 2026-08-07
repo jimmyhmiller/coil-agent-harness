@@ -1,0 +1,280 @@
+(module harness-orchestration-tools)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-run-service" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct SpawnSubagentTool [(service (ptr RunService))])
+(defstruct CreateWorkflowNodeTool [(service (ptr RunService))])
+(defstruct QueryWorkflowTool [(service (ptr RunService))])
+(defstruct QueryRunTool [(service (ptr RunService))])
+
+(defn orchestration-string [(arguments Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at arguments key)
+    (Some [value] value)
+    (None [] "")))
+
+(defn orchestration-command-id [(allocator (ptr Allocator))
+                                (run-id (slice u8))
+                                (call-id (slice u8))] (-> (slice u8))
+  (concat-or-empty allocator
+                   (concat-or-empty allocator "orchestration:" run-id)
+                   (concat-or-empty allocator ":" call-id)))
+
+(defn orchestration-result [(call (ptr ToolCall))
+                            (response ServiceResponse)] (-> ToolResult)
+  (let [ok
+          (and (>= (load (field response status)) 200)
+               (< (load (field response status)) 300))
+        (mut result)
+          (tool-result-empty (load (field call id))
+                             (if ok (ToolSucceeded) (ToolErrored)))]
+    (if ok
+        (store! (field result output) (load (field response body)))
+        (store! (field result error)
+                (orchestration-string (load (field response body)) "message")))
+    (load result)))
+
+(defn orchestration-base-command [(allocator (ptr Allocator))
+                                  (call (ptr ToolCall))
+                                  (context (ptr ToolExecutionContext))] (-> Json)
+  (let [arguments (load (field call arguments))
+        parent-run-id (load (field context run-id))
+        (mut command) (json-object allocator)]
+    (json-object-put! (mut command) "version" (json-integer allocator 1))
+    (json-put-string! (mut command)
+                      "command_id"
+                      (orchestration-command-id allocator
+                                                parent-run-id
+                                                (load (field call id))))
+    (json-put-string! (mut command) "run_id" (orchestration-string arguments "run_id"))
+    (json-put-string! (mut command) "parent_run_id" parent-run-id)
+    (json-put-string! (mut command) "provider" (orchestration-string arguments "provider"))
+    (json-put-string! (mut command) "model" (orchestration-string arguments "model"))
+    (json-put-string! (mut command) "prompt" (orchestration-string arguments "prompt"))
+    (load command)))
+
+(defn execute-spawn-subagent [(self (ptr SpawnSubagentTool))
+                              (call (ptr ToolCall))
+                              (context (ptr ToolExecutionContext))
+                              (allocator (ptr Allocator))] (-> ToolResult)
+  (let [(mut command) (orchestration-base-command allocator call context)
+        actor (concat-or-empty allocator "agent:" (load (field context run-id)))]
+    (orchestration-result call
+                          (service-submit-run (load (field self service))
+                                              (mut command)
+                                              actor))))
+
+(defn execute-create-workflow-node [(self (ptr CreateWorkflowNodeTool))
+                                    (call (ptr ToolCall))
+                                    (context (ptr ToolExecutionContext))
+                                    (allocator (ptr Allocator))] (-> ToolResult)
+  (let [arguments (load (field call arguments))
+        (mut command) (orchestration-base-command allocator call context)
+        actor (concat-or-empty allocator "agent:" (load (field context run-id)))]
+    (json-put-string! (mut command) "workflow_id" (orchestration-string arguments "workflow_id"))
+    (json-object-put! (mut command) "workflow_version" (json-integer allocator 1))
+    (json-put-string! (mut command) "node_id" (orchestration-string arguments "node_id"))
+    (json-object-put! (mut command)
+                      "depends_on"
+                      (json-clone allocator (json-get arguments "depends_on")))
+    (orchestration-result call
+                          (service-submit-run (load (field self service))
+                                              (mut command)
+                                              actor))))
+
+(defn execute-query-workflow [(self (ptr QueryWorkflowTool))
+                              (call (ptr ToolCall))
+                              (context (ptr ToolExecutionContext))
+                              (allocator (ptr Allocator))] (-> ToolResult)
+  (orchestration-result call
+                        (service-query-workflow (load (field self service))
+                                                (orchestration-string (load (field call arguments))
+                                                                      "workflow_id"))))
+
+(defn execute-query-run [(self (ptr QueryRunTool))
+                         (call (ptr ToolCall))
+                         (context (ptr ToolExecutionContext))
+                         (allocator (ptr Allocator))] (-> ToolResult)
+  (orchestration-result call
+                        (service-query-events (load (field self service))
+                                              (orchestration-string (load (field call arguments))
+                                                                    "run_id")
+                                              0)))
+
+(impl ToolImplementation SpawnSubagentTool
+  (execute-tool [(self (ptr SpawnSubagentTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-spawn-subagent self call context allocator)))
+
+(impl ToolImplementation CreateWorkflowNodeTool
+  (execute-tool [(self (ptr CreateWorkflowNodeTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-create-workflow-node self call context allocator)))
+
+(impl ToolImplementation QueryWorkflowTool
+  (execute-tool [(self (ptr QueryWorkflowTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-query-workflow self call context allocator)))
+
+(impl ToolImplementation QueryRunTool
+  (execute-tool [(self (ptr QueryRunTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-query-run self call context allocator)))
+
+(defn orchestration-property! [(allocator (ptr Allocator))
+                               (properties (mut Json))
+                               (name (slice u8))
+                               (kind (slice u8))] (-> i64)
+  (let [(mut property) (json-object allocator)]
+    (json-object-put! (mut property) "type" (JsonString kind))
+    (json-object-put! (mut properties) name (load property))
+    0))
+
+(defn orchestration-nullable-string-property! [(allocator (ptr Allocator))
+                                               (properties (mut Json))
+                                               (name (slice u8))] (-> i64)
+  (let [(mut string-type) (json-object allocator)
+        (mut null-type) (json-object allocator)
+        (mut alternatives) (json-array allocator)
+        (mut property) (json-object allocator)]
+    (json-object-put! (mut string-type) "type" (JsonString "string"))
+    (json-object-put! (mut null-type) "type" (JsonString "null"))
+    (json-array-push! (mut alternatives) (load string-type))
+    (json-array-push! (mut alternatives) (load null-type))
+    (json-object-put! (mut property) "anyOf" (load alternatives))
+    (json-object-put! (mut properties) name (load property))
+    0))
+
+(defn orchestration-schema [(allocator (ptr Allocator))
+                            (workflow bool)] (-> Json)
+  (let [(mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (orchestration-property! allocator (mut properties) "run_id" "string")
+    (orchestration-nullable-string-property! allocator (mut properties) "provider")
+    (orchestration-nullable-string-property! allocator (mut properties) "model")
+    (orchestration-property! allocator (mut properties) "prompt" "string")
+    (json-array-push! (mut required) (JsonString "run_id"))
+    (json-array-push! (mut required) (JsonString "provider"))
+    (json-array-push! (mut required) (JsonString "model"))
+    (json-array-push! (mut required) (JsonString "prompt"))
+    (when workflow
+      (orchestration-property! allocator (mut properties) "workflow_id" "string")
+      (orchestration-property! allocator (mut properties) "node_id" "string")
+      (let [(mut items) (json-object allocator)
+            (mut dependencies) (json-object allocator)]
+        (json-object-put! (mut items) "type" (JsonString "string"))
+        (json-object-put! (mut dependencies) "type" (JsonString "array"))
+        (json-object-put! (mut dependencies) "items" (load items))
+        (json-object-put! (mut properties) "depends_on" (load dependencies)))
+      (json-array-push! (mut required) (JsonString "workflow_id"))
+      (json-array-push! (mut required) (JsonString "node_id"))
+      (json-array-push! (mut required) (JsonString "depends_on"))
+      0)
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn query-workflow-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (orchestration-property! allocator (mut properties) "workflow_id" "string")
+    (json-array-push! (mut required) (JsonString "workflow_id"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn query-run-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (orchestration-property! allocator (mut properties) "run_id" "string")
+    (json-array-push! (mut required) (JsonString "run_id"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn orchestration-definition [(name (slice u8))
+                                (description (slice u8))
+                                (schema Json)
+                                (effect ToolEffect)
+                                (implementation (dyn ToolImplementation))] (-> ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)]
+    (store! (field (field definition spec) name) name)
+    (store! (field (field definition spec) description) description)
+    (store! (field (field definition spec) input-schema) schema)
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) effect)
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 30000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn register-orchestration-tools! [(registry (mut ToolRegistry))
+                                     (allocator (ptr Allocator))
+                                     (service (ptr RunService))] (-> i64)
+  (tool-register! (mut registry)
+                  (orchestration-definition "spawn_subagent"
+                                            "Create a durable child agent run. Set provider and model to null to inherit the parent, or supply strings as explicit overrides. Use a unique run_id and retain it for later coordination."
+                                            (orchestration-schema allocator false)
+                                            (Reversible)
+                                            (box allocator
+                                                 SpawnSubagentTool
+                                                 (let [tool (alloc/stack SpawnSubagentTool)]
+                                                   (store! (field tool service) service)
+                                                   (load tool)))))
+  (tool-register! (mut registry)
+                  (orchestration-definition "create_workflow_node"
+                                            "Create a durable workflow node whose dependencies are already-created run IDs in the same workflow."
+                                            (orchestration-schema allocator true)
+                                            (Reversible)
+                                            (box allocator
+                                                 CreateWorkflowNodeTool
+                                                 (let [tool (alloc/stack CreateWorkflowNodeTool)]
+                                                   (store! (field tool service) service)
+                                                   (load tool)))))
+  (tool-register! (mut registry)
+                  (orchestration-definition "query_workflow"
+                                            "Read the durable nodes and current statuses for a workflow."
+                                            (query-workflow-schema allocator)
+                                            (ReadOnly)
+                                            (box allocator
+                                                 QueryWorkflowTool
+                                                 (let [tool (alloc/stack QueryWorkflowTool)]
+                                                   (store! (field tool service) service)
+                                                   (load tool)))))
+  (tool-register! (mut registry)
+                  (orchestration-definition "query_run"
+                                            "Read the durable event history for a child or workflow run, including model and tool results."
+                                            (query-run-schema allocator)
+                                            (ReadOnly)
+                                            (box allocator
+                                                 QueryRunTool
+                                                 (let [tool (alloc/stack QueryRunTool)]
+                                                   (store! (field tool service) service)
+                                                   (load tool)))))
+  0)

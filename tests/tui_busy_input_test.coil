@@ -1,0 +1,19 @@
+(module harness-tui-busy-input-test)
+
+(import "coil.match" :use *)
+(import "harness-tui-busy-input" :use *)
+(import "harness-tui-input-editor" :use *)
+
+(deftest busy-input-exposes-only-run-control-intents
+         (assert (match-else (busy-input-intent (InputInterrupt))
+                             (BusyInputCancel [] true)
+                             (_ false)))
+         (assert (match-else (busy-input-intent (InputSuspend))
+                             (BusyInputSuspend [] true)
+                             (_ false)))
+         (assert (match-else (busy-input-intent (InputEndOfFile))
+                             (BusyInputClose [] true)
+                             (_ false)))
+         (assert (match-else (busy-input-intent (InputInsert "ignored"))
+                             (BusyInputIgnore [] true)
+                             (_ false))))

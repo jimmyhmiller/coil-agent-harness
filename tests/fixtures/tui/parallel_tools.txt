@@ -1,0 +1,2 @@
+  ⏺ Bash  pwd  done
+  ⏺ Bash  ls  done

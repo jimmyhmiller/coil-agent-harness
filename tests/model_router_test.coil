@@ -23,7 +23,15 @@
 (deftest selects-and-explains-automatic-routes
          (let [allocator (malloc-allocator)
                (mut low-cost) (routing-command allocator "auto" "auto" "low-cost")
+               (mut balanced) (routing-command allocator "auto" "auto" "")
                (mut subscription) (routing-command allocator "auto" "auto" "quality")]
+           (assert (match-else (model-route-command! allocator (mut balanced))
+                               (ModelRouteSelected [] true)
+                               (_ false)))
+           (assert (str-eq (route-command-string (load balanced) "provider")
+                           "codex"))
+           (assert (str-eq (route-command-string (load balanced) "model")
+                           "gpt-5.6-terra"))
            (assert (match-else (model-route-command! allocator (mut low-cost))
                                (ModelRouteSelected [] true)
                                (_ false)))
@@ -43,7 +51,7 @@
            (assert (str-eq (route-command-string (load subscription) "provider")
                            "claude"))))
 
-(deftest preserves-valid-pins-and-rejects-incompatible-routes
+(deftest preserves-valid-pins-and-routes-external-agents-with-harness-tools
          (let [allocator (malloc-allocator)
                (mut pinned) (routing-command allocator "openai" "gpt-test" "")
                (mut incompatible) (routing-command allocator "auto" "auto" "external-agent")
@@ -55,10 +63,10 @@
                            "pinned"))
            (json-put-bool! (mut incompatible) "requires_harness_tools" true)
            (assert (match-else (model-route-command! allocator (mut incompatible))
-                               (ModelRouteRejected [message]
-                                                   (str-eq message
-                                                           "selected provider does not support harness-native tools"))
+                               (ModelRouteSelected [] true)
                                (_ false)))
+           (assert (str-eq (route-command-string (load incompatible) "provider")
+                           "codex"))
            (assert (match-else (model-route-command! allocator (mut unknown))
                                (ModelRouteSelected [] true)
                                (_ false)))))

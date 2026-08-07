@@ -1,0 +1,347 @@
+(module harness-tui-view-layout)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-cells" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-view" :use *)
+
+(defstruct ViewLayout
+  [(frame Frame)
+   (cursor-present bool)
+   (cursor-row i64)
+   (cursor-column i64)])
+
+(defn view-layout-hex-byte [(byte i64)] (-> u8)
+  (cast u8 (if (< byte 10) (+ 48 byte) (+ 55 byte))))
+
+(defn view-layout-control! [(builder (mut StrBuf)) (byte i64)] (-> i64)
+  (sb-push-str! (mut builder) "\\x")
+  (sb-push-byte! (mut builder) (view-layout-hex-byte (/ byte 16)))
+  (sb-push-byte! (mut builder) (view-layout-hex-byte (% byte 16))))
+
+(defn view-layout-prefix! [(builder (mut StrBuf)) (prefix (slice u8))] (-> i64)
+  (sb-push-str! (mut builder) prefix)
+  (let [cells (text-cell-width prefix)] (if (< cells 0) 0 cells)))
+
+(defn view-layout-flow! [(frame (ptr Frame))
+                         (flow (ptr ViewFlow))
+                         (width i64)] (-> i64)
+  (let [(mut builder) (sb-new (load (field frame allocator)))
+        (mut cells) (view-layout-prefix! (mut builder) (load (field flow first-prefix)))
+        text (load (field flow text))
+        (mut at) 0
+        count (slice-len [u8] text)]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] text (load at)))]
+                (cond (= byte 10)
+                        (do
+                          (frame-push-line! frame
+                                            (sb-finish! (mut builder))
+                                            (load cells)
+                                            (load (field flow role)))
+                          (store! cells
+                                  (view-layout-prefix! (mut builder)
+                                                       (load (field flow continuation-prefix))))
+                          (store! at (+ (load at) 1)))
+                      (= byte 9)
+                        (let [spaces (- 4 (% (load cells) 4))
+                              (mut i) 0]
+                          (loop (if (>= (load i) spaces)
+                                    (break)
+                                    (do
+                                      (when (>= (load cells) width)
+                                        (frame-push-line! frame
+                                                          (sb-finish! (mut builder))
+                                                          (load cells)
+                                                          (load (field flow role)))
+                                        (store! cells
+                                                (view-layout-prefix! (mut builder)
+                                                                     (load (field flow continuation-prefix))))
+                                        0)
+                                      (sb-push-byte! (mut builder) (cast u8 32))
+                                      (store! cells (+ (load cells) 1))
+                                      (store! i (+ (load i) 1)))))
+                          (store! at (+ (load at) 1)))
+                      :else
+                        (let [scalar (utf8-decode text (load at))]
+                          (if (not (load (field scalar valid)))
+                              (do
+                                (when (> (+ (load cells) 1) width)
+                                  (frame-push-line! frame
+                                                    (sb-finish! (mut builder))
+                                                    (load cells)
+                                                    (load (field flow role)))
+                                  (store! cells
+                                          (view-layout-prefix! (mut builder)
+                                                               (load (field flow continuation-prefix))))
+                                  0)
+                                (sb-push-str! (mut builder) "�")
+                                (store! cells (+ (load cells) 1))
+                                (store! at (+ (load at) 1)))
+                              (let [scalar-width (unicode-cell-width (load (field scalar codepoint)))]
+                                (if (< scalar-width 0)
+                                    (do
+                                      (when (> (+ (load cells) 4) width)
+                                        (frame-push-line! frame
+                                                          (sb-finish! (mut builder))
+                                                          (load cells)
+                                                          (load (field flow role)))
+                                        (store! cells
+                                                (view-layout-prefix! (mut builder)
+                                                                     (load (field flow continuation-prefix))))
+                                        0)
+                                      (view-layout-control! (mut builder) byte)
+                                      (store! cells (+ (load cells) 4))
+                                      (store! at (+ (load at) 1)))
+                                    (do
+                                      (when (and (> scalar-width 0)
+                                                 (> (+ (load cells) scalar-width) width))
+                                        (frame-push-line! frame
+                                                          (sb-finish! (mut builder))
+                                                          (load cells)
+                                                          (load (field flow role)))
+                                        (store! cells
+                                                (view-layout-prefix! (mut builder)
+                                                                     (load (field flow continuation-prefix))))
+                                        0)
+                                      (sb-push-str! (mut builder)
+                                                    (substr text
+                                                            (load at)
+                                                            (+ (load at)
+                                                               (load (field scalar length)))))
+                                      (store! cells (+ (load cells) scalar-width))
+                                      (store! at
+                                              (+ (load at)
+                                                 (load (field scalar length)))))))))))))
+    (frame-push-line! frame
+                      (sb-finish! (mut builder))
+                      (load cells)
+                      (load (field flow role)))))
+
+(defn view-layout-node! [(frame (ptr Frame))
+                         (node ViewNode)
+                         (width i64)] (-> i64)
+  (match node
+    (ViewFlowNode [flow]
+                  (let [flow-value (alloc/stack ViewFlow)]
+                    (store! flow-value flow)
+                    (view-layout-flow! frame flow-value width)))
+    (ViewDecoratedFlowNode [decorated]
+                           (let [value (alloc/stack ViewDecoratedFlow)
+                                 flow (alloc/stack ViewFlow)
+                                 before
+                                   (al-len [FrameLine]
+                                           (load (field frame lines)))
+                                 (mut text) (sb-new (load (field frame allocator)))]
+                             (store! value decorated)
+                             (sb-push-str! (mut text) (load (field value body)))
+                             (sb-push-str! (mut text) (load (field value suffix)))
+                             (store! (field flow role)
+                                     (load (field value line-role)))
+                             (store! (field flow first-prefix)
+                                     (load (field value first-prefix)))
+                             (store! (field flow continuation-prefix)
+                                     (load (field value continuation-prefix)))
+                             (store! (field flow text) (sb-finish! (mut text)))
+                             (view-layout-flow! frame flow width)
+                             (when (= (al-len [FrameLine]
+                                              (load (field frame lines)))
+                                      (+ before 1))
+                               (let [(mut spans)
+                                       (al-new [FrameSpan]
+                                               (load (field frame allocator)))]
+                                 (al-push! [FrameSpan]
+                                           (mut spans)
+                                           (frame-span (load (field value first-prefix))
+                                                       (text-cell-width (load (field value first-prefix)))
+                                                       (load (field value prefix-role))))
+                                 (al-push! [FrameSpan]
+                                           (mut spans)
+                                           (frame-span (load (field value body))
+                                                       (text-cell-width (load (field value body)))
+                                                       (load (field value body-role))))
+                                 (when (> (slice-len [u8]
+                                                     (load (field value suffix)))
+                                          0)
+                                   (al-push! [FrameSpan]
+                                             (mut spans)
+                                             (frame-span (load (field value suffix))
+                                                         (text-cell-width (load (field value suffix)))
+                                                         (load (field value suffix-role))))
+                                   0)
+                                 (frame-set-line-spans! frame before spans))
+                               0)
+                             0))
+    (ViewSpacerNode [rows]
+                    (let [(mut i) 0]
+                      (loop (if (>= (load i) rows)
+                                (break)
+                                (do
+                                  (frame-push-line! frame "" 0 (RolePrimary))
+                                  (store! i (+ (load i) 1)))))
+                      0))
+    (ViewTailNode [rows child]
+                  (let [(mut full) (frame-new (load (field frame allocator)))]
+                    (view-layout-node! (mut full) (load child) width)
+                    (let [(mut bounded)
+                            (frame-tail-bounded (load (field frame allocator))
+                                                (load full)
+                                                rows)
+                          (mut at) 0
+                          count
+                            (al-len [FrameLine]
+                                    (load (field bounded lines)))]
+                      (loop (if (>= (load at) count)
+                                (break)
+                                (do
+                                  (al-push! [FrameLine]
+                                            (mut (field frame lines))
+                                            (al-get [FrameLine]
+                                                    (load (field bounded lines))
+                                                    (load at)))
+                                  (store! at (+ (load at) 1)))))
+                      0)))
+    (ViewStackNode [gap children]
+                   (let [(mut at) 0
+                         n (al-len [ViewNode] (load children))]
+                     (loop (if (>= (load at) n)
+                               (break)
+                               (do
+                                 (when (> (load at) 0)
+                                   (view-layout-node! frame (ViewSpacerNode gap) width)
+                                   0)
+                                 (view-layout-node! frame
+                                                    (al-get [ViewNode]
+                                                            (load children)
+                                                            (load at))
+                                                    width)
+                                 (store! at (+ (load at) 1)))))
+                     0))
+    (ViewInputNode [input]
+                   (let [input-value (alloc/stack ViewInput)
+                         flow (alloc/stack ViewFlow)]
+                     (store! input-value input)
+                     (store! (field flow role) (RolePrimary))
+                     (store! (field flow first-prefix)
+                             (load (field input-value prompt)))
+                     (store! (field flow continuation-prefix) "  ")
+                     (store! (field flow text) (load (field input-value text)))
+                     (view-layout-flow! frame flow width)))))
+
+(defn view-layout [(allocator (ptr Allocator))
+                   (view (ref TerminalView))
+                   (width i64)] (-> ViewLayout)
+  (let [result (alloc/stack ViewLayout)
+        (mut frame) (frame-new allocator)]
+    (view-layout-node! (mut frame) (load (field view root)) width)
+    (store! (field result frame) (load frame))
+    (store! (field result cursor-present) false)
+    (store! (field result cursor-row) 0)
+    (store! (field result cursor-column) 0)
+    (load result)))
+
+(defn view-layout-bound-input [(allocator (ptr Allocator))
+                               (full ViewLayout)
+                               (row-budget i64)] (-> ViewLayout)
+  (let [full-value (alloc/stack ViewLayout)
+        source (alloc/stack Frame)]
+    (store! full-value full)
+    (store! source (load (field full-value frame)))
+    (let [count (al-len [FrameLine] (load (field source lines)))
+          limit (if (< row-budget 3) 3 row-budget)]
+      (if (<= count limit)
+          (load full-value)
+          (let [result (alloc/stack ViewLayout)
+                (mut frame) (frame-new allocator)
+                cursor-row (load (field full-value cursor-row))
+                start
+                  (if (>= cursor-row (- limit 1))
+                      (- cursor-row (- limit 2))
+                      0)
+                leading (if (> start 0) 1 0)
+                available (- limit leading)
+                tentative-end
+                  (if (> (+ start available) count)
+                      count
+                      (+ start available))
+                can-show-trailing
+                  (and (< tentative-end count)
+                       (< cursor-row (- tentative-end 1)))
+                end (if can-show-trailing (- tentative-end 1) tentative-end)
+                (mut at) start]
+            (when (> leading 0)
+              (frame-push-line! (mut frame)
+                                "  … earlier input"
+                                17
+                                (RoleMuted))
+              0)
+            (loop (if (>= (load at) end)
+                      (break)
+                      (do
+                        (let [line
+                                (al-get [FrameLine]
+                                        (load (field source lines))
+                                        (load at))]
+                          (frame-push-line! (mut frame)
+                                            (load (field line text))
+                                            (load (field line cells))
+                                            (load (field line role)))
+                          (let [slot
+                                  (index (load (field (field frame lines) data))
+                                         (- (al-len [FrameLine]
+                                                    (load (field frame lines)))
+                                            1))]
+                            (store! (field slot spans)
+                                    (load (field line spans))))
+                          0)
+                        (store! at (+ (load at) 1)))))
+            (when can-show-trailing
+              (frame-push-line! (mut frame) "  … more input" 14 (RoleMuted))
+              0)
+            (store! (field result frame) (load frame))
+            (store! (field result cursor-present) true)
+            (store! (field result cursor-row) (+ leading (- cursor-row start)))
+            (store! (field result cursor-column)
+                    (load (field full-value cursor-column)))
+            (load result))))))
+
+;; Resolve a semantic input anchor through the same flow algorithm as its text.
+(defn view-layout-input [(allocator (ptr Allocator))
+                         (input ViewInput)
+                         (width i64)] (-> ViewLayout)
+  (let [input-value (alloc/stack ViewInput)
+        full-flow (alloc/stack ViewFlow)
+        prefix-flow (alloc/stack ViewFlow)
+        result (alloc/stack ViewLayout)
+        (mut full-frame) (frame-new allocator)
+        (mut prefix-frame) (frame-new allocator)]
+    (store! input-value input)
+    (store! (field full-flow role) (RolePrimary))
+    (store! (field full-flow first-prefix) (load (field input-value prompt)))
+    (store! (field full-flow continuation-prefix) "  ")
+    (store! (field full-flow text) (load (field input-value text)))
+    (store! prefix-flow (load full-flow))
+    (store! (field prefix-flow text)
+            (subslice [u8]
+                      (load (field input-value text))
+                      0
+                      (load (field input-value cursor-offset))))
+    (view-layout-flow! (mut full-frame) full-flow width)
+    (view-layout-flow! (mut prefix-frame) prefix-flow width)
+    (let [prefix-count (al-len [FrameLine] (load (field prefix-frame lines)))
+          cursor-line
+            (al-get [FrameLine]
+                    (load (field prefix-frame lines))
+                    (- prefix-count 1))]
+      (store! (field result frame) (load full-frame))
+      (store! (field result cursor-present) true)
+      (store! (field result cursor-row) (- prefix-count 1))
+      (store! (field result cursor-column) (load (field cursor-line cells)))
+      (view-layout-bound-input allocator
+                               (load result)
+                               (load (field input-value row-budget))))))

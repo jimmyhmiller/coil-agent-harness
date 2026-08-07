@@ -1,0 +1,2 @@
+{"version":1,"sequence":1,"event":"model.response.delta","run_id":"run-1","operation_id":"model-1","payload":"I could not finish."}
+{"version":1,"sequence":2,"event":"run.failed","run_id":"run-1","operation_id":"run-1","payload":{"message":"Provider connection failed"}}

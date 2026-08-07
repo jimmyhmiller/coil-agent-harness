@@ -1,0 +1,19 @@
+(module harness-tui-run-watch)
+
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+
+(defn run-watch-json-string [(value Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [text] text)
+    (None [] "")))
+
+(defn run-watch-event-finishes-root? [(event Json)
+                                      (root-run-id (slice u8))] (-> bool)
+  (let [event-run-id (run-watch-json-string event "run_id")
+        kind (run-watch-json-string event "event")]
+    (and (str-eq event-run-id root-run-id)
+         (or (str-eq kind "run.completed")
+             (or (str-eq kind "run.failed")
+                 (str-eq kind "run.cancelled"))))))

@@ -1,0 +1,47 @@
+(module harness-tui-view-layout-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-render-plain" :use *)
+(import "harness-tui-view" :use *)
+(import "harness-tui-view-layout" :use *)
+
+(deftest declarative-flow-layout-wraps-with-hanging-indentation
+         (let [allocator (malloc-allocator)
+               view (terminal-view (view-flow (RolePrimary) "❯ " "  " "ab界🙂cdef"))
+               (mut laid-out) (view-layout allocator view 10)]
+           (assert (str-eq (render-frame-plain allocator (mut (field laid-out frame)))
+                           "❯ ab界🙂cd\n  ef\n"))))
+
+(deftest declarative-flow-layout-sanitizes-terminal-controls
+         (let [allocator (malloc-allocator)
+               bytes (alloc/stack (array u8 9))]
+           (store! (index bytes 0) (cast u8 115))
+           (store! (index bytes 1) (cast u8 97))
+           (store! (index bytes 2) (cast u8 102))
+           (store! (index bytes 3) (cast u8 101))
+           (store! (index bytes 4) (cast u8 27))
+           (store! (index bytes 5) (cast u8 91))
+           (store! (index bytes 6) (cast u8 51))
+           (store! (index bytes 7) (cast u8 49))
+           (store! (index bytes 8) (cast u8 109))
+           (let [text (slice-new [u8] (index bytes 0) 9)
+                 view (terminal-view (view-flow (RolePrimary) "" "" text))
+                 (mut laid-out) (view-layout allocator view 40)]
+             (assert (str-eq (render-frame-plain allocator (mut (field laid-out frame)))
+                             "safe\\x1B[31m\n")))))
+
+(deftest declarative-tail-bounds-a-complete-child-layout
+         (let [allocator (malloc-allocator)
+               (mut rows) (view-stack allocator 0)]
+           (view-stack-push! (mut rows) (view-flow (RolePrimary) "" "" "one"))
+           (view-stack-push! (mut rows) (view-flow (RolePrimary) "" "" "two"))
+           (view-stack-push! (mut rows) (view-flow (RolePrimary) "" "" "three"))
+           (view-stack-push! (mut rows) (view-flow (RolePrimary) "" "" "four"))
+           (let [view (terminal-view (view-tail allocator 2 (load rows)))
+                 (mut laid-out) (view-layout allocator view 40)]
+             (assert (str-eq (render-frame-plain allocator
+                                                 (mut (field laid-out frame)))
+                             "  … earlier live output\nfour\n")))))

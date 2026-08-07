@@ -8,11 +8,14 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 
+;; Temporary bridge until coil.http.client exposes request-stream. Keep curl's
+;; untyped surface confined to this module; providers use StreamingHttpTransport.
 (extern curl_easy_init :cc c [] (-> (ptr i8)))
 (extern curl_easy_cleanup :cc c [(ptr i8)] (-> void))
 (extern curl_easy_perform :cc c [(ptr i8)] (-> i32))
 (extern curl_easy_setopt :cc c [(ptr i8) i32 ...] (-> i32))
 (extern curl_easy_getinfo :cc c [(ptr i8) i32 ...] (-> i32))
+(extern curl_easy_strerror :cc c [i32] (-> (ptr i8)))
 (extern curl_slist_append :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern curl_slist_free_all :cc c [(ptr i8)] (-> void))
 
@@ -55,7 +58,7 @@
                         (response (mut HttpResponse))]
                        (-> i64)))
 
-(defstruct CurlStreamingHttpTransport [])
+(defstruct CurlStreamingHttpTransport [(reserved u8)])
 
 (defstruct StreamingCapture
   [(sink HttpChunkSink)
@@ -91,8 +94,8 @@
                         (lines (ptr (ArrayList (slice u8))))] (-> (ptr i8))
   (let [(mut list) (cast (ptr i8) 0)
         (mut i) 0
-        n (al-len [(slice u8)] (load lines))]
-    (loop (if (>= (load i) n)
+        count (al-len [(slice u8)] (load lines))]
+    (loop (if (>= (load i) count)
               (break)
               (let [line (al-get [(slice u8)] (load lines) (load i))
                     c-line (str->cstr allocator line)]
@@ -162,9 +165,9 @@
              (store! (field result error) "HTTP transport failed"))))
     (load result)))
 
-;; Perform a blocking POST while delivering response bytes as libcurl receives them.
-;; Returning fewer bytes from the sink aborts transport, providing synchronous
-;; backpressure. Only the first MiB is retained for diagnostics.
+;; Temporary incremental transport for provider SSE. Replace this implementation
+;; with coil.http.client/request-stream when that public API is available; see
+;; docs/feature-request-http-streaming.md.
 (defn http-post-stream [(allocator (ptr Allocator))
                         (request (ptr HttpRequest))] (-> HttpResponse)
   (let [easy (curl_easy_init)
@@ -212,7 +215,11 @@
                                          (field result status-code)))
                 (do
                   (store! (field result transport-code) (cast i64 performed))
-                  (store! (field result error) "HTTP streaming transport failed")))
+                  (let [description (cstr->str (curl_easy_strerror performed))]
+                    (store! (field result error)
+                            (if (> (slice-len [u8] description) 0)
+                                description
+                                "HTTP streaming transport failed")))))
             (store! (field result body)
                     (al-into-slice [u8] (mut (field capture body))))
             (raw-free allocator

@@ -1,0 +1,58 @@
+(module harness-tui-fixture-test)
+
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-event-adapter" :use *)
+(import "harness-tui-layout" :use *)
+(import "harness-tui-model" :use *)
+(import "harness-tui-render-plain" :use *)
+(import "harness-tui-transcript" :use *)
+
+(defn tui-fixture-check [(events-path (slice u8))
+                         (expected-path (slice u8))] (-> bool)
+  (let [allocator (malloc-allocator)
+        recovery (event-journal-recover allocator events-path)
+        (mut model) (presentation-model-new allocator)
+        (mut policy) (transcript-policy-new)]
+    (if (not (load (field recovery ok)))
+        false
+        (do
+          (let [(mut at) 0
+                count (al-len [Json] (load (field recovery events)))]
+            (loop (if (>= (load at) count)
+                      (break)
+                      (do
+                        (presentation-apply-event! (mut model)
+                                                   (al-get [Json]
+                                                           (load (field recovery events))
+                                                           (load at)))
+                        (store! at (+ (load at) 1))))))
+          (transcript-advance! (mut policy) (mut model))
+          (let [options (layout-options 80 true false)
+                (mut frame)
+                  (layout-model-range allocator
+                                      (mut model)
+                                      0
+                                      (load (field policy committed-count))
+                                      options)
+                actual (render-frame-plain allocator (mut frame))]
+            (match (fs/read-file allocator expected-path)
+              (Ok [expected] (str-eq actual expected))
+              (Err [failure] false)))))))
+
+(deftest recorded-event-streams-produce-the-golden-transcripts
+         (assert (tui-fixture-check "tests/fixtures/tui/plain_answer.jsonl"
+                                    "tests/fixtures/tui/plain_answer.txt"))
+         (assert (tui-fixture-check "tests/fixtures/tui/tool_approval.jsonl"
+                                    "tests/fixtures/tui/tool_approval.txt"))
+         (assert (tui-fixture-check "tests/fixtures/tui/parallel_tools.jsonl"
+                                    "tests/fixtures/tui/parallel_tools.txt"))
+         (assert (tui-fixture-check "tests/fixtures/tui/orchestration_cancel.jsonl"
+                                    "tests/fixtures/tui/orchestration_cancel.txt"))
+         (assert (tui-fixture-check "tests/fixtures/tui/run_failure.jsonl"
+                                    "tests/fixtures/tui/run_failure.txt")))

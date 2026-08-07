@@ -1,0 +1,17 @@
+(module harness-tui-busy-input)
+
+(import "coil.match" :use *)
+(import "harness-tui-input-editor" :use *)
+
+(defsum BusyInputIntent
+  (BusyInputCancel [])
+  (BusyInputSuspend [])
+  (BusyInputClose [])
+  (BusyInputIgnore []))
+
+(defn busy-input-intent [(key InputKey)] (-> BusyInputIntent)
+  (match-else key
+              (InputInterrupt [] (BusyInputCancel))
+              (InputSuspend [] (BusyInputSuspend))
+              (InputEndOfFile [] (BusyInputClose))
+              (_ (BusyInputIgnore))))

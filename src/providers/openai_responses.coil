@@ -15,6 +15,27 @@
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
+(defn openai-latest-user-input [(allocator (ptr Allocator))
+                                (request (ptr ModelRequest))] (-> Json)
+  (let [messages (load (field request messages))
+        (mut i) (al-len [Message] (load messages))
+        (mut content) ""]
+    (loop (if (<= (load i) 0)
+              (break)
+              (do
+                (store! i (- (load i) 1))
+                (let [message (al-get [Message] (load messages) (load i))]
+                  (match (load (field message role))
+                    (UserRole [] (do (store! content (load (field message content))) (break)))
+                    (SystemRole [] 0)
+                    (AssistantRole [] 0))))))
+    (let [(mut item) (json-object allocator)
+          (mut input) (json-array allocator)]
+      (json-put-string! (mut item) "role" "user")
+      (json-put-string! (mut item) "content" (load content))
+      (json-array-push! (mut input) (load item))
+      (load input))))
+
 (defstruct OpenAIResponsesContext
   [(endpoint (slice u8))
    (credential ApiCredential)
@@ -51,7 +72,9 @@
     (load input)))
 
 ;; Translate the common model request into the current Responses API shape.
-(defn openai-request-json [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+(defn openai-request-json-with-output-limit [(allocator (ptr Allocator))
+                                             (request (ptr ModelRequest))
+                                             (include-output-limit bool)] (-> Json)
   (let [(mut body) (json-object allocator)
         continuation (field request continuation)]
     (json-put-string! (mut body) "model" (load (field request model)))
@@ -63,10 +86,15 @@
           (json-put-string! (mut body)
                             "previous_response_id"
                             (load (field continuation previous-response-id)))
-          (json-object-put! (mut body)
-                            "input"
-                            (openai-tool-results allocator
-                                                 (load (field continuation tool-results)))))
+          (if (= (load (field continuation tool-results))
+                 (cast (ptr (ArrayList ToolResult)) 0))
+              (json-object-put! (mut body)
+                                "input"
+                                (openai-latest-user-input allocator request))
+              (json-object-put! (mut body)
+                                "input"
+                                (openai-tool-results allocator
+                                                     (load (field continuation tool-results))))))
         (json-object-put! (mut body)
                           "input"
                           (messages-wire allocator (load (field request messages)))))
@@ -91,7 +119,8 @@
                         "effort"
                         (reasoning-effort-name (load (field request reasoning))))
       (json-object-put! (mut body) "reasoning" (load reasoning)))
-    (when (> (load (field request max-output-tokens)) 0)
+    (when (and include-output-limit
+               (> (load (field request max-output-tokens)) 0))
       (json-object-put! (mut body)
                         "max_output_tokens"
                         (json-integer allocator
@@ -100,6 +129,9 @@
     (json-put-bool! (mut body) "store" true)
     (json-put-bool! (mut body) "stream" true)
     (load body)))
+
+(defn openai-request-json [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+  (openai-request-json-with-output-limit allocator request true))
 
 (defn openai-usage [(root Json)] (-> ModelUsage)
   (let [usage (alloc/stack ModelUsage)
@@ -290,12 +322,12 @@
                                 (load (field http error))))]
                   (openai-event emitter request (ModelRequestFailed) (JsonString message))
                   (model-failure "openai-responses" status message))
-                (let [response (openai-parse-response allocator (load (field state response)))]
+                (let [(mut response) (openai-parse-response allocator (load (field state response)))]
                   (openai-event emitter
                                 request
                                 (ModelRequestCompleted)
-                                (JsonString (load (field response response-id))))
-                  (ModelOk response))))))))
+                                (model-completion-payload allocator request (mut response)))
+                  (ModelOk (load response)))))))))
 
 (defn openai-execute [(context (ptr OpenAIResponsesContext))
                       (request (ptr ModelRequest))
@@ -348,12 +380,12 @@
                                               (ModelRequestFailed)
                                               (JsonString message))
                                 (model-failure "openai-responses" status message))
-                              (let [response (openai-parse-response allocator root)]
+                              (let [(mut response) (openai-parse-response allocator root)]
                                 (openai-event emitter
                                               request
                                               (ModelRequestCompleted)
-                                              (JsonString (load (field response response-id))))
-                                (ModelOk response)))))))))))))
+                                              (model-completion-payload allocator request (mut response)))
+                                (ModelOk (load response))))))))))))))
 
 (impl ModelProvider OpenAIResponsesContext
   (provider-name [(self (ptr OpenAIResponsesContext))]

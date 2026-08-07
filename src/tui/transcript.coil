@@ -1,0 +1,48 @@
+(module harness-tui-transcript)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "harness-tui-model" :use *)
+
+;; Commitment is a renderer policy projected from semantic state. It is not stored
+;; on presentation blocks because a future renderer may retain a wider mutable region.
+(defstruct TranscriptPolicy [(committed-count i64)])
+
+(defn transcript-policy-new [] (-> TranscriptPolicy)
+  (let [policy (alloc/stack TranscriptPolicy)]
+    (store! (field policy committed-count) 0)
+    (load policy)))
+
+(defn presentation-state-stable? [(state PresentationState)] (-> bool)
+  (match state
+    (PresentationSucceeded [] true)
+    (PresentationFailed [] true)
+    (PresentationRejected [] true)
+    (PresentationCancelled [] true)
+    (PresentationPending [] false)
+    (PresentationRunning [] false)))
+
+;; Only a stable prefix may enter append-only scrollback. A completed later tool
+;; remains live while an earlier assistant block is still streaming.
+(defn transcript-advance! [(policy (ptr TranscriptPolicy))
+                           (model (ptr PresentationModel))] (-> i64)
+  (let [(mut at) (load (field policy committed-count))
+        count (al-len [PresentationBlock] (load (field model blocks)))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [block
+                      (al-get [PresentationBlock]
+                              (load (field model blocks))
+                              (load at))]
+                (if (presentation-state-stable? (load (field block state)))
+                    (store! at (+ (load at) 1))
+                    (break)))))
+    (let [advanced (- (load at) (load (field policy committed-count)))]
+      (store! (field policy committed-count) (load at))
+      advanced)))
+
+(defn transcript-live-count [(policy (ptr TranscriptPolicy))
+                             (model (ptr PresentationModel))] (-> i64)
+  (- (al-len [PresentationBlock] (load (field model blocks)))
+     (load (field policy committed-count))))

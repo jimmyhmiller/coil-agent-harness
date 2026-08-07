@@ -1,0 +1,129 @@
+(module harness-tui-input-layout-test)
+
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-input-editor" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-render-input" :use *)
+(import "harness-tui-terminal-operation" :use *)
+(import "harness-tui-render-plain" :use *)
+(import "harness-tui-terminal" :use *)
+(import "harness-tui-view" :use *)
+(import "harness-tui-view-layout" :use *)
+
+(defn test-input-layout [(allocator (ptr Allocator))
+                         (editor (ptr InputEditor))
+                         (width i64)
+                         (height i64)
+                         (prompt (slice u8))] (-> ViewLayout)
+  (match-else (view-input prompt
+                          (input-editor-text editor)
+                          (load (field editor cursor))
+                          height)
+              (ViewInputNode [input]
+                             (view-layout-input allocator input width))
+              (_ (zeroed ViewLayout))))
+
+(deftest wraps-input-and-places-the-cursor-in-terminal-cells
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "ab界🙂cdef"))
+           (input-editor-apply! (mut editor) (InputLeft))
+           (let [(mut laid-out) (test-input-layout allocator (mut editor) 10 24 "❯ ")
+                 text (render-frame-plain allocator (mut (field laid-out frame)))]
+             (assert (str-eq text "❯ ab界🙂cd\n  ef\n"))
+             (assert (= (load (field laid-out cursor-row)) 1))
+             (assert (= (load (field laid-out cursor-column)) 3)))))
+
+(deftest input-renderer-normalizes-from-the-cursor-before-clearing
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)
+               (mut renderer) (input-renderer-new)]
+           (input-editor-apply! (mut editor) (InputInsert "ab界🙂cdef"))
+           (input-editor-apply! (mut editor) (InputLeft))
+           (let [(mut laid-out) (test-input-layout allocator (mut editor) 10 24 "❯ ")
+                 (mut first) (input-renderer-plan! (mut renderer) (mut laid-out))
+                 count (al-len [TerminalOperation] (load first))]
+             ;; The cursor already ends on the second (cursor) row. No trailing
+             ;; line break or compensating cursor-up is needed.
+             (assert (match-else (al-get [TerminalOperation] (load first) (- count 2))
+                                 (TerminalCarriageReturn [] true)
+                                 (_ false)))
+             (assert (match-else (al-get [TerminalOperation] (load first) (- count 1))
+                                 (TerminalCursorRight [columns] (= columns 3))
+                                 (_ false))))
+           (let [(mut clear) (input-renderer-clear-plan! (mut renderer) allocator)]
+             (assert (match-else (al-get [TerminalOperation] (load clear) 1)
+                                 (TerminalCursorUp [rows] (= rows 1))
+                                 (_ false)))
+             (assert (match-else (al-get [TerminalOperation]
+                                         (load clear)
+                                         (- (al-len [TerminalOperation] (load clear)) 1))
+                                 (TerminalCursorUp [rows] (= rows 1))
+                                 (_ false)))
+             (assert (= (load (field renderer previous-height)) 0)))))
+
+(deftest typing-redraws-without-line-breaks-and-submission-commits-once
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)
+               (mut renderer) (input-renderer-new)
+               (mut typed) 0]
+           (loop (if (>= (load typed) 20)
+                     (break)
+                     (do
+                       (input-editor-apply! (mut editor) (InputInsert "x"))
+                       (let [(mut layout) (test-input-layout allocator (mut editor) 40 24 "❯ ")
+                             (mut operations) (input-renderer-plan! (mut renderer) (mut layout))
+                             (mut at) 0
+                             count (al-len [TerminalOperation] (load operations))]
+                         (loop (if (>= (load at) count)
+                                   (break)
+                                   (do
+                                     (assert (match-else (al-get [TerminalOperation]
+                                                                 (load operations)
+                                                                 (load at))
+                                                         (TerminalLineBreak [] false)
+                                                         (_ true)))
+                                     (store! at (+ (load at) 1)))))
+                         (store! typed (+ (load typed) 1))))))
+           (let [(mut committed) (input-renderer-commit-plan! (mut renderer) allocator)
+                 (mut breaks) 0
+                 (mut at) 0
+                 count (al-len [TerminalOperation] (load committed))]
+             (loop (if (>= (load at) count)
+                       (break)
+                       (do
+                         (match-else (al-get [TerminalOperation]
+                                             (load committed)
+                                             (load at))
+                                     (TerminalLineBreak []
+                                                        (store! breaks (+ (load breaks) 1)))
+                                     (_ 0))
+                         (store! at (+ (load at) 1)))))
+             (assert (= (load breaks) 1)))))
+
+(deftest bounds-multiline-input-around-the-cursor
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor)
+                                (InputInsert "one\ntwo\nthree\nfour\nfive"))
+           (let [(mut laid-out) (test-input-layout allocator (mut editor) 40 3 "❯ ")
+                 text (render-frame-plain allocator (mut (field laid-out frame)))]
+             (assert (str-eq text
+                             "  … earlier input\n  four\n  five\n"))
+             (assert (= (load (field laid-out cursor-row)) 2)))))
+
+(deftest bounds-only-the-mutable-tail-not-committed-frames
+         (let [allocator (malloc-allocator)
+               (mut source) (frame-new allocator)]
+           (frame-push-line! (mut source) "one" 3 (RolePrimary))
+           (frame-push-line! (mut source) "two" 3 (RolePrimary))
+           (frame-push-line! (mut source) "three" 5 (RolePrimary))
+           (frame-push-line! (mut source) "four" 4 (RolePrimary))
+           (frame-push-line! (mut source) "five" 4 (RolePrimary))
+           (let [(mut bounded) (frame-tail-bounded allocator source 3)]
+             (assert (str-eq (render-frame-plain allocator (mut bounded))
+                             "  … earlier live output\nfour\nfive\n"))
+             (assert (= (al-len [FrameLine] (load (field source lines))) 5)))))

@@ -1,0 +1,99 @@
+(module harness-claude-wire-fixture)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.slice" :use *)
+(import "coil.thread" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "deepseek-anthropic" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-orchestration-tools" :use *)
+(import "harness-run-service" :use *)
+(import "harness-allocation-domain" :use *)
+(import "claude-agent" :use *)
+
+(defstruct ClaudeWireJob
+  [(allocator (ptr Allocator))
+   (request (ptr ModelRequest))
+   (iterations i64)
+   (completed (ptr i64))])
+
+(defn claude-wire-worker [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr ClaudeWireJob) opaque)
+        (mut at) 0]
+    (loop (if (>= (load at) (load (field job iterations)))
+              (break)
+              (let [wire
+                      (anthropic-request-json (load (field job allocator))
+                                              (load (field job request))
+                                              true)
+                    encoded (json-stringify (load (field job allocator)) wire)]
+                (when (= (slice-len [u8] encoded) 0) (break) 0)
+                (store! at (+ (load at) 1)))))
+    (store! (load (field job completed)) (load at))
+    (cast (ptr i8) 0)))
+
+;; Compile this fixture with optimization: the production crash occurred while an
+;; optimized worker serialized the Claude request tree containing native tools.
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [owner (malloc-allocator)
+        registry (box owner ToolRegistry (tool-registry-new owner))
+        service (alloc/stack RunService)
+        (mut run) 0
+        (mut status) 0]
+    (register-filesystem-tools! registry owner ".")
+    (register-bash-tool! registry owner ".")
+    (store! service (zeroed RunService))
+    (register-orchestration-tools! registry owner service)
+    (loop (if (>= (load run) 50)
+              (break)
+              (let [run-domain (allocation-domain-open owner)
+                    run-allocator (allocation-domain-allocator run-domain)
+                    run-messages
+                      (box run-allocator
+                           (ArrayList Message)
+                           (al-new [Message] run-allocator))
+                    request (box run-allocator ModelRequest (zeroed ModelRequest))
+                    message (alloc/stack Message)
+                    completed (box run-allocator i64 0)
+                    job (box run-allocator ClaudeWireJob (zeroed ClaudeWireJob))
+                    worker (alloc/stack Thread)]
+                (store! (field message role) (UserRole))
+                (store! (field message content) "test")
+                (al-push! [Message] run-messages (load message))
+                (store! (field request run-id) "wire-regression")
+                (store! (field request operation-id) "model-1:model:1")
+                (store! (field request model) "claude-sonnet-4-6")
+                (store! (field request instructions) "Be exact.")
+                (store! (field request messages) run-messages)
+                (store! (field request tools) registry)
+                (store! (field request tool-choice) (ToolsAuto))
+                (store! (field request parallel-tool-calls) true)
+                (store! (field request reasoning) (ReasoningMedium))
+                (store! (field request max-output-tokens) 4096)
+                (store! (field (field request continuation) present) false)
+                (store! (field (field request continuation) previous-output) (JsonNull))
+                ;; Exercise the same subprocess/allocation perturbation that occurs
+                ;; immediately before Claude request serialization in production.
+                (claude-oauth-command run-allocator "token" true)
+                (store! (field job allocator) run-allocator)
+                (store! (field job request) request)
+                (store! (field job iterations) 100)
+                (store! (field job completed) completed)
+                (if (!= (cast i64
+                              (thread-spawn worker
+                                            (fnptr-of claude-wire-worker)
+                                            (cast (ptr i8) job)))
+                        0)
+                    (store! status 2)
+                    (do
+                      (thread-join worker)
+                      (when (!= (load completed) 100) (store! status 3) 0)))
+                (allocation-domain-close! owner run-domain)
+                (if (!= (load status) 0)
+                    (break)
+                    (store! run (+ (load run) 1))))))
+    (load status)))

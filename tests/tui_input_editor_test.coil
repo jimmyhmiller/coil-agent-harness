@@ -1,0 +1,56 @@
+(module harness-tui-input-editor-test)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-input-editor" :use *)
+
+(deftest edits-at-utf8-boundaries-without-splitting-scalars
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "a界🙂b"))
+           (input-editor-apply! (mut editor) (InputLeft))
+           (input-editor-apply! (mut editor) (InputBackspace))
+           (assert (str-eq (input-editor-text (mut editor)) "a界b"))
+           (assert (= (load (field editor cursor)) 4))
+           (input-editor-apply! (mut editor) (InputHome))
+           (input-editor-apply! (mut editor) (InputDelete))
+           (assert (str-eq (input-editor-text (mut editor)) "界b"))))
+
+(deftest supports-multiline-submission-and-history-navigation
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "first"))
+           (input-editor-apply! (mut editor) (InputNewline))
+           (input-editor-apply! (mut editor) (InputInsert "second"))
+           (match-else (input-editor-apply! (mut editor) (InputSubmit))
+                       (InputSubmitted [text]
+                                       (assert (str-eq text "first\nsecond")))
+                       (_ (assert false)))
+           (assert (str-eq (input-editor-text (mut editor)) ""))
+           (input-editor-apply! (mut editor) (InputHistoryPrevious))
+           (assert (str-eq (input-editor-text (mut editor)) "first\nsecond"))
+           (input-editor-apply! (mut editor) (InputHistoryNext))
+           (assert (str-eq (input-editor-text (mut editor)) ""))))
+
+(deftest deletes-a-word-before-the-cursor
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "hello brave world"))
+           (input-editor-apply! (mut editor) (InputDeleteWord))
+           (assert (str-eq (input-editor-text (mut editor)) "hello brave "))
+           (input-editor-apply! (mut editor) (InputDeleteWord))
+           (assert (str-eq (input-editor-text (mut editor)) "hello "))))
+
+(deftest completes-unambiguous-slash-commands
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "/gr"))
+           (input-editor-apply! (mut editor) (InputComplete))
+           (assert (str-eq (input-editor-text (mut editor)) "/graph"))
+           (input-editor-clear! (mut editor))
+           (input-editor-apply! (mut editor) (InputInsert "/c"))
+           (assert (match-else (input-editor-apply! (mut editor) (InputComplete))
+                               (InputUnchanged [] true)
+                               (_ false)))
+           (assert (str-eq (input-editor-text (mut editor)) "/c"))))

@@ -1,0 +1,318 @@
+(module harness-tui-input-reader)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.region" :as region)
+(import "coil.selectors" :as selectors)
+(import "coil.signals" :as signals)
+(import "coil.slice" :use *)
+(import "coil.time" :as time)
+(import "harness-tui-input-decoder" :use *)
+(import "harness-tui-input-editor" :use *)
+(import "harness-tui-output" :use *)
+(import "harness-tui-render-input" :use *)
+(import "harness-tui-terminal" :use *)
+(import "harness-tui-view" :use *)
+(import "harness-tui-view-layout" :use *)
+
+(defsum InputReadResult
+  (InputReadSubmitted [(text (slice u8))])
+  (InputReadInterrupted [])
+  (InputReadClosed [])
+  (InputReadFailed []))
+
+(defstruct InputReaderLifecycle
+  [(terminal TerminalSession)
+   (signals signals/SignalSubscription)
+   (signals-open bool)])
+
+(defn input-reader-lifecycle-new [] (-> InputReaderLifecycle)
+  (let [lifecycle (alloc/stack InputReaderLifecycle)]
+    (store! (field lifecycle terminal) (terminal-session-new))
+    (store! (field lifecycle signals-open) false)
+    (load lifecycle)))
+
+(defn input-reader-lifecycle-enter! [(allocator (ptr Allocator))
+                                     (lifecycle (ptr InputReaderLifecycle))
+                                     (profile (ref TerminalProfile))] (-> bool)
+  (let [numbers (alloc/stack (array i32 2))]
+    (store! (index numbers 0) (cast i32 2))
+    (store! (index numbers 1) (cast i32 15))
+    (match (signals/signal-subscribe (field lifecycle signals)
+                                     (slice-new [i32] (index numbers 0) 2))
+      (Ok [subscription] (store! (field lifecycle signals-open) true))
+      (Err [failure] (store! (field lifecycle signals-open) false)))
+    (if (terminal-session-enter! allocator
+                                 (mut (field lifecycle terminal))
+                                 profile)
+        true
+        (do
+          (when (load (field lifecycle signals-open))
+            (signals/signal-close! (field lifecycle signals))
+            (store! (field lifecycle signals-open) false)
+            0)
+          false))))
+
+(defn input-reader-redraw! [(allocator (ptr Allocator))
+                            (editor (ptr InputEditor))
+                            (renderer (ptr InputRenderer))
+                            (profile (ref TerminalProfile))
+                            (width i64)
+                            (height i64)
+                            (prompt (slice u8))] (-> i64)
+  (let [cycle (alloc/stack region/Region)]
+    (region/region-init cycle allocator)
+    (let [cycle-allocator (region/region-allocator cycle)
+          node
+            (view-input prompt
+                        (input-editor-text editor)
+                        (load (field editor cursor))
+                        height)]
+      (match-else node
+                  (ViewInputNode [input]
+                                 (let [(mut declarative) (view-layout-input cycle-allocator input width)]
+                                   (let [(mut operations)
+                                           (input-renderer-plan-with! renderer
+                                                                      cycle-allocator
+                                                                      (mut declarative))]
+                                     (tui-output-execute-plan! cycle-allocator
+                                                               profile
+                                                               (mut operations)))))
+                  (_ 0))
+      (region/region-close! cycle)
+      0)))
+
+(defn input-reader-clear! [(allocator (ptr Allocator))
+                           (renderer (ptr InputRenderer))
+                           (profile (ref TerminalProfile))] (-> i64)
+  (let [(mut operations) (input-renderer-clear-plan! renderer allocator)]
+    (tui-output-execute-plan! allocator profile (mut operations))))
+
+(defn input-reader-commit! [(allocator (ptr Allocator))
+                            (renderer (ptr InputRenderer))
+                            (profile (ref TerminalProfile))] (-> i64)
+  (let [(mut operations) (input-renderer-commit-plan! renderer allocator)]
+    (tui-output-execute-plan! allocator profile (mut operations))))
+
+(defn input-reader-ready? [(fd i32) (timeout-ms i64)] (-> bool)
+  (match (time/duration-millis timeout-ms)
+    (Err [failure] false)
+    (Ok [duration]
+        (match (selectors/wait-fd-for fd
+                                      (selectors/interest-readable)
+                                      duration)
+          (Ok [ready] true)
+          (Err [failure] false)))))
+
+(defn input-reader-byte [(allocator (ptr Allocator))
+                         (decoder (ptr InputDecoder))
+                         (lifecycle (ptr InputReaderLifecycle))
+                         (idle-timeout i64)] (-> i64)
+  (let [timeout
+          (if (> (al-len [u8] (load (field decoder escape))) 0)
+              35
+              idle-timeout)
+        wait-ms (if (> timeout 50) 50 timeout)
+        signal-fd
+          (if (load (field lifecycle signals-open))
+              (load (field (field lifecycle signals) read-fd))
+              -1)]
+    (block :ready
+           (when (load (field lifecycle signals-open))
+             (when (input-reader-ready? signal-fd 0)
+               (match (signals/signal-read (field lifecycle signals))
+                 (Ok [number] (return-from :ready (if (= number 15) -4 -3)))
+                 (Err [failure] (return-from :ready -3)))
+               0)
+             0)
+           (when (input-reader-ready? (cast i32 0) wait-ms)
+             (let [byte (alloc/stack (array u8 1))
+                   count
+                     (cast i64
+                           (io/read (cast i32 0)
+                                    (cast (ptr i8) (index byte 0))
+                                    (cast isize 1)))]
+               (return-from :ready
+                            (if (= count 1)
+                                (cast i64 (load (index byte 0)))
+                                -1)))
+             0)
+           (when (load (field lifecycle signals-open))
+             (when (input-reader-ready? signal-fd 0)
+               (match (signals/signal-read (field lifecycle signals))
+                 (Ok [number] (return-from :ready (if (= number 15) -4 -3)))
+                 (Err [failure] (return-from :ready -3)))
+               0)
+             0)
+           -2)))
+
+(defn input-reader-finish! [(allocator (ptr Allocator))
+                            (lifecycle (ptr InputReaderLifecycle))
+                            (profile (ref TerminalProfile))] (-> i64)
+  (terminal-session-restore! allocator
+                             (mut (field lifecycle terminal))
+                             profile)
+  (when (load (field lifecycle signals-open))
+    (signals/signal-close! (field lifecycle signals))
+    (store! (field lifecycle signals-open) false)
+    0)
+  0)
+
+(defn input-read-interactive [(allocator (ptr Allocator))
+                              (editor (ptr InputEditor))
+                              (profile (ref TerminalProfile))
+                              (prompt (slice u8))] (-> InputReadResult)
+  (let [(mut lifecycle) (input-reader-lifecycle-new)
+        (mut decoder) (input-decoder-new allocator)
+        (mut renderer) (input-renderer-new)
+        (mut width)
+          (let [queried (terminal-query-width (cast i32 1))]
+            (if (>= queried 12) queried (load (field profile width))))
+        (mut height)
+          (let [queried (terminal-query-height (cast i32 1))]
+            (if (>= queried 6) queried (load (field profile height))))]
+    (if (not (input-reader-lifecycle-enter! allocator
+                                            (mut lifecycle)
+                                            profile))
+        (InputReadFailed)
+        (block :read
+               (input-reader-redraw! allocator
+                                     editor
+                                     (mut renderer)
+                                     profile
+                                     (load width)
+                                     (load height)
+                                     prompt)
+               (loop (let [byte
+                             (input-reader-byte allocator
+                                                (mut decoder)
+                                                (mut lifecycle)
+                                                250)
+                           queried-width (terminal-query-width (cast i32 1))
+                           queried-height (terminal-query-height (cast i32 1))
+                           resized
+                             (or (and (>= queried-width 12)
+                                      (!= queried-width (load width)))
+                                 (and (>= queried-height 6)
+                                      (!= queried-height (load height))))
+                           decoded
+                             (cond (= byte -4)
+                                     (do
+                                       (input-reader-clear! allocator (mut renderer) profile)
+                                       (input-editor-clear! editor)
+                                       (input-reader-finish! allocator
+                                                             (mut lifecycle)
+                                                             profile)
+                                       (return-from :read (InputReadClosed)))
+                                   (= byte -3)
+                                     (do
+                                       (input-reader-clear! allocator (mut renderer) profile)
+                                       (input-editor-clear! editor)
+                                       (input-reader-finish! allocator
+                                                             (mut lifecycle)
+                                                             profile)
+                                       (return-from :read (InputReadInterrupted)))
+                                   (= byte -2) (input-decoder-timeout! (mut decoder))
+                                   (< byte 0) (InputDecoded (InputEndOfFile))
+                                   :else
+                                     (input-decoder-feed! (mut decoder)
+                                                          (cast u8 byte)))]
+                       (when resized
+                         (when (>= queried-width 12) (store! width queried-width) 0)
+                         (when (>= queried-height 6) (store! height queried-height) 0)
+                         0)
+                       (match decoded
+                         (InputNeedMore []
+                                        (if resized
+                                            (input-reader-redraw! allocator
+                                                                  editor
+                                                                  (mut renderer)
+                                                                  profile
+                                                                  (load width)
+                                                                  (load height)
+                                                                  prompt)
+                                            0))
+                         (InputIgnored []
+                                       (if resized
+                                           (input-reader-redraw! allocator
+                                                                 editor
+                                                                 (mut renderer)
+                                                                 profile
+                                                                 (load width)
+                                                                 (load height)
+                                                                 prompt)
+                                           0))
+                         (InputPasteTooLarge []
+                                             (do
+                                               (input-reader-clear! allocator
+                                                                    (mut renderer)
+                                                                    profile)
+                                               (input-reader-finish! allocator
+                                                                     (mut lifecycle)
+                                                                     profile)
+                                               (return-from :read (InputReadFailed))))
+                         (InputDecoded [key]
+                                       (match (input-editor-apply! editor key)
+                                         (InputChanged []
+                                                       (input-reader-redraw! allocator
+                                                                             editor
+                                                                             (mut renderer)
+                                                                             profile
+                                                                             (load width)
+                                                                             (load height)
+                                                                             prompt))
+                                         (InputUnchanged [] 0)
+                                         (InputSubmitted [text]
+                                                         (do
+                                                           (input-reader-commit! allocator
+                                                                                 (mut renderer)
+                                                                                 profile)
+                                                           (input-reader-finish! allocator
+                                                                                 (mut lifecycle)
+                                                                                 profile)
+                                                           (return-from :read
+                                                                        (InputReadSubmitted text))))
+                                         (InputInterrupted []
+                                                           (do
+                                                             (input-reader-clear! allocator
+                                                                                  (mut renderer)
+                                                                                  profile)
+                                                             (input-editor-clear! editor)
+                                                             (input-reader-finish! allocator
+                                                                                   (mut lifecycle)
+                                                                                   profile)
+                                                             (return-from :read
+                                                                          (InputReadInterrupted))))
+                                         (InputSuspended []
+                                                         (do
+                                                           (input-reader-clear! allocator
+                                                                                (mut renderer)
+                                                                                profile)
+                                                           (input-reader-finish! allocator
+                                                                                 (mut lifecycle)
+                                                                                 profile)
+                                                           (terminal-suspend-process)
+                                                           (if (input-reader-lifecycle-enter! allocator
+                                                                                              (mut lifecycle)
+                                                                                              profile)
+                                                               (input-reader-redraw! allocator
+                                                                                     editor
+                                                                                     (mut renderer)
+                                                                                     profile
+                                                                                     (load width)
+                                                                                     (load height)
+                                                                                     prompt)
+                                                               (return-from :read
+                                                                            (InputReadFailed)))))
+                                         (InputClosed []
+                                                      (do
+                                                        (input-reader-clear! allocator
+                                                                             (mut renderer)
+                                                                             profile)
+                                                        (input-reader-finish! allocator
+                                                                              (mut lifecycle)
+                                                                              profile)
+                                                        (return-from :read
+                                                                     (InputReadClosed)))))))))))))

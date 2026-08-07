@@ -18,6 +18,7 @@
 
 (defstruct AuthorizationFakeController [])
 (impl RunController AuthorizationFakeController
+  (prepare-durable-provider [(self (ptr AuthorizationFakeController)) (provider-name (slice u8))] (-> i64) 0)
   (start-durable-run [(self (ptr AuthorizationFakeController)) (command (ptr Json))]
                      (-> i64)
                      0)
@@ -91,7 +92,7 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
@@ -188,7 +189,7 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (store! emitter (event-emitter-new journal sequence))
+           (store! emitter (event-emitter-new allocator journal sequence))
            (match (authorization-mailbox-open allocator)
              (AuthorizationMailboxOpenFailed [message] (assert false))
              (AuthorizationMailboxOpened [opened] (store! mailbox opened)))

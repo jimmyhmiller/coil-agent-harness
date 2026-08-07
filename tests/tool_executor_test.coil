@@ -34,7 +34,10 @@
     (update-maximum! (load (field probe maximum)) active)
     (sleep-ms 80)
     (atomic-sub (load (field probe active)) 1)
-    (store! (field result output) (JsonString (load (field call id))))
+    ;; The executor must promote this call-arena-owned string before closing the
+    ;; worker's region.
+    (store! (field result output)
+            (JsonString (json-copy-string allocator (load (field call id)))))
     (load result)))
 
 (impl ToolImplementation ParallelProbe
@@ -47,7 +50,8 @@
 
 (defstruct CountingEventSink
   [(count (ptr i64))
-   (valid-envelope (ptr i64))])
+   (valid-envelope (ptr i64))
+   (valid-proposal (ptr i64))])
 
 (impl EventSink CountingEventSink
   (publish-event [(self (ptr CountingEventSink)) (event (ptr Event))]
@@ -59,6 +63,18 @@
                                           "model-1")))
                      (atomic-store (load (field self valid-envelope)) 0)
                      0)
+                   (match-else (load (field event kind))
+                               (ToolCallProposed []
+                                                 (let [payload (load (field event payload))]
+                                                   (when (or (not (match (json-string-at payload "name")
+                                                                    (Some [name] (str-eq name "probe"))
+                                                                    (None [] false)))
+                                                             (not (match-else (json-get payload "arguments")
+                                                                              (JsonObject [keys values] true)
+                                                                              (_ false))))
+                                                     (atomic-store (load (field self valid-proposal)) 0)
+                                                     0)))
+                               (_ 0))
                    0)))
 
 (defn executor-tool [(allocator (ptr Allocator)) (probe (ptr ParallelProbe))] (-> ToolDefinition)
@@ -90,6 +106,7 @@
                maximum (box allocator i64 0)
                event-count (box allocator i64 0)
                valid-envelope (box allocator i64 1)
+               valid-proposal (box allocator i64 1)
                sequence (box allocator i64 0)
                probe (box allocator ParallelProbe (zeroed ParallelProbe))
                registry (box allocator ToolRegistry (tool-registry-new allocator))
@@ -107,7 +124,8 @@
            (al-push! [ToolCall] calls (executor-call allocator "second"))
            (store! (field sink count) event-count)
            (store! (field sink valid-envelope) valid-envelope)
-           (store! (field emitter sink) sink)
+           (store! (field sink valid-proposal) valid-proposal)
+           (store! (field emitter sink) (box allocator (dyn EventSink) sink))
            (store! (field emitter next-sequence) sequence)
            (store! (field execution run-id) "parallel-test")
            (store! (field execution parent-operation-id) "model-1")
@@ -127,9 +145,13 @@
                (assert (match-else (load (field first status))
                                    (ToolSucceeded [] true)
                                    (_ false)))
-               (assert (str-eq (load (field first call-id)) "first")))
+               (assert (str-eq (load (field first call-id)) "first"))
+               (assert (match (json-string-value (load (field first output)))
+                         (Some [text] (str-eq text "first"))
+                         (None [] false))))
              (assert-eq (atomic-load event-count) 8)
-             (assert-eq (atomic-load valid-envelope) 1))))
+             (assert-eq (atomic-load valid-envelope) 1)
+             (assert-eq (atomic-load valid-proposal) 1))))
 
 (deftest reports-a-tool-that-exceeds-its-cooperative-deadline
          (let [allocator (malloc-allocator)
@@ -137,6 +159,7 @@
                maximum (box allocator i64 0)
                event-count (box allocator i64 0)
                valid-envelope (box allocator i64 1)
+               valid-proposal (box allocator i64 1)
                sequence (box allocator i64 0)
                probe (box allocator ParallelProbe (zeroed ParallelProbe))
                registry (box allocator ToolRegistry (tool-registry-new allocator))
@@ -155,7 +178,8 @@
            (al-push! [ToolCall] calls (executor-call allocator "slow"))
            (store! (field sink count) event-count)
            (store! (field sink valid-envelope) valid-envelope)
-           (store! emitter (event-emitter-new sink sequence))
+           (store! (field sink valid-proposal) valid-proposal)
+           (store! emitter (event-emitter-new allocator sink sequence))
            (store! (field execution run-id) "timeout-test")
            (store! (field execution parent-operation-id) "model-1")
            (store! (field execution provider) "fake")
@@ -174,4 +198,5 @@
                                  (_ false)))
              (assert (str-eq (load (field result error)) "tool deadline exceeded"))
              (assert-eq (atomic-load event-count) 4)
-             (assert-eq (atomic-load valid-envelope) 1))))
+             (assert-eq (atomic-load valid-envelope) 1)
+             (assert-eq (atomic-load valid-proposal) 1))))

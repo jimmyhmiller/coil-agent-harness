@@ -45,7 +45,10 @@ dist/
 # Clojure
 .lein-repl-history
 /harness
+/harness-*
 /harness.o
+/.harness-tui*.jsonl
+/test
 /.coil/
 /.build/
 /native/*.o

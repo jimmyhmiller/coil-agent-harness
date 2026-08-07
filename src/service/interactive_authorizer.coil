@@ -236,4 +236,6 @@
                    (spec (ptr ToolSpec))
                    (call (ptr ToolCall))]
                   (-> AuthorizationDecision)
-                  (interactive-authorize self spec call)))
+                  (match-else (load (field spec effect))
+                              (ReadOnly [] (Authorize))
+                              (_ (interactive-authorize self spec call)))))

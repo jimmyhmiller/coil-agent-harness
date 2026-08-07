@@ -1,0 +1,106 @@
+(module harness-json-clone-model-provider-fixture)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
+(import "harness-agent-runner" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-event" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct CloneProvider [(reserved u8)])
+(defstruct CountSink [(count (ptr i64))])
+
+(impl EventSink CountSink
+  (publish-event [(self (ptr CountSink)) (event (ptr Event))]
+                 (-> i64)
+                 (atomic-add (load (field self count)) 1)))
+
+(defn clone-provider-request [(allocator (ptr Allocator))
+                              (registry (ptr ToolRegistry))] (-> Json)
+  (let [(mut params) (json-object allocator)
+        (mut tools) (json-array allocator)
+        definitions (field registry definitions)
+        (mut i) 0
+        n (al-len [ToolDefinition] (load definitions))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [definition (al-get [ToolDefinition] (load definitions) (load i))
+                    spec (field definition spec)
+                    (mut tool) (json-object allocator)]
+                (json-put-string! (mut tool) "type" "function")
+                (json-put-string! (mut tool) "name" (load (field spec name)))
+                (json-put-string! (mut tool) "description" (load (field spec description)))
+                (json-object-put! (mut tool)
+                                  "inputSchema"
+                                  (json-clone allocator (load (field spec input-schema))))
+                (json-array-push! (mut tools) (load tool))
+                (store! i (+ (load i) 1)))))
+    (json-object-put! (mut params) "dynamicTools" (load tools))
+    (load params)))
+
+(impl ModelProvider CloneProvider
+  (provider-name [(self (ptr CloneProvider))] (-> (slice u8)) "clone")
+  (provider-capabilities [(self (ptr CloneProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "clone"))
+  (execute-model [(self (ptr CloneProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (let [wire (clone-provider-request allocator (load (field request tools)))
+                       encoded (json-stringify allocator wire)
+                       (mut response) (response-empty allocator)]
+                   (emit-event emitter 1 (CodexNotification) "run" "op" "" "clone" "clone" wire)
+                   (store! (field response provider) "clone")
+                   (store! (field response model) "clone")
+                   (store! (field response response-id) "done")
+                   (store! (field response output-text) encoded)
+                   (ModelOk (load response)))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [owner (malloc-allocator)
+        domain (allocation-domain-open owner)
+        allocator (allocation-domain-allocator domain)
+        registry (box allocator ToolRegistry (tool-registry-new allocator))
+        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+        request (box allocator ModelRequest (zeroed ModelRequest))
+        provider (box allocator CloneProvider (zeroed CloneProvider))
+        authorizer (alloc/stack AllowAllAuthorizer)
+        count (box allocator i64 0)
+        sink (alloc/stack CountSink)
+        sequence (box allocator i64 1)
+        emitter (box allocator EventEmitter (zeroed EventEmitter))
+        policy (alloc/stack AgentRunPolicy)]
+    (register-filesystem-tools! registry allocator ".")
+    (register-bash-tool! registry allocator ".")
+    (store! (field request run-id) "run")
+    (store! (field request operation-id) "op")
+    (store! (field request model) "clone")
+    (store! (field request messages) messages)
+    (store! (field request tools) registry)
+    (store! (field request tool-choice) (ToolsAuto))
+    (store! (field request reasoning) (ReasoningNone))
+    (store! (field request timeout-ms) 10000)
+    (store! (field sink count) count)
+    (store! (field emitter sink) sink)
+    (store! (field emitter next-sequence) sequence)
+    (store! (field policy max-model-turns) 1)
+    (store! (field policy max-parallel-tools) 1)
+    (let [(mut handle)
+            (run-agent-background allocator
+                                  provider
+                                  request
+                                  authorizer
+                                  emitter
+                                  (load policy))
+          result (agent-run-join (mut handle))]
+      (let [exit-code (if (> (atomic-load count) 0) 0 1)]
+        (allocation-domain-close! owner domain)
+        exit-code))))

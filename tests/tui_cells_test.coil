@@ -1,0 +1,37 @@
+(module harness-tui-cells-test)
+
+(import "coil.alloc" :as alloc)
+(import "coil.slice" :use *)
+(import "harness-tui-cells" :use *)
+
+(deftest decodes-strict-utf8-and-rejects-malformed-input
+         (let [ascii (utf8-decode "A" 0)
+               cjk (utf8-decode "界" 0)
+               emoji (utf8-decode "🙂" 0)
+               malformed-bytes (alloc/stack (array u8 2))]
+           (store! (index malformed-bytes 0) (cast u8 192))
+           (store! (index malformed-bytes 1) (cast u8 175))
+           (let [malformed (utf8-decode (slice-new [u8] (index malformed-bytes 0) 2) 0)]
+             (assert (load (field ascii valid)))
+             (assert (= (load (field ascii codepoint)) 65))
+             (assert (= (load (field ascii length)) 1))
+             (assert (= (load (field cjk codepoint)) 30028))
+             (assert (= (load (field cjk length)) 3))
+             (assert (= (load (field emoji codepoint)) 128578))
+             (assert (= (load (field emoji length)) 4))
+             (assert (not (load (field malformed valid)))))))
+
+(deftest measures-ascii-combining-cjk-and-emoji-cells
+         (assert (= (text-cell-width "coil") 4))
+         (assert (= (text-cell-width "é") 1))
+         (assert (= (text-cell-width "界") 2))
+         (assert (= (text-cell-width "🙂") 2))
+         (assert (= (text-cell-width "a界🙂") 5)))
+
+(deftest rejects-terminal-controls-and-malformed-text
+         (let [malformed-bytes (alloc/stack (array u8 2))]
+           (store! (index malformed-bytes 0) (cast u8 192))
+           (store! (index malformed-bytes 1) (cast u8 175))
+           (assert (= (text-cell-width "line\n") -1))
+           (assert (= (text-cell-width (slice-new [u8] (index malformed-bytes 0) 2))
+                      -1))))

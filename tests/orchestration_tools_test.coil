@@ -1,0 +1,161 @@
+(module harness-orchestration-tools-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-authorization-mailbox" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-orchestration-tools" :use *)
+(import "harness-run-service" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct OrchestrationController [(starts i64)])
+
+(impl RunController OrchestrationController
+  (prepare-durable-provider [(self (ptr OrchestrationController)) (provider-name (slice u8))] (-> i64) 0)
+  (start-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
+                     (-> i64)
+                     (do
+                       (store! (field self starts) (+ (load (field self starts)) 1))
+                       0))
+  (cancel-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
+                      (-> RunCancellationResult)
+                      (RunCancellationAccepted)))
+
+(defn orchestration-call [(allocator (ptr Allocator))
+                          (id (slice u8))
+                          (name (slice u8))
+                          (run-id (slice u8))
+                          (prompt (slice u8))] (-> ToolCall)
+  (let [call (alloc/stack ToolCall)
+        (mut arguments) (json-object allocator)]
+    (json-put-string! (mut arguments) "run_id" run-id)
+    (when (not (str-eq name "spawn_subagent"))
+      (json-put-string! (mut arguments) "provider" "fake")
+      (json-put-string! (mut arguments) "model" "fake-model")
+      0)
+    (json-put-string! (mut arguments) "prompt" prompt)
+    (store! (field call id) id)
+    (store! (field call name) name)
+    (store! (field call arguments) (load arguments))
+    (store! (field call raw-arguments) "")
+    (load call)))
+
+(defn orchestration-succeeded? [(result ToolResult)] (-> bool)
+  (match-else (load (field result status))
+              (ToolSucceeded [] true)
+              (_ false)))
+
+(deftest subagent-and-workflow-tools-use-durable-run-service
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-orchestration-tools.jsonl"
+               journal (alloc/stack EventJournal)
+               mailbox (alloc/stack AuthorizationMailbox)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack OrchestrationController)
+               service (alloc/stack RunService)
+               context (alloc/stack ToolExecutionContext)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (match (authorization-mailbox-open allocator)
+             (AuthorizationMailboxOpenFailed [message] (assert false))
+             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service mailbox) mailbox)
+           (store! (field service controller) controller)
+           (store! (field context run-id) "parent-run")
+           (store! (field context cancellation) (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [(mut parent) (json-object allocator)]
+             (json-object-put! (mut parent) "version" (json-integer allocator 1))
+             (json-put-string! (mut parent) "command_id" "parent-create")
+             (json-put-string! (mut parent) "run_id" "parent-run")
+             (json-put-string! (mut parent) "provider" "fake")
+             (json-put-string! (mut parent) "model" "fake-model")
+             (json-put-string! (mut parent) "prompt" "coordinate")
+             (let [response (service-submit-run service (mut parent) "test")]
+               (assert-eq (load (field response status)) 202)))
+           (let [spawn-tool (alloc/stack SpawnSubagentTool)
+                 spawn-call (alloc/stack ToolCall)
+                 override-call (alloc/stack ToolCall)]
+             (store! (field spawn-tool service) service)
+             (store! spawn-call
+                     (orchestration-call allocator
+                                         "spawn-call"
+                                         "spawn_subagent"
+                                         "child-run"
+                                         "research"))
+             (assert (orchestration-succeeded? (execute-spawn-subagent spawn-tool spawn-call context allocator)))
+             (store! override-call
+                     (orchestration-call allocator
+                                         "override-call"
+                                         "spawn_subagent"
+                                         "override-child-run"
+                                         "use an override"))
+             (let [(mut arguments) (load (field override-call arguments))]
+               (json-put-string! (mut arguments) "provider" "fake-override")
+               (json-put-string! (mut arguments) "model" "override-model")
+               (store! (field override-call arguments) (load arguments)))
+             (assert (orchestration-succeeded? (execute-spawn-subagent spawn-tool override-call context allocator))))
+           (let [workflow-tool (alloc/stack CreateWorkflowNodeTool)
+                 root-call (alloc/stack ToolCall)
+                 child-call (alloc/stack ToolCall)]
+             (store! (field workflow-tool service) service)
+             (store! root-call
+                     (orchestration-call allocator
+                                         "root-call"
+                                         "create_workflow_node"
+                                         "root-node-run"
+                                         "root"))
+             (let [(mut arguments) (load (field root-call arguments))
+                   (mut dependencies) (json-array allocator)]
+               (json-put-string! (mut arguments) "workflow_id" "workflow-tools")
+               (json-put-string! (mut arguments) "node_id" "root")
+               (json-object-put! (mut arguments) "depends_on" (load dependencies))
+               (store! (field root-call arguments) (load arguments)))
+             (assert (orchestration-succeeded? (execute-create-workflow-node workflow-tool root-call context allocator)))
+             (store! child-call
+                     (orchestration-call allocator
+                                         "child-call"
+                                         "create_workflow_node"
+                                         "dependent-node-run"
+                                         "dependent"))
+             (let [(mut arguments) (load (field child-call arguments))
+                   (mut dependencies) (json-array allocator)]
+               (json-put-string! (mut arguments) "workflow_id" "workflow-tools")
+               (json-put-string! (mut arguments) "node_id" "dependent")
+               (json-array-push! (mut dependencies) (JsonString "root-node-run"))
+               (json-object-put! (mut arguments) "depends_on" (load dependencies))
+               (store! (field child-call arguments) (load arguments)))
+             (assert (orchestration-succeeded? (execute-create-workflow-node workflow-tool child-call context allocator))))
+           (assert-eq (load (field controller starts)) 5)
+           (let [child (service-query-events service "child-run" 0)
+                 events (json-get (load (field child body)) "events")
+                 created (json-array-get events 0)
+                 payload (json-get created "payload")]
+             (assert (str-eq (command-string payload "provider") "fake"))
+             (assert (str-eq (command-string payload "model") "fake-model")))
+           (let [child (service-query-events service "override-child-run" 0)
+                 events (json-get (load (field child body)) "events")
+                 created (json-array-get events 0)
+                 payload (json-get created "payload")]
+             (assert (str-eq (command-string payload "provider") "fake-override"))
+             (assert (str-eq (command-string payload "model") "override-model")))
+           (let [workflow (service-query-workflow service "workflow-tools")]
+             (assert-eq (load (field workflow status)) 200)
+             (assert-eq (json-array-length (json-get (load (field workflow body)) "nodes")) 2))
+           (authorization-mailbox-close! allocator mailbox)
+           (event-journal-close! journal)))

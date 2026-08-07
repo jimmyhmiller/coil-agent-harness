@@ -272,8 +272,29 @@
             (sb-push-byte! (mut buffer) (cast u8 (primitive/ior 128 (primitive/iand codepoint 63))))))
   0)
 
+;; The decoded UTF-8 string can never exceed its encoded byte length. Reserving
+;; that bound once avoids Region's linear ownership lookup on every buffer grow.
+(defn parser-string-capacity [(parser (ptr JsonParser))] (-> i64)
+  (let [source (load (field parser source))
+        start (+ (load (field parser position)) 1)
+        count (slice-len [u8] source)
+        (mut at) start
+        (mut escaped) false]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] source (load at)))]
+                (cond (load escaped) (store! escaped false)
+                      (= byte 92) (store! escaped true)
+                      (= byte 34) (break)
+                      :else 0)
+                (store! at (+ (load at) 1)))))
+    (- (load at) start)))
+
 (defn parser-string [(parser (ptr JsonParser))] (-> (slice u8))
   (let [(mut buffer) (sb-new (load (field parser allocator)))]
+    (al-reserve! [u8]
+                 (mut (field buffer bytes))
+                 (parser-string-capacity parser))
     (if (!= (parser-advance parser) 34)
         (parser-fail parser "expected string")
         0)
@@ -387,6 +408,9 @@
 (defn parser-array [(parser (ptr JsonParser))] (-> Json)
   (parser-advance parser)
   (let [(mut result) (json-array (load (field parser allocator)))]
+    (match-else (load result)
+                (JsonArray [items] (al-reserve! [Json] items 8))
+                (_ 0))
     (parser-skip-whitespace parser)
     (if (= (parser-peek parser) 93)
         (parser-advance parser)
@@ -428,6 +452,13 @@
 (defn parser-object [(parser (ptr JsonParser))] (-> Json)
   (parser-advance parser)
   (let [(mut result) (json-object (load (field parser allocator)))]
+    (match-else (load result)
+                (JsonObject [keys values]
+                            (do
+                              (al-reserve! [(slice u8)] keys 16)
+                              (al-reserve! [Json] values 16)
+                              0))
+                (_ 0))
     (parser-skip-whitespace parser)
     (if (= (parser-peek parser) 125)
         (parser-advance parser)

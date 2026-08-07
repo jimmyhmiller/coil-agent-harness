@@ -1,0 +1,343 @@
+(module harness-tui-model-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-event-adapter" :use *)
+(import "harness-tui-model" :use *)
+(import "harness-tui-transcript" :use *)
+(import "provider-common" :use *)
+
+(defn tui-event [(allocator (ptr Allocator))
+                 (sequence i64)
+                 (kind (slice u8))
+                 (run-id (slice u8))
+                 (operation-id (slice u8))
+                 (payload Json)] (-> Json)
+  (let [(mut event) (json-object allocator)]
+    (json-object-put! (mut event) "version" (json-integer allocator 1))
+    (json-object-put! (mut event) "sequence" (json-integer allocator sequence))
+    (json-put-string! (mut event) "event" kind)
+    (json-put-string! (mut event) "run_id" run-id)
+    (json-put-string! (mut event) "agent_id" run-id)
+    (json-put-string! (mut event) "operation_id" operation-id)
+    (json-object-put! (mut event) "payload" payload)
+    (load event)))
+
+(deftest model-start-is-visible-before-the-first-streaming-delta
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)]
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         1
+                                                         "model.request.started"
+                                                         "run-1"
+                                                         "model-1"
+                                                         (JsonNull))))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
+           (let [started (al-get [PresentationBlock] (load (field model blocks)) 0)]
+             (assert (= (slice-len [u8] (load (field started body))) 0))
+             (assert (match-else (load (field started state))
+                                 (PresentationRunning [] true)
+                                 (_ false))))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         2
+                                                         "model.response.delta"
+                                                         "run-1"
+                                                         "model-1"
+                                                         (JsonString "Hello"))))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
+           (let [streaming (al-get [PresentationBlock]
+                                   (load (field model blocks))
+                                   0)]
+             (assert (str-eq (load (field streaming body)) "Hello")))))
+
+(deftest correlates-streaming-tool-and-approval-events-without-terminal-concerns
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut approval) (json-object allocator)
+               (mut arguments) (json-object allocator)]
+           (json-put-string! (mut arguments) "command" "ls")
+           (json-put-string! (mut approval) "authorization_id" "tool-1")
+           (json-put-string! (mut approval) "tool" "bash")
+           (json-put-string! (mut approval) "effect" "destructive")
+           (json-object-put! (mut approval) "arguments" (load arguments))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         1
+                                                         "model.response.delta"
+                                                         "run-1"
+                                                         "model-1"
+                                                         (JsonString "Hello "))))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         2
+                                                         "model.response.delta"
+                                                         "run-1"
+                                                         "model-1"
+                                                         (JsonString "there"))))
+           (let [(mut proposed) (json-object allocator)]
+             (json-put-string! (mut proposed) "name" "bash")
+             (json-object-put! (mut proposed) "arguments" (load arguments))
+             (assert (presentation-apply-event! (mut model)
+                                                (tui-event allocator
+                                                           3
+                                                           "tool.call.proposed"
+                                                           "run-1"
+                                                           "tool-1"
+                                                           (load proposed)))))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         4
+                                                         "authorization.requested"
+                                                         "run-1"
+                                                         "tool-1"
+                                                         (load approval))))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         5
+                                                         "tool.call.started"
+                                                         "run-1"
+                                                         "tool-1"
+                                                         (JsonString "bash"))))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         6
+                                                         "tool.call.completed"
+                                                         "run-1"
+                                                         "tool-1"
+                                                         (JsonString "done"))))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 3))
+           (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)
+                 tool-block (al-get [PresentationBlock] (load (field model blocks)) 1)
+                 approval-block (al-get [PresentationBlock] (load (field model blocks)) 2)]
+             (assert (str-eq (load (field assistant body)) "Hello there"))
+             (assert (str-eq (load (field approval-block title)) "bash"))
+             (assert (str-eq (load (field approval-block body)) "destructive"))
+             (assert (match-else (load (field tool-block result))
+                                 (JsonString [text] (str-eq text "done"))
+                                 (_ false)))
+             (assert (str-eq (presentation-json-string (load (field tool-block arguments))
+                                                       "command")
+                             "ls"))
+             (assert (match-else (load (field tool-block state))
+                                 (PresentationSucceeded [] true)
+                                 (_ false))))))
+
+(deftest ignores-an-already-projected-journal-prefix
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               event (tui-event allocator 1 "model.response.delta" "run-1" "model-1" (JsonString "once"))]
+           (assert (presentation-apply-event! (mut model) event))
+           (assert (not (presentation-apply-event! (mut model) event)))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
+           (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)]
+             (assert (str-eq (load (field assistant body)) "once")))))
+
+(deftest advances-past-unknown-events-without-inventing-presentation-state
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)]
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         9
+                                                         "future.event"
+                                                         "run-1"
+                                                         "future-1"
+                                                         (JsonString "opaque"))))
+           (assert (= (load (field model last-sequence)) 9))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 0))))
+
+(deftest bounds-retained-stream-text-at-a-valid-utf8-boundary
+         (let [allocator (malloc-allocator)
+               text (presentation-append-bounded allocator "prefix" "界界界界界界界界" 27)]
+           (assert (str-eq text "prefix\n[output truncated]"))))
+
+(deftest reduces-a-large-delta-burst-to-one-deterministic-block
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut policy) (transcript-policy-new)
+               (mut sequence) 1]
+           (loop (if (> (load sequence) 2000)
+                     (break)
+                     (do
+                       (assert (presentation-apply-event! (mut model)
+                                                          (tui-event allocator
+                                                                     (load sequence)
+                                                                     "model.response.delta"
+                                                                     "run-burst"
+                                                                     "model-burst"
+                                                                     (JsonString "x"))))
+                       (store! sequence (+ (load sequence) 1)))))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         2001
+                                                         "model.request.completed"
+                                                         "run-burst"
+                                                         "model-burst"
+                                                         (JsonNull))))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
+           (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)]
+             (assert (= (slice-len [u8] (load (field assistant body))) 2000)))
+           (assert (= (transcript-advance! (mut policy) (mut model)) 1))))
+
+(deftest reduces-a-large-parallel-tool-burst-in-proposal-order
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut at) 0]
+           (loop (if (>= (load at) 256)
+                     (break)
+                     (let [id
+                             (concat-or-empty allocator
+                                              "tool-"
+                                              (json-stringify allocator
+                                                              (json-integer allocator (load at))))
+                           (mut payload) (json-object allocator)]
+                       (json-put-string! (mut payload) "name" "bash")
+                       (json-object-put! (mut payload) "arguments" (json-object allocator))
+                       (assert (presentation-apply-event! (mut model)
+                                                          (tui-event allocator
+                                                                     (+ (load at) 1)
+                                                                     "tool.call.proposed"
+                                                                     "run-burst"
+                                                                     id
+                                                                     (load payload))))
+                       (store! at (+ (load at) 1)))))
+           (store! at 255)
+           (loop (if (< (load at) 0)
+                     (break)
+                     (let [id
+                             (concat-or-empty allocator
+                                              "tool-"
+                                              (json-stringify allocator
+                                                              (json-integer allocator (load at))))]
+                       (assert (presentation-apply-event! (mut model)
+                                                          (tui-event allocator
+                                                                     (+ 256 (- 256 (load at)))
+                                                                     "tool.call.completed"
+                                                                     "run-burst"
+                                                                     id
+                                                                     (JsonNull))))
+                       (store! at (- (load at) 1)))))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 256))
+           (let [first (al-get [PresentationBlock] (load (field model blocks)) 0)
+                 last (al-get [PresentationBlock] (load (field model blocks)) 255)]
+             (assert (str-eq (load (field first id)) "tool-0"))
+             (assert (str-eq (load (field last id)) "tool-255")))))
+
+(deftest keeps-parallel-tools-stable-when-they-complete-out-of-order
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)]
+           (presentation-apply-event! (mut model)
+                                      (tui-event allocator 1 "tool.call.started" "run-1" "tool-a" (JsonString "first")))
+           (presentation-apply-event! (mut model)
+                                      (tui-event allocator 2 "tool.call.started" "run-1" "tool-b" (JsonString "second")))
+           (presentation-apply-event! (mut model)
+                                      (tui-event allocator 3 "tool.call.completed" "run-1" "tool-b" (JsonString "B")))
+           (presentation-apply-event! (mut model)
+                                      (tui-event allocator 4 "tool.call.completed" "run-1" "tool-a" (JsonString "A")))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 2))
+           (let [first (al-get [PresentationBlock] (load (field model blocks)) 0)
+                 second (al-get [PresentationBlock] (load (field model blocks)) 1)]
+             (assert (str-eq (load (field first id)) "tool-a"))
+             (assert (str-eq (load (field second id)) "tool-b"))
+             (assert (match-else (load (field first state))
+                                 (PresentationSucceeded [] true)
+                                 (_ false)))
+             (assert (match-else (load (field second state))
+                                 (PresentationSucceeded [] true)
+                                 (_ false))))))
+
+(deftest delegated-agent-remains-live-until-its-child-run-finishes
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut policy) (transcript-policy-new)]
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         1
+                                                         "agent.delegated"
+                                                         "parent-run"
+                                                         "child-run"
+                                                         (JsonNull))))
+           (assert (= (transcript-advance! (mut policy) (mut model)) 0))
+           (assert (presentation-apply-event! (mut model)
+                                              (tui-event allocator
+                                                         2
+                                                         "run.completed"
+                                                         "child-run"
+                                                         "child-run"
+                                                         (JsonNull))))
+           (assert (= (transcript-advance! (mut policy) (mut model)) 1))
+           (let [agent (al-get [PresentationBlock] (load (field model blocks)) 0)]
+             (assert (match-else (load (field agent state))
+                                 (PresentationSucceeded [] true)
+                                 (_ false))))))
+
+(deftest renders-a-tool-from-its-proposal-without-an-authorization-event
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut arguments) (json-object allocator)
+               (mut proposed) (json-object allocator)]
+           (json-put-string! (mut arguments) "path" "README.md")
+           (json-put-string! (mut proposed) "name" "read_file")
+           (json-object-put! (mut proposed) "arguments" (load arguments))
+           (presentation-apply-event! (mut model)
+                                      (tui-event allocator 1 "tool.call.proposed" "run-1" "tool-1" (load proposed)))
+           (presentation-apply-event! (mut model)
+                                      (tui-event allocator
+                                                 2
+                                                 "tool.call.started"
+                                                 "run-1"
+                                                 "tool-1"
+                                                 (JsonString "read_file")))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
+           (let [tool (al-get [PresentationBlock] (load (field model blocks)) 0)]
+             (assert (str-eq (load (field tool title)) "read_file"))
+             (assert (str-eq (presentation-json-string (load (field tool arguments))
+                                                       "path")
+                             "README.md"))
+             (assert (match-else (load (field tool state))
+                                 (PresentationRunning [] true)
+                                 (_ false))))))
+
+(deftest transcript-commits-only-the-stable-prefix
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut policy) (transcript-policy-new)
+               (mut arguments) (json-object allocator)]
+           (json-put-string! (mut arguments) "command" "ls")
+           (presentation-apply-action! (mut model) (AppendAssistant "model-1" "hello"))
+           (presentation-apply-action! (mut model)
+                                       (ProposeTool "tool-1" "bash" (load arguments)))
+           (presentation-apply-action! (mut model)
+                                       (FinishTool "tool-1" (JsonString "done")))
+           (assert (= (transcript-advance! (mut policy) (mut model)) 0))
+           (assert (= (transcript-live-count (mut policy) (mut model)) 2))
+           (presentation-apply-action! (mut model) (FinishAssistant "model-1"))
+           (assert (= (transcript-advance! (mut policy) (mut model)) 2))
+           (assert (= (transcript-live-count (mut policy) (mut model)) 0))))
+
+(deftest a-terminal-run-event-closes-open-children-before-commit
+         (let [allocator (malloc-allocator)
+               (mut model) (presentation-model-new allocator)
+               (mut policy) (transcript-policy-new)
+               (mut arguments) (json-object allocator)]
+           (json-put-string! (mut arguments) "command" "sleep 10")
+           (presentation-apply-action! (mut model) (AppendAssistant "model-1" "working"))
+           (presentation-apply-action! (mut model)
+                                       (ProposeTool "tool-1" "bash" (load arguments)))
+           (presentation-apply-action! (mut model) (StartTool "tool-1" "bash"))
+           (presentation-apply-action! (mut model) (CancelRun "run-1"))
+           (assert (= (transcript-advance! (mut policy) (mut model)) 3))
+           (assert (= (transcript-live-count (mut policy) (mut model)) 0))
+           (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)
+                 tool (al-get [PresentationBlock] (load (field model blocks)) 1)]
+             (assert (match-else (load (field assistant state))
+                                 (PresentationCancelled [] true)
+                                 (_ false)))
+             (assert (match-else (load (field tool state))
+                                 (PresentationCancelled [] true)
+                                 (_ false))))))

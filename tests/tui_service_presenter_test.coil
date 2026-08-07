@@ -1,0 +1,74 @@
+(module harness-tui-service-presenter-test)
+
+(import "coil.alloc" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tui-render-plain" :use *)
+(import "harness-tui-service-presenter" :use *)
+(import "harness-tui-view" :use *)
+(import "harness-tui-view-layout" :use *)
+
+(defn service-test-text [(allocator (ptr Allocator))
+                         (node ViewNode)] (-> (slice u8))
+  (let [view (terminal-view node)
+        (mut laid-out) (view-layout allocator view 80)]
+    (render-frame-plain allocator (mut (field laid-out frame)))))
+
+(deftest presents-run-status-without-wire-json
+         (let [allocator (malloc-allocator)
+               (mut body) (json-object allocator)]
+           (json-object-put! (mut body) "run_id" (JsonString "run-1"))
+           (json-object-put! (mut body) "status" (JsonString "running"))
+           (json-object-put! (mut body) "provider" (JsonString "claude"))
+           (json-object-put! (mut body) "model" (JsonString "sonnet"))
+           (let [text
+                   (service-test-text allocator
+                                      (service-view-run allocator
+                                                        200
+                                                        (load body)
+                                                        true))]
+             (assert (str-eq text "● run-1  running\n  claude/sonnet\n")))))
+
+(deftest presents-a-workflow-as-a-readable-dependency-tree
+         (let [allocator (malloc-allocator)
+               (mut body) (json-object allocator)
+               (mut nodes) (json-array allocator)
+               (mut first) (json-object allocator)
+               (mut second) (json-object allocator)
+               (mut none) (json-array allocator)
+               (mut dependency) (json-array allocator)]
+           (json-object-put! (mut body) "workflow_id" (JsonString "wf-1"))
+           (json-object-put! (mut first) "node_id" (JsonString "plan"))
+           (json-object-put! (mut first) "run_id" (JsonString "run-1"))
+           (json-object-put! (mut first) "status" (JsonString "completed"))
+           (json-object-put! (mut first) "depends_on" (load none))
+           (json-array-push! (mut dependency) (JsonString "run-1"))
+           (json-object-put! (mut second) "node_id" (JsonString "build"))
+           (json-object-put! (mut second) "run_id" (JsonString "run-2"))
+           (json-object-put! (mut second) "status" (JsonString "running"))
+           (json-object-put! (mut second) "depends_on" (load dependency))
+           (json-array-push! (mut nodes) (load first))
+           (json-array-push! (mut nodes) (load second))
+           (json-object-put! (mut body) "nodes" (load nodes))
+           (let [text
+                   (service-test-text allocator
+                                      (service-view-workflow allocator
+                                                             200
+                                                             (load body)
+                                                             true))]
+             (assert (str-eq text
+                             "● Workflow wf-1\n  ├─ plan  run-1  completed\n  └─ build  run-2  running\n      after run-1\n")))))
+
+(deftest presents-service-errors-as-human-messages
+         (let [allocator (malloc-allocator)
+               (mut body) (json-object allocator)]
+           (json-object-put! (mut body) "error" (JsonString "run_not_found"))
+           (json-object-put! (mut body) "message" (JsonString "run does not exist"))
+           (let [text
+                   (service-test-text allocator
+                                      (service-view-run allocator
+                                                        404
+                                                        (load body)
+                                                        true))]
+             (assert (str-eq text
+                             "! run does not exist\n")))))

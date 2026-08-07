@@ -9,6 +9,7 @@
 (import "coil.os" :as os)
 (import "coil.primitive" :as primitive)
 (import "coil.result" :use *)
+(import "coil.region" :as region)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-event" :use *)
@@ -17,26 +18,25 @@
 (import "provider-common" :use *)
 
 (extern fsync :cc c [i32] (-> i32))
-(extern flock :cc c [i32 i32] (-> i32))
 
 (defn journal-os-pick [(linux Code) (darwin Code)] (-> Code)
   (if (primitive/code-eq (primitive/target-os) `linux) linux darwin))
 (defn journal-open-constants [] (-> Code)
   `(do
      (const JOURNAL_O_APPEND ~(journal-os-pick `1024 `8))
-     (const JOURNAL_O_CREAT ~(journal-os-pick `64 `512))))
+     (const JOURNAL_O_CREAT ~(journal-os-pick `64 `512))
+     (const JOURNAL_O_CLOEXEC ~(journal-os-pick `524288 `16777216))))
 (meta (journal-open-constants))
 (const JOURNAL_O_WRONLY 1)
 (const JOURNAL_FILE_MODE 420)
-(const JOURNAL_LOCK_EX 2)
-(const JOURNAL_LOCK_NB 4)
-(const JOURNAL_LOCK_UN 8)
 
 (defstruct EventJournal
   [(allocator (ptr Allocator))
    (fd i64)
    (lock (ptr i64))
    (failed (ptr i64))
+   (scratch-domain (ptr AllocationDomain))
+   (path (slice u8))
    (sync-each-event bool)])
 
 (defsum JournalOpenResult
@@ -66,25 +66,22 @@
           (os/open c-path
                    (cast i32
                          (| JOURNAL_O_WRONLY
-                            (| JOURNAL_O_CREAT JOURNAL_O_APPEND)))
+                            (| JOURNAL_O_CLOEXEC
+                               (| JOURNAL_O_CREAT JOURNAL_O_APPEND))))
                    JOURNAL_FILE_MODE)]
     (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
     (if (< fd (cast i32 0))
         (JournalOpenFailed "could not open event journal")
-        (if (!= (cast i64
-                      (flock fd
-                             (cast i32 (| JOURNAL_LOCK_EX JOURNAL_LOCK_NB))))
-                0)
-            (do
-              (os/close fd)
-              (JournalOpenFailed "event journal is already owned by another harness process"))
-            (let [journal (alloc/stack EventJournal)]
-              (store! (field journal allocator) allocator)
-              (store! (field journal fd) (cast i64 fd))
-              (store! (field journal lock) (box allocator i64 0))
-              (store! (field journal failed) (box allocator i64 0))
-              (store! (field journal sync-each-event) sync-each-event)
-              (JournalOpened (load journal)))))))
+        (let [journal (alloc/stack EventJournal)]
+          (store! (field journal allocator) allocator)
+          (store! (field journal fd) (cast i64 fd))
+          (store! (field journal lock) (box allocator i64 0))
+          (store! (field journal failed) (box allocator i64 0))
+          (store! (field journal scratch-domain)
+                  (allocation-domain-open allocator))
+          (store! (field journal path) (json-copy-string allocator path))
+          (store! (field journal sync-each-event) sync-each-event)
+          (JournalOpened (load journal))))))
 
 (defn event-journal-append-bytes! [(allocator (ptr Allocator))
                                    (path (slice u8))
@@ -94,24 +91,17 @@
           (os/open c-path
                    (cast i32
                          (| JOURNAL_O_WRONLY
-                            (| JOURNAL_O_CREAT JOURNAL_O_APPEND)))
+                            (| JOURNAL_O_CLOEXEC
+                               (| JOURNAL_O_CREAT JOURNAL_O_APPEND))))
                    JOURNAL_FILE_MODE)
         writer (alloc/stack io/Writer)]
     (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
     (if (< fd (cast i32 0))
         -1
         (let [result
-                (if (!= (cast i64
-                              (flock fd
-                                     (cast i32 (| JOURNAL_LOCK_EX JOURNAL_LOCK_NB))))
-                        0)
-                    -1
-                    (let [written
-                            (match (io/print-str (io/fd-writer writer (cast i64 fd)) bytes)
-                              (Ok [count] count)
-                              (Err [failure] -1))]
-                      (flock fd (cast i32 JOURNAL_LOCK_UN))
-                      written))]
+                (match (io/print-str (io/fd-writer writer (cast i64 fd)) bytes)
+                  (Ok [count] count)
+                  (Err [failure] -1))]
           (os/close fd)
           result))))
 
@@ -119,41 +109,39 @@
   (journal-lock! (load (field journal lock)))
   (let [fd (load (field journal fd))]
     (when (>= fd 0)
-      (flock (cast i32 fd) (cast i32 JOURNAL_LOCK_UN))
       (os/close (cast i32 fd))
       (store! (field journal fd) -1)
       0))
-  (journal-unlock! (load (field journal lock))))
+  (journal-unlock! (load (field journal lock)))
+  (allocation-domain-close! (load (field journal allocator))
+                            (load (field journal scratch-domain))))
 
 (defn event-journal-failed? [(journal (ptr EventJournal))] (-> bool)
   (= (atomic-load (load (field journal failed))) 1))
 
 (defn event-journal-publish [(journal (ptr EventJournal)) (event (ptr Event))] (-> i64)
-  (let [owner (load (field journal allocator))
-        domain (allocation-domain-open owner)]
-    (if (not (allocation-domain-valid? domain))
-        (do
-          (allocation-domain-close! owner domain)
-          (atomic-store (load (field journal failed)) 1)
-          -1)
-        (let [allocator (allocation-domain-allocator domain)
-              encoded (json-stringify allocator (event-to-json allocator event))]
-          (journal-lock! (load (field journal lock)))
-          (let [writer (alloc/stack io/Writer)
-                fd (load (field journal fd))
-                (mut result) -1]
-            (if (< fd 0)
-                (atomic-store (load (field journal failed)) 1)
-                (match (io/write-line (io/fd-writer writer fd) encoded)
-                  (Err [failure] (atomic-store (load (field journal failed)) 1))
-                  (Ok [written]
-                      (if (and (load (field journal sync-each-event))
-                               (!= (cast i64 (fsync (cast i32 fd))) 0))
-                          (atomic-store (load (field journal failed)) 1)
-                          (store! result 0)))))
-            (journal-unlock! (load (field journal lock)))
-            (allocation-domain-close! owner domain)
-            (load result))))))
+  (let [cycle (alloc/stack region/Region)]
+    (region/region-init cycle
+                        (allocation-domain-allocator (load (field journal scratch-domain))))
+    (let [allocator (region/region-allocator cycle)]
+      (journal-lock! (load (field journal lock)))
+      (let [writer (alloc/stack io/Writer)
+            fd (load (field journal fd))
+            (mut result) -1]
+        (if (< fd 0)
+            (atomic-store (load (field journal failed)) 1)
+            (let [encoded (json-stringify allocator (event-to-json allocator event))]
+              (match (io/write-line (io/fd-writer writer fd) encoded)
+                (Err [failure]
+                     (atomic-store (load (field journal failed)) 1))
+                (Ok [written]
+                    (if (and (load (field journal sync-each-event))
+                             (!= (cast i64 (fsync (cast i32 fd))) 0))
+                        (atomic-store (load (field journal failed)) 1)
+                        (store! result 0))))))
+        (journal-unlock! (load (field journal lock)))
+        (region/region-close! cycle)
+        (load result)))))
 
 (impl EventSink EventJournal
   (publish-event [(self (ptr EventJournal)) (event (ptr Event))]
@@ -189,6 +177,7 @@
                   count (al-len [(slice u8)] (load lines))
                   complete-count (if (journal-ends-in-newline? bytes) (- count 1) (- count 1))
                   (mut i) 0]
+              (al-reserve! [Json] (mut (field recovery events)) complete-count)
               (when (and (> count 0) (not (journal-ends-in-newline? bytes)))
                 (store! (field recovery ignored-torn-tail) true)
                 0)
@@ -219,3 +208,13 @@
                           (store! i (+ (load i) 1)))))
               (al-free! [(slice u8)] (mut lines))))))
     (load recovery)))
+
+;; Readers in one process must not observe an append between the file read and
+;; JSON projection. TUI sessions use process-scoped journals.
+(defn event-journal-recover-synchronized [(journal (ptr EventJournal))
+                                          (allocator (ptr Allocator))
+                                          (path (slice u8))] (-> JournalRecovery)
+  (journal-lock! (load (field journal lock)))
+  (let [recovery (event-journal-recover allocator path)]
+    (journal-unlock! (load (field journal lock)))
+    recovery))

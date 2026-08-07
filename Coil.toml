@@ -1,14 +1,14 @@
 [package]
 name = "harness"
 entry = "src/main.coil"
-source-roots = ["src", "tests", "tools"]
+source-roots = ["src", "tests", "tools", "/Users/jimmyhmiller/Documents/Code/projects/coil/src/experiments/httptap"]
 
 [test]
 roots = ["tests"]
 suffixes = ["_test.coil"]
 
-[cc]
-sources = ["src/infra/harness_posix.c"]
+[link]
+libs = ["curl"]
 
 [lint]
 rules = ["harness.nesting-depth"]

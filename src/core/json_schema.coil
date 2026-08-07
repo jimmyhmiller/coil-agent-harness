@@ -202,7 +202,3 @@
 
 (defn json-schema-validate [(allocator (ptr Allocator)) (schema Json) (value Json)] (-> SchemaValidation)
   (json-schema-validate-depth allocator schema value "$" 0))
-
-(defn json-schema-valid? [(schema Json) (value Json)] (-> bool)
-  (let [result (json-schema-validate (malloc-allocator) schema value)]
-    (load (field result ok))))

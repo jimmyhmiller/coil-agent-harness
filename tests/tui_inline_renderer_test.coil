@@ -1,0 +1,159 @@
+(module harness-tui-inline-renderer-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-render-inline" :use *)
+(import "harness-tui-terminal-operation" :use *)
+(import "harness-tui-terminal" :use *)
+
+(defn inline-test-role [(role StyleRole)] (-> (slice u8))
+  (match role
+    (RolePrimary [] "primary")
+    (RoleMuted [] "muted")
+    (RoleSuccess [] "success")
+    (RoleWarning [] "warning")
+    (RoleFailure [] "failure")))
+
+;; A symbolic trace makes cursor behavior reviewable without duplicating ANSI bytes
+;; outside the terminal driver.
+(defn inline-test-trace [(allocator (ptr Allocator))
+                         (operations (ptr (ArrayList TerminalOperation)))] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut at) 0
+        count (al-len [TerminalOperation] (load operations))]
+    (loop (if (>= (load at) count)
+              (break)
+              (do
+                (match (al-get [TerminalOperation] (load operations) (load at))
+                  (TerminalWrite [text]
+                                 (do
+                                   (sb-push-str! (mut output) "write:")
+                                   (sb-push-str! (mut output) text)
+                                   (sb-push-str! (mut output) ";")))
+                  (TerminalLineBreak [] (sb-push-str! (mut output) "nl;"))
+                  (TerminalCarriageReturn [] (sb-push-str! (mut output) "cr;"))
+                  (TerminalCursorUp [rows]
+                                    (do
+                                      (sb-push-str! (mut output) "up:")
+                                      (sb-push-byte! (mut output) (cast u8 (+ 48 rows)))
+                                      (sb-push-str! (mut output) ";")))
+                  (TerminalCursorDown [rows]
+                                      (do
+                                        (sb-push-str! (mut output) "down:")
+                                        (sb-push-byte! (mut output) (cast u8 (+ 48 rows)))
+                                        (sb-push-str! (mut output) ";")))
+                  (TerminalCursorRight [columns]
+                                       (do
+                                         (sb-push-str! (mut output) "right:")
+                                         (sb-push-byte! (mut output)
+                                                        (cast u8 (+ 48 columns)))
+                                         (sb-push-str! (mut output) ";")))
+                  (TerminalEraseLine [] (sb-push-str! (mut output) "erase;"))
+                  (TerminalClearScreen [] (sb-push-str! (mut output) "clear;"))
+                  (TerminalSetRole [role]
+                                   (do
+                                     (sb-push-str! (mut output) "role:")
+                                     (sb-push-str! (mut output) (inline-test-role role))
+                                     (sb-push-str! (mut output) ";")))
+                  (TerminalResetStyle [] (sb-push-str! (mut output) "reset;"))
+                  (TerminalHideCursor [] (sb-push-str! (mut output) "hide;"))
+                  (TerminalShowCursor [] (sb-push-str! (mut output) "show;"))
+                  (TerminalEnableBracketedPaste []
+                                                (sb-push-str! (mut output) "paste-on;"))
+                  (TerminalDisableBracketedPaste []
+                                                 (sb-push-str! (mut output) "paste-off;")))
+                (store! at (+ (load at) 1)))))
+    (sb-finish! (mut output))))
+
+(deftest rewrites-only-the-owned-live-region-and-commits-once
+         (let [allocator (malloc-allocator)
+               (mut renderer) (inline-renderer-new)
+               (mut empty) (frame-new allocator)
+               (mut first-live) (frame-new allocator)]
+           (frame-push-line! (mut first-live) "thinking" 8 (RolePrimary))
+           (frame-push-line! (mut first-live) "tool" 4 (RoleWarning))
+           (let [(mut first)
+                   (inline-renderer-plan! (mut renderer)
+                                          (mut empty)
+                                          (mut first-live))]
+             (assert (str-eq (inline-test-trace allocator (mut first))
+                             "nl;up:1;role:primary;write:thinking;reset;nl;role:warning;write:tool;reset;")))
+           (let [(mut committed) (frame-new allocator)
+                 (mut second-live) (frame-new allocator)]
+             (frame-push-line! (mut committed) "answer" 6 (RoleSuccess))
+             (frame-push-line! (mut second-live) "running" 7 (RoleWarning))
+             (let [(mut second)
+                     (inline-renderer-plan! (mut renderer)
+                                            (mut committed)
+                                            (mut second-live))]
+               (assert (str-eq (inline-test-trace allocator (mut second))
+                               "up:1;cr;erase;down:1;cr;erase;up:1;role:success;write:answer;reset;nl;role:warning;write:running;reset;"))
+               (assert (= (load (field renderer previous-live-height)) 1))))))
+
+(deftest clearing-the-final-live-frame-leaves-no-owned-rows
+         (let [allocator (malloc-allocator)
+               (mut renderer) (inline-renderer-new)
+               (mut empty) (frame-new allocator)
+               (mut live) (frame-new allocator)]
+           (frame-push-line! (mut live) "working" 7 (RoleWarning))
+           (let [(mut ignored) (inline-renderer-plan! (mut renderer) (mut empty) (mut live))]
+             0)
+           (let [(mut final) (inline-renderer-plan! (mut renderer) (mut empty) (mut empty))]
+             (assert (str-eq (inline-test-trace allocator (mut final))
+                             "cr;erase;"))
+             (assert (= (load (field renderer previous-live-height)) 0)))))
+
+(deftest repeated-single-row-stream-updates-never-emit-a-line-break
+         (let [allocator (malloc-allocator)
+               (mut renderer) (inline-renderer-new)
+               (mut empty) (frame-new allocator)
+               (mut update) 0]
+           (loop (if (>= (load update) 100)
+                     (break)
+                     (let [(mut live) (frame-new allocator)
+                           (mut breaks) 0]
+                       (frame-push-line! (mut live) "streaming answer" 16 (RolePrimary))
+                       (let [(mut operations)
+                               (inline-renderer-plan! (mut renderer)
+                                                      (mut empty)
+                                                      (mut live))
+                             (mut at) 0
+                             count (al-len [TerminalOperation] (load operations))]
+                         (loop (if (>= (load at) count)
+                                   (break)
+                                   (do
+                                     (match-else (al-get [TerminalOperation]
+                                                         (load operations)
+                                                         (load at))
+                                                 (TerminalLineBreak []
+                                                                    (store! breaks (+ (load breaks) 1)))
+                                                 (_ 0))
+                                     (store! at (+ (load at) 1)))))
+                         (assert (= (load breaks) 0)))
+                       (store! update (+ (load update) 1)))))))
+
+(deftest preserves-semantic-span-boundaries-in-terminal-operations
+         (let [allocator (malloc-allocator)
+               (mut renderer) (inline-renderer-new)
+               (mut committed) (frame-new allocator)
+               (mut live) (frame-new allocator)
+               (mut spans) (al-new [FrameSpan] allocator)]
+           (al-push! [FrameSpan]
+                     (mut spans)
+                     (frame-span "  tool: " 8 (RoleMuted)))
+           (al-push! [FrameSpan]
+                     (mut spans)
+                     (frame-span "bash" 4 (RolePrimary)))
+           (al-push! [FrameSpan]
+                     (mut spans)
+                     (frame-span "  done" 6 (RoleSuccess)))
+           (frame-push-spans! (mut committed) spans)
+           (let [(mut operations)
+                   (inline-renderer-plan! (mut renderer)
+                                          (mut committed)
+                                          (mut live))]
+             (assert (str-eq (inline-test-trace allocator (mut operations))
+                             "role:muted;write:  tool: ;role:primary;write:bash;role:success;write:  done;reset;nl;")))))

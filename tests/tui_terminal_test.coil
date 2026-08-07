@@ -1,0 +1,75 @@
+(module harness-tui-terminal-test)
+
+(import "coil.alloc" :as alloc)
+(import "harness-tui-terminal" :use *)
+
+(defn terminal-test-facts [(input-tty bool)
+                           (output-tty bool)
+                           (term-dumb bool)
+                           (no-color bool)
+                           (columns i64)] (-> TerminalFacts)
+  (let [facts (alloc/stack TerminalFacts)]
+    (store! (field facts input-tty) input-tty)
+    (store! (field facts output-tty) output-tty)
+    (store! (field facts term-dumb) term-dumb)
+    (store! (field facts no-color) no-color)
+    (store! (field facts unicode) true)
+    (store! (field facts columns) columns)
+    (store! (field facts rows) 24)
+    (load facts)))
+
+(deftest selects-interactive-capabilities-only-for-a-real-terminal
+         (let [facts (terminal-test-facts true true false false 120)
+               overrides (terminal-overrides-default)
+               profile (terminal-profile-from facts overrides)]
+           (assert (load (field profile interactive)))
+           (assert (not (load (field profile plain))))
+           (assert (load (field profile color)))
+           (assert (load (field profile unicode)))
+           (assert (load (field profile motion)))
+           (assert (= (load (field profile height)) 24))
+           (assert (= (load (field profile width)) 120))))
+
+(deftest falls-back-to-plain-for-pipes-dumb-terminals-and-screen-readers
+         (let [piped (terminal-test-facts true false false false 80)
+               dumb (terminal-test-facts true true true false 80)
+               normal-overrides (terminal-overrides-default)
+               (mut reader-overrides) (terminal-overrides-default)]
+           (store! (field reader-overrides screen-reader) true)
+           (let [piped-profile (terminal-profile-from piped normal-overrides)
+                 dumb-profile (terminal-profile-from dumb normal-overrides)
+                 reader-profile
+                   (terminal-profile-from (terminal-test-facts true true false false 80)
+                                          reader-overrides)]
+             (assert (load (field piped-profile plain)))
+             (assert (load (field dumb-profile plain)))
+             (assert (load (field reader-profile plain)))
+             (assert (not (load (field reader-profile unicode))))
+             (assert (not (load (field reader-profile motion)))))))
+
+(deftest respects-no-color-explicit-overrides-reduced-motion-and-width
+         (let [facts (terminal-test-facts true true false true 90)
+               (mut automatic) (terminal-overrides-default)
+               (mut forced) (terminal-overrides-default)]
+           (store! (field automatic reduced-motion) true)
+           (store! (field automatic compact) true)
+           (store! (field forced color-mode) 1)
+           (store! (field forced unicode-mode) 0)
+           (store! (field forced compact) true)
+           (store! (field forced verbose) true)
+           (store! (field forced width) 44)
+           (let [automatic-profile (terminal-profile-from facts automatic)
+                 forced-profile (terminal-profile-from facts forced)]
+             (assert (not (load (field automatic-profile color))))
+             (assert (not (load (field automatic-profile motion))))
+             (assert (load (field automatic-profile compact)))
+             (assert (load (field forced-profile color)))
+             (assert (not (load (field forced-profile unicode))))
+             (assert (load (field forced-profile expanded)))
+             (assert (not (load (field forced-profile compact))))
+             (assert (= (load (field forced-profile width)) 44)))))
+
+;; A physical terminal width is not a safe content width: writing the last cell
+;; enters terminal-dependent pending-wrap state.
+(deftest reserves-the-final-physical-column-for-stable-cursor-ownership
+         (assert (= (terminal-layout-width 80) 79)))

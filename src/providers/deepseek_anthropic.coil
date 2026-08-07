@@ -542,12 +542,12 @@
                                                           (ModelRequestFailed)
                                                           (JsonString message))
                                 (model-failure "deepseek-anthropic" status message))
-                              (let [response (deepseek-anthropic-parse-response allocator root)]
+                              (let [(mut response) (deepseek-anthropic-parse-response allocator root)]
                                 (deepseek-anthropic-event emitter
                                                           request
                                                           (ModelRequestCompleted)
-                                                          (JsonString (load (field response response-id))))
-                                (ModelOk response)))))))))))))
+                                                          (model-completion-payload allocator request (mut response)))
+                                (ModelOk (load response))))))))))))))
 
 (defn anthropic-auth-header [(allocator (ptr Allocator))
                              (key (slice u8))
@@ -603,11 +603,15 @@
           (store! decoder (sse-decoder-new allocator state 1048576))
           (store! (field http-request url) (load (field context endpoint)))
           (store! (field http-request headers) headers)
-          (store! (field http-request body)
-                  (json-stringify allocator
-                                  (anthropic-request-json allocator
-                                                          request
-                                                          (load (field context oauth)))))
+          ;; Name the request tree so debugger frames and crash diagnostics retain
+          ;; a distinct value at the serialization boundary. Its nested storage is
+          ;; allocator-owned; naming this local is diagnostic, not an ownership fix.
+          (let [wire
+                  (anthropic-request-json allocator
+                                          request
+                                          (load (field context oauth)))]
+            (store! (field http-request body)
+                    (json-stringify allocator wire)))
           (store! (field http-request timeout-ms) (model-request-remaining-ms request))
           (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
           (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
@@ -629,23 +633,37 @@
                     (not (load (field state completed))))
                 (let [message
                         (if (load (field state failed))
-                            "DeepSeek Anthropic stream failed"
-                            (if (or (< status 200) (>= status 300))
-                                "DeepSeek Anthropic streaming request returned an error"
-                                (load (field http error))))]
+                            (concat-or-empty allocator
+                                             (load (field context provider))
+                                             " stream returned invalid SSE")
+                            (if (!= (load (field http transport-code)) 0)
+                                (load (field http error))
+                                (if (or (< status 200) (>= status 300))
+                                    (let [parsed
+                                            (json-parse allocator
+                                                        (load (field http body)))]
+                                      (if (load (field parsed ok))
+                                          (json-error-message (load (field parsed value))
+                                                              (load (field http body)))
+                                          (if (> (slice-len [u8]
+                                                            (load (field http body)))
+                                                 0)
+                                              (load (field http body))
+                                              "HTTP request returned no status or body")))
+                                    "stream ended before completion")))]
                   (anthropic-provider-event (load (field context provider))
                                             emitter
                                             request
                                             (ModelRequestFailed)
                                             (JsonString message))
                   (model-failure (load (field context provider)) status message))
-                (let [response (anthropic-stream-response state)]
+                (let [(mut response) (anthropic-stream-response state)]
                   (anthropic-provider-event (load (field context provider))
                                             emitter
                                             request
                                             (ModelRequestCompleted)
-                                            (JsonString (load (field response response-id))))
-                  (ModelOk response))))))))
+                                            (model-completion-payload allocator request (mut response)))
+                  (ModelOk (load response)))))))))
 
 (impl ModelProvider DeepSeekAnthropicContext
   (provider-name [(self (ptr DeepSeekAnthropicContext))]

@@ -40,7 +40,7 @@
         (str-eq profile "quality") (if requires-subscription "claude" "openai")
         (str-eq profile "subscription") "claude"
         (str-eq profile "external-agent") "codex"
-        (str-eq profile "balanced") "claude"
+        (str-eq profile "balanced") "codex"
         :else ""))
 
 (defn route-profile-reason [(profile (slice u8))] (-> (slice u8))
@@ -48,7 +48,7 @@
         (str-eq profile "quality") "selected the quality-preferred direct provider satisfying requirements"
         (str-eq profile "subscription") "selected native harness tools with subscription authentication"
         (str-eq profile "external-agent") "selected the external Codex agent capability"
-        :else "selected the balanced native-tool subscription policy"))
+        :else "selected the balanced Codex subscription policy"))
 
 (defn route-capabilities-json [(allocator (ptr Allocator))
                                (capabilities ProviderCapabilities)] (-> Json)

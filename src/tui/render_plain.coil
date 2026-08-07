@@ -1,0 +1,21 @@
+(module harness-tui-render-plain)
+
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-frame" :use *)
+
+;; Plain rendering is deliberately ANSI-free and sequential. The caller owns the
+;; returned buffer and may write it to a TTY, pipe, log, or snapshot fixture.
+(defn render-frame-plain [(allocator (ptr Allocator))
+                          (frame (ptr Frame))] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut at) 0
+        count (al-len [FrameLine] (load (field frame lines)))]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [line (al-get [FrameLine] (load (field frame lines)) (load at))]
+                (sb-push-str! (mut output) (load (field line text)))
+                (sb-push-str! (mut output) "\n")
+                (store! at (+ (load at) 1)))))
+    (sb-finish! (mut output))))

@@ -1,0 +1,293 @@
+(module harness-tui-input-editor)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-cells" :use *)
+
+(defsum InputKey
+  (InputInsert [(text (slice u8))])
+  (InputLeft [])
+  (InputRight [])
+  (InputHome [])
+  (InputEnd [])
+  (InputBackspace [])
+  (InputDelete [])
+  (InputDeleteWord [])
+  (InputComplete [])
+  (InputNewline [])
+  (InputSubmit [])
+  (InputHistoryPrevious [])
+  (InputHistoryNext [])
+  (InputInterrupt [])
+  (InputSuspend [])
+  (InputEndOfFile []))
+
+(defsum InputIntent
+  (InputChanged [])
+  (InputUnchanged [])
+  (InputSubmitted [(text (slice u8))])
+  (InputInterrupted [])
+  (InputSuspended [])
+  (InputClosed []))
+
+(defstruct InputEditor
+  [(allocator (ptr Allocator))
+   (bytes (ArrayList u8))
+   (cursor i64)
+   (history (ArrayList (slice u8)))
+   (history-index i64)])
+
+(defn input-editor-new [(allocator (ptr Allocator))] (-> InputEditor)
+  (let [editor (alloc/stack InputEditor)]
+    (store! (field editor allocator) allocator)
+    (store! (field editor bytes) (al-new [u8] allocator))
+    (store! (field editor cursor) 0)
+    (store! (field editor history) (al-new [(slice u8)] allocator))
+    (store! (field editor history-index) 0)
+    (load editor)))
+
+(defn input-editor-text [(editor (ptr InputEditor))] (-> (slice u8))
+  (slice-new [u8]
+             (load (field (field editor bytes) data))
+             (al-len [u8] (load (field editor bytes)))))
+
+(defn input-copy [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)]
+    (sb-push-str! (mut output) text)
+    (sb-finish! (mut output))))
+
+(defn input-editor-clear! [(editor (ptr InputEditor))] (-> i64)
+  (al-clear! [u8] (mut (field editor bytes)))
+  (store! (field editor cursor) 0)
+  (store! (field editor history-index)
+          (al-len [(slice u8)] (load (field editor history))))
+  0)
+
+(defn input-editor-insert-byte! [(editor (ptr InputEditor))
+                                 (byte u8)] (-> i64)
+  (let [cursor (load (field editor cursor))
+        old-length (al-len [u8] (load (field editor bytes)))]
+    (al-push! [u8] (mut (field editor bytes)) byte)
+    (let [(mut at) old-length]
+      (loop (if (<= (load at) cursor)
+                (break)
+                (do
+                  (al-set! [u8]
+                           (mut (field editor bytes))
+                           (load at)
+                           (al-get [u8]
+                                   (load (field editor bytes))
+                                   (- (load at) 1)))
+                  (store! at (- (load at) 1))))))
+    (al-set! [u8] (mut (field editor bytes)) cursor byte)
+    (store! (field editor cursor) (+ cursor 1))
+    0))
+
+(defn input-editor-insert! [(editor (ptr InputEditor))
+                            (text (slice u8))] (-> i64)
+  (let [(mut at) 0
+        count (slice-len [u8] text)]
+    (loop (if (>= (load at) count)
+              (break)
+              (do
+                (input-editor-insert-byte! editor (slice-get [u8] text (load at)))
+                (store! at (+ (load at) 1)))))
+    0))
+
+(defn input-editor-remove-range! [(editor (ptr InputEditor))
+                                  (start i64)
+                                  (end i64)] (-> i64)
+  (let [length (al-len [u8] (load (field editor bytes)))
+        bounded-start (if (< start 0) 0 start)
+        bounded-end (if (> end length) length end)
+        amount (- bounded-end bounded-start)]
+    (when (> amount 0)
+      (let [(mut at) bounded-start]
+        (loop (if (>= (+ (load at) amount) length)
+                  (break)
+                  (do
+                    (al-set! [u8]
+                             (mut (field editor bytes))
+                             (load at)
+                             (al-get [u8]
+                                     (load (field editor bytes))
+                                     (+ (load at) amount)))
+                    (store! at (+ (load at) 1))))))
+      (let [(mut remaining) amount]
+        (loop (if (<= (load remaining) 0)
+                  (break)
+                  (do
+                    (al-pop! [u8] (mut (field editor bytes)))
+                    (store! remaining (- (load remaining) 1))))))
+      (store! (field editor cursor) bounded-start)
+      0)
+    0))
+
+(defn input-editor-previous-boundary-from [(editor (ptr InputEditor))
+                                           (position i64)] (-> i64)
+  (let [(mut at) (- position 1)]
+    (loop (if (or (<= (load at) 0)
+                  (not (utf8-continuation? (cast i64
+                                                 (al-get [u8]
+                                                         (load (field editor bytes))
+                                                         (load at))))))
+              (break)
+              (store! at (- (load at) 1))))
+    (if (< (load at) 0) 0 (load at))))
+
+(defn input-editor-previous-boundary [(editor (ptr InputEditor))] (-> i64)
+  (input-editor-previous-boundary-from editor
+                                       (load (field editor cursor))))
+
+(defn input-editor-next-boundary [(editor (ptr InputEditor))] (-> i64)
+  (let [cursor (load (field editor cursor))
+        length (al-len [u8] (load (field editor bytes)))]
+    (if (>= cursor length)
+        length
+        (let [scalar (utf8-decode (input-editor-text editor) cursor)]
+          (if (load (field scalar valid))
+              (+ cursor (load (field scalar length)))
+              (+ cursor 1))))))
+
+(defn input-editor-replace! [(editor (ptr InputEditor))
+                             (text (slice u8))] (-> i64)
+  (al-clear! [u8] (mut (field editor bytes)))
+  (store! (field editor cursor) 0)
+  (input-editor-insert! editor text))
+
+(defn input-editor-history! [(editor (ptr InputEditor))
+                             (direction i64)] (-> InputIntent)
+  (let [count (al-len [(slice u8)] (load (field editor history)))
+        current (load (field editor history-index))
+        next
+          (if (< direction 0)
+              (if (> current 0) (- current 1) current)
+              (if (< current count) (+ current 1) current))]
+    (if (= next current)
+        (InputUnchanged)
+        (do
+          (store! (field editor history-index) next)
+          (input-editor-replace! editor
+                                 (if (= next count)
+                                     ""
+                                     (al-get [(slice u8)]
+                                             (load (field editor history))
+                                             next)))
+          (InputChanged)))))
+
+(defn input-editor-submit! [(editor (ptr InputEditor))] (-> InputIntent)
+  (let [text
+          (input-copy (load (field editor allocator))
+                      (input-editor-text editor))]
+    (when (> (slice-len [u8] text) 0)
+      (al-push! [(slice u8)] (mut (field editor history)) text)
+      0)
+    (input-editor-clear! editor)
+    (InputSubmitted text)))
+
+(defn input-command-completion [(text (slice u8))] (-> (slice u8))
+  (cond (or (str-eq text "/a") (str-eq text "/ag")) "/agent"
+        (or (str-eq text "/w") (str-eq text "/wo")) "/workflow"
+        (or (str-eq text "/s") (str-eq text "/st")) "/status"
+        (or (str-eq text "/g") (str-eq text "/gr")) "/graph"
+        (or (str-eq text "/ca") (str-eq text "/can")) "/cancel"
+        (or (str-eq text "/cl") (str-eq text "/cle")) "/clear"
+        (or (str-eq text "/m") (str-eq text "/mo")) "/model"
+        (or (str-eq text "/h") (str-eq text "/he")) "/help"
+        (or (str-eq text "/q") (str-eq text "/qu")) "/quit"
+        (or (str-eq text "/e") (str-eq text "/ex")) "/exit"
+        :else ""))
+
+(defn input-editor-apply! [(editor (ptr InputEditor))
+                           (key InputKey)] (-> InputIntent)
+  (match key
+    (InputInsert [text]
+                 (do (input-editor-insert! editor text) (InputChanged)))
+    (InputLeft []
+               (if (<= (load (field editor cursor)) 0)
+                   (InputUnchanged)
+                   (do
+                     (store! (field editor cursor)
+                             (input-editor-previous-boundary editor))
+                     (InputChanged))))
+    (InputRight []
+                (let [next (input-editor-next-boundary editor)]
+                  (if (= next (load (field editor cursor)))
+                      (InputUnchanged)
+                      (do (store! (field editor cursor) next) (InputChanged)))))
+    (InputHome []
+               (do (store! (field editor cursor) 0) (InputChanged)))
+    (InputEnd []
+              (do
+                (store! (field editor cursor)
+                        (al-len [u8] (load (field editor bytes))))
+                (InputChanged)))
+    (InputBackspace []
+                    (if (<= (load (field editor cursor)) 0)
+                        (InputUnchanged)
+                        (do
+                          (input-editor-remove-range! editor
+                                                      (input-editor-previous-boundary editor)
+                                                      (load (field editor cursor)))
+                          (InputChanged))))
+    (InputDelete []
+                 (let [next (input-editor-next-boundary editor)]
+                   (if (= next (load (field editor cursor)))
+                       (InputUnchanged)
+                       (do
+                         (input-editor-remove-range! editor
+                                                     (load (field editor cursor))
+                                                     next)
+                         (InputChanged)))))
+    (InputDeleteWord []
+                     (let [original (load (field editor cursor))
+                           (mut start) original]
+                       (loop (if (<= (load start) 0)
+                                 (break)
+                                 (let [previous
+                                         (input-editor-previous-boundary-from editor
+                                                                              (load start))
+                                       byte
+                                         (al-get [u8]
+                                                 (load (field editor bytes))
+                                                 previous)]
+                                   (if (or (= byte (cast u8 32))
+                                           (= byte (cast u8 10)))
+                                       (store! start previous)
+                                       (break)))))
+                       ;; Continue across the preceding non-space word.
+                       (loop (if (<= (load start) 0)
+                                 (break)
+                                 (let [previous
+                                         (input-editor-previous-boundary-from editor
+                                                                              (load start))
+                                       byte
+                                         (al-get [u8]
+                                                 (load (field editor bytes))
+                                                 previous)]
+                                   (if (or (= byte (cast u8 32))
+                                           (= byte (cast u8 10)))
+                                       (break)
+                                       (store! start previous)))))
+                       (input-editor-remove-range! editor
+                                                   (load start)
+                                                   original)
+                       (InputChanged)))
+    (InputComplete []
+                   (let [completion (input-command-completion (input-editor-text editor))]
+                     (if (= (slice-len [u8] completion) 0)
+                         (InputUnchanged)
+                         (do
+                           (input-editor-replace! editor completion)
+                           (InputChanged)))))
+    (InputNewline []
+                  (do (input-editor-insert! editor "\n") (InputChanged)))
+    (InputSubmit [] (input-editor-submit! editor))
+    (InputHistoryPrevious [] (input-editor-history! editor -1))
+    (InputHistoryNext [] (input-editor-history! editor 1))
+    (InputInterrupt [] (InputInterrupted))
+    (InputSuspend [] (InputSuspended))
+    (InputEndOfFile [] (InputClosed))))

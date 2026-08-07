@@ -1,0 +1,157 @@
+(module harness-bash-tool)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.cancellation" :as native-cancellation)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.subprocess" :as subprocess)
+(import "coil.time" :as time)
+(import "harness-json" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+
+(const BASH_CAPTURE_LIMIT 1048576)
+(const BASH_TIMEOUT_MS 120000)
+
+(defstruct BashTool [(cwd (slice u8))])
+
+(defn bash-error [(call (ptr ToolCall)) (message (slice u8))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
+    (store! (field result error) message)
+    (load result)))
+
+(defn bash-deadline [(context (ptr ToolExecutionContext))] (-> (Option time/Instant))
+  (let [absolute (load (field context tool-deadline-monotonic-ms))
+        remaining
+          (if (> absolute 0)
+              (deadline-remaining-ms absolute BASH_TIMEOUT_MS)
+              BASH_TIMEOUT_MS)]
+    (match (time/duration-millis remaining)
+      (Err [failure] (None [time/Instant]))
+      (Ok [duration]
+          (match (time/deadline-after duration)
+            (Err [failure] (None [time/Instant]))
+            (Ok [deadline] (Some deadline)))))))
+
+(defn bash-status-code [(status subprocess/ExitStatus)] (-> i64)
+  (match status
+    (subprocess/Exited [code] code)
+    (subprocess/Signaled [signal] (+ 128 signal))))
+
+(defn execute-bash [(self (ptr BashTool))
+                    (call (ptr ToolCall))
+                    (context (ptr ToolExecutionContext))
+                    (allocator (ptr Allocator))] (-> ToolResult)
+  (let [command
+          (match (json-string-at (load (field call arguments)) "command")
+            (Some [value] value)
+            (None [] ""))]
+    (cond (= (slice-len [u8] command) 0) (bash-error call "command must not be empty")
+          (cancellation-requested? (load (field context cancellation))) (bash-error call "command cancelled")
+          :else
+            (let [args (alloc/stack (array (slice u8) 2))
+                  run-result (alloc/stack subprocess/RunResult)]
+              (store! (index args 0) "-lc")
+              (store! (index args 1) command)
+              (let [options
+                      (subprocess/run-options "/bin/bash"
+                                              (slice-new [(slice u8)] (index args 0) 2)
+                                              (load (field self cwd))
+                                              BASH_CAPTURE_LIMIT
+                                              BASH_CAPTURE_LIMIT
+                                              (bash-deadline context)
+                                              (if (= (load (field context cancellation))
+                                                     (cast (ptr CancellationToken) 0))
+                                                  (cast (ptr native-cancellation/Cancellation) 0)
+                                                  (field (load (field context cancellation)) native))
+                                              (match (time/duration-millis 1000)
+                                                (Err [failure] (zeroed time/Duration))
+                                                (Ok [duration] duration)))]
+                (match (subprocess/run allocator run-result options)
+                  (Err [failure] (bash-error call "could not execute bash command"))
+                  (Ok [completed]
+                      (let [(mut output) (json-object allocator)
+                            (mut result)
+                              (tool-result-empty (load (field call id))
+                                                 (ToolSucceeded))]
+                        (json-object-put! (mut output)
+                                          "stdout"
+                                          (JsonString (json-copy-string allocator
+                                                                        (load (field completed stdout)))))
+                        (json-object-put! (mut output)
+                                          "stderr"
+                                          (JsonString (json-copy-string allocator
+                                                                        (load (field completed stderr)))))
+                        (json-object-put! (mut output)
+                                          "exit_code"
+                                          (json-integer allocator
+                                                        (bash-status-code (load (field completed status)))))
+                        (json-object-put! (mut output)
+                                          "stdout_truncated"
+                                          (JsonBool (load (field completed stdout-truncated))))
+                        (json-object-put! (mut output)
+                                          "stderr_truncated"
+                                          (JsonBool (load (field completed stderr-truncated))))
+                        (json-object-put! (mut output)
+                                          "timed_out"
+                                          (JsonBool (load (field completed timed-out))))
+                        (json-object-put! (mut output)
+                                          "cancelled"
+                                          (JsonBool (load (field completed cancelled))))
+                        (store! (field result output) (load output))
+                        (when (or (load (field completed timed-out))
+                                  (load (field completed cancelled)))
+                          (store! (field result status) (ToolErrored))
+                          (store! (field result error)
+                                  (if (load (field completed cancelled))
+                                      "command cancelled"
+                                      "command timed out"))
+                          0)
+                        (subprocess/run-result-free allocator completed)
+                        (load result)))))))))
+
+(impl ToolImplementation BashTool
+  (execute-tool [(self (ptr BashTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-bash self call context allocator)))
+
+(defn bash-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut command) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-object-put! (mut command) "type" (JsonString "string"))
+    (json-object-put! (mut command)
+                      "description"
+                      (JsonString "Bash source to execute in the workspace."))
+    (json-object-put! (mut properties) "command" (load command))
+    (json-array-push! (mut required) (JsonString "command"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn bash-definition [(allocator (ptr Allocator))
+                       (cwd (slice u8))] (-> ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)
+        implementation (box allocator BashTool (zeroed BashTool))]
+    (store! (field implementation cwd) cwd)
+    (store! (field (field definition spec) name) "bash")
+    (store! (field (field definition spec) description)
+            "Execute a Bash command in the workspace and return bounded stdout, stderr, and exit status.")
+    (store! (field (field definition spec) input-schema) (bash-schema allocator))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (Destructive))
+    (store! (field (field definition spec) idempotent) false)
+    (store! (field (field definition spec) timeout-ms) BASH_TIMEOUT_MS)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn register-bash-tool! [(registry (mut ToolRegistry))
+                           (allocator (ptr Allocator))
+                           (cwd (slice u8))] (-> bool)
+  (tool-register! (mut registry) (bash-definition allocator cwd)))

@@ -1,0 +1,79 @@
+(module harness-event-journal-background-fixture)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-agent-runner" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct JournalFixtureProvider [(reserved u8)])
+
+(impl ModelProvider JournalFixtureProvider
+  (provider-name [(self (ptr JournalFixtureProvider))] (-> (slice u8)) "fixture")
+  (provider-capabilities [(self (ptr JournalFixtureProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "fixture"))
+  (execute-model [(self (ptr JournalFixtureProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (emit-event emitter 2 (ModelResponseDelta) "run" "op" "" "fixture" "model" (JsonString "delta"))
+                 (let [(mut response) (response-empty allocator)]
+                   (store! (field response provider) "fixture")
+                   (store! (field response model) "model")
+                   (store! (field response response-id) "done")
+                   (store! (field response output-text) "done")
+                   (ModelOk (load response)))))
+
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [owner (malloc-allocator)
+        service-domain (allocation-domain-open owner)
+        service-allocator (allocation-domain-allocator service-domain)
+        run-domain (allocation-domain-open service-allocator)
+        allocator (allocation-domain-allocator run-domain)
+        journal-path
+          (if (> (cast i64 argc) 1)
+              (cstr->str (load (index argv 1)))
+              "/tmp/coil-event-journal-background-fixture.jsonl")
+        (mut journal) (cast (ptr EventJournal) 0)]
+    (match (event-journal-open service-allocator journal-path true)
+      (JournalOpenFailed [message] 2)
+      (JournalOpened [opened]
+                     (do
+                       (store! journal (box service-allocator EventJournal opened))
+                       (let [registry (box allocator ToolRegistry (tool-registry-new allocator))
+                             messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+                             request (box allocator ModelRequest (zeroed ModelRequest))
+                             provider (box allocator JournalFixtureProvider (zeroed JournalFixtureProvider))
+                             authorizer (alloc/stack AllowAllAuthorizer)
+                             sequence (box service-allocator i64 1)
+                             emitter (box service-allocator EventEmitter (zeroed EventEmitter))
+                             policy (alloc/stack AgentRunPolicy)]
+                         (store! (field request run-id) "run")
+                         (store! (field request operation-id) "op")
+                         (store! (field request model) "model")
+                         (store! (field request messages) messages)
+                         (store! (field request tools) registry)
+                         (store! (field request tool-choice) (ToolsAuto))
+                         (store! (field request reasoning) (ReasoningNone))
+                         (store! (field request timeout-ms) 10000)
+                         (event-emitter-init! emitter service-allocator (load journal) sequence)
+                         (store! (field policy max-model-turns) 1)
+                         (store! (field policy max-parallel-tools) 1)
+                         (let [(mut handle)
+                                 (run-agent-background allocator provider request authorizer emitter (load policy))
+                               result (agent-run-join (mut handle))]
+                           (event-journal-close! (load journal))
+                           (allocation-domain-close! service-allocator run-domain)
+                           (allocation-domain-close! owner service-domain)
+                           (match result
+                             (ModelOk [response] 0)
+                             (ModelErr [failure] 1)))))))))

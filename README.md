@@ -54,11 +54,11 @@ constraints are checked against provider metadata. The resolved command persists
 `routing` object containing the request, selection, policy, reason, and capability
 snapshot; restart recovery never silently reruns routing policy. Current profiles are:
 
-- `balanced` (default): Claude native tools via subscription OAuth;
+- `balanced` (default): direct Codex HTTP via the local ChatGPT subscription;
 - `low-cost`: DeepSeek, or Claude when subscription authentication is required;
 - `quality`: OpenAI, or Claude when subscription authentication is required;
 - `subscription`: Claude native tools;
-- `external-agent`: Codex App Server.
+- `external-agent`: Codex using the selected execution strategy.
 
 A normal run's root `agent_id` equals its `run_id`. To delegate work, submit another
 create command with a unique child `run_id` plus `parent_run_id`; the parent must
@@ -67,20 +67,83 @@ replaces spoofed values. It persists `agent.delegated` and `agent.created` event
 a versioned `message` of kind `delegation`; the child prompt is that message's content.
 The child uses the ordinary durable scheduler, budgets, tools, authorization,
 cancellation, queries, and recovery behavior rather than a second agent mechanism.
+Delegated runs inherit the parent run's resolved provider and model by default, so
+subscription authentication follows the same provider strategy automatically. In the
+strict `spawn_subagent` tool schema, pass `provider: null` and `model: null` to inherit;
+string values remain explicit per-child overrides.
 
 ## Build and verify
 
-Requirements are COIL with its bundled HTTP dependency installed and the `codex` CLI
-installed and authenticated for Codex. Claude subscription use requires an OAuth token.
+Requirements are COIL with its bundled HTTP dependency and Python 3 for subscription
+OAuth. The Codex CLI is needed only when using the optional App Server strategy.
 
 ```sh
-coil build -O1
+coil build
 coil test --list
 coil test --jobs 4
 coil verify
 sh scripts/check_file_size.sh
 sh scripts/e2e.sh
 ```
+
+Launch the local interactive workbench with a durable journal:
+
+```sh
+./harness tui                 # uses .harness-tui.jsonl
+./harness tui ./work.jsonl    # reopen a specific workspace
+```
+
+Every submitted turn has a durable `conversation_id` distinct from its `run_id`.
+Use `/conversation` to display it and `/new` to start another conversation. To
+resume the same conversation after restarting the process, reopen its journal with
+`HARNESS_CONVERSATION_ID=<id>`. The service reconstructs ordered user, assistant,
+and harness-tool context from journal events; the TUI does not own or serialize a
+private transcript.
+
+Provider continuation is scoped by a canonical key containing provider, model,
+instructions, reasoning settings, and the complete tool schema. OpenAI Responses
+reuses `previous_response_id`; Codex records its thread ID and uses `thread/resume`.
+On a key mismatch the runtime sends durable semantic history without the stale
+provider continuation. Each structured `model.request.completed` payload records
+`response_id`, `provider_session_id`, `cache_key`, and usage including
+`cached_input_tokens`, so cache reuse is auditable in the journal.
+
+The terminal opens as a conversational coding-agent client: enter a request at the
+composer and watch model text, tool activity, delegation, workflow events, failures,
+and approval prompts stream into one transcript. Slash commands such as `/agent`,
+`/workflow`, `/status`, `/graph`, `/cancel`, and `/model` expose direct controls without
+turning the primary experience into an operator menu. The runtime registry exposes
+`bash`, `spawn_subagent`, `create_workflow_node`, `query_run`, and `query_workflow`, so
+models can construct and coordinate the same durable agent trees and DAGs. Shell
+execution and reversible orchestration calls pass through the interactive
+authorization mailbox.
+
+The interface stays in the normal screen buffer, so terminal scrollback, selection,
+copying, and search continue to work. Enter submits, Ctrl-J or Shift-Enter inserts a
+newline, Tab completes an unambiguous slash command, arrow keys edit or navigate
+history, Ctrl-W deletes a word, Escape or Ctrl-C interrupts active work, and Ctrl-Z
+restores the terminal before suspending. Bracketed paste is enabled only while the
+editor owns the terminal; pasted newlines and slash commands remain inert text until
+an explicit submission.
+
+Coil automatically uses sequential, ANSI-free output when stdout is redirected, when
+`TERM=dumb`, or when screen-reader mode is enabled. It respects `NO_COLOR`. The
+following environment settings provide explicit compatibility overrides:
+
+- `harness tui --plain [journal-path]` forces sequential output for one invocation.
+- `COIL_TUI_PLAIN=1` forces the sequential renderer.
+- `COIL_TUI_SCREEN_READER=1` selects plain labels and ASCII-safe output.
+- `COIL_TUI_REDUCED_MOTION=1` disables optional motion.
+- `COIL_TUI_COMPACT=1` removes redundant successful-state labels.
+- `COIL_TUI_VERBOSE=1` includes bounded structured tool arguments and outcomes.
+- `COIL_TUI_COLOR=always|never` overrides automatic color selection.
+- `COIL_TUI_UNICODE=always|never` overrides locale-based Unicode detection.
+- `COIL_TUI_WIDTH=<columns>` supplies a width when terminal probing is unavailable.
+
+The supported interactive baseline is a POSIX TTY with relative cursor addressing
+and erase-line support, including current macOS and common Linux terminals, tmux, and
+SSH sessions. Other terminals degrade to the sequential renderer; Coil never requires
+the alternate screen buffer.
 
 The test suites are declared in `Coil.toml`. `coil verify` validates the manifest,
 formatting, lint, every entry/test target graph, and all tests. The standalone
@@ -115,9 +178,9 @@ coil test integration/deepseek_live_integration.coil
 ```
 
 The OpenAI and Codex tests use the efficient `gpt-5.6-luna` model. API suites include
-both a minimal streaming completion and a forced `echo` tool roundtrip; Codex App
-Server owns its own tool registry, so its suite covers the full RPC streaming lifecycle
-without claiming to test the harness tool executor.
+both a minimal streaming completion and a forced `echo` tool roundtrip. The Codex
+adapter registers the harness registry as App Server dynamic tools and dispatches
+`item/tool/call` requests through the same authorizer and executor as other providers.
 
 The configured nesting metaprogram prints authored expression depth by function,
 module, and program. Run `coil lint src/main.coil --use harness.nesting-depth` for
@@ -131,7 +194,9 @@ Provider credentials are read only inside provider adapters:
 
 - OpenAI: `OPENAI_API_KEY`, with `OPENAI_KEY` as a fallback;
 - DeepSeek: `DEEPSEEK_API_KEY`, with `DEEPSEEK_KEY` as a fallback;
-- Codex: the existing Codex CLI login/session.
+- Codex subscription: run `./harness login codex`. Harness credentials are stored
+  separately at `~/.coil-agent-harness/codex-auth.json`; an existing Codex CLI login
+  remains a migration fallback.
 - Claude subscription: run `./harness login claude`. OAuth credentials are stored at
   `~/.coil-agent-harness/auth.json` with mode `0600` and refreshed automatically under
   a cross-process lock. `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN` remain
@@ -145,6 +210,19 @@ builds can set `HARNESS_CLAUDE_OAUTH_HELPER` to the absolute path of
 
 Credentials are used to construct request headers and are never included in emitted
 events. Do not pass a credential as a CLI argument.
+
+Codex execution is strategy-based. The default is the fast OpenCode-style direct HTTP
+strategy against ChatGPT's private Codex Responses endpoint. That endpoint is not a
+documented third-party OpenAI API and may change without notice. Set
+`HARNESS_CODEX_STRATEGY=app-server` to use the supported App Server compatibility path.
+Direct credentials refresh automatically under a cross-process lock; relocate the
+broker with `HARNESS_CODEX_CREDENTIAL_HELPER`. For isolated testing, credentials may
+instead be supplied through `HARNESS_CODEX_ACCESS_TOKEN` and
+`HARNESS_CODEX_ACCOUNT_ID`; never put them in command arguments.
+
+Tool authorization currently defaults to allow-all after schema validation. TUI and
+server runs do not pause for approval prompts. A scoped permissions policy will replace
+this temporary default in a future pass.
 
 ## Run a smoke request
 
@@ -181,7 +259,7 @@ so deployments that need isolation must place the harness in an OS sandbox or co
 src/core/       Provider-neutral JSON, events, models, tools, schema validation
 src/runtime/    Bounded model/tool loop, background handle, parallel tool executor
 src/providers/  OpenAI Responses, Anthropic Messages, DeepSeek dialects, Codex
-src/infra/      HTTP/time adapters plus a narrow POSIX lifecycle and allocator shim
+src/infra/      HTTP, synchronization, signals, sockets, and allocation adapters over Coil stdlib APIs
 src/persistence/ Append-only event journal and recovery
 src/service/     Durable run projection, versioned API routing, and HTTP serving
 schemas/codex/  Generated schemas for the locally installed Codex App Server protocol
@@ -199,8 +277,9 @@ steps, each represented by lifecycle events.
 OpenAI and both DeepSeek dialects share an injectable streaming HTTP transport. The
 production implementation uses libcurl with bounded synchronous chunk delivery;
 provider contract tests replace it with an in-memory byte stream while exercising the
-same SSE decoders and provider execution paths. Codex retains its separate JSONL
-subprocess transport because its bidirectional RPC lifecycle is not HTTP streaming.
+same SSE decoders and provider execution paths. Codex direct mode uses the same bounded
+HTTP streaming boundary; its optional App Server strategy retains the JSONL subprocess
+transport for bidirectional RPC.
 Claude uses native Anthropic Messages with OAuth identity headers. Structured
 `tool_use` and `tool_result` blocks flow through the harness's normal validation,
 authorization, execution, continuation, and event lifecycle.
@@ -216,10 +295,12 @@ authorization, execution, continuation, and event lifecycle.
 - DeepSeek Anthropic compatibility uses `tool_use` and `tool_result` content blocks.
   Its stream reconstructs text, signed thinking blocks, fragmented tool inputs, and
   usage without losing the opaque continuation content.
-- Codex is launched as `codex app-server --listen stdio://`. The adapter initializes a
-  session, starts a thread and turn, converts notifications to harness events, and has
-  pure builders for steering and interrupt requests. Its current one-shot CLI adapter
-  rejects interactive server requests rather than silently approving them.
+- Codex defaults to direct subscription HTTP with `store=false`, conversation-scoped
+  prompt-cache affinity, streamed output-item reconstruction, and encrypted reasoning
+  replay for tool continuations. `HARNESS_CODEX_STRATEGY=app-server` selects the
+  persistent JSONL App Server fallback.
+- Registered tool calls are currently authorized immediately after schema validation;
+  there is no interactive approval pause in TUI or server runs.
 - Parallel tool results retain model call order even when completion order differs.
 - Concurrent event publication is serialized across sequence assignment and journal
   append, so durable records are written in ascending `sequence` order.

@@ -413,12 +413,12 @@
                                                        (ModelRequestFailed)
                                                        (JsonString message))
                                 (model-failure "deepseek-openai" status message))
-                              (let [response (deepseek-openai-parse-response allocator root)]
+                              (let [(mut response) (deepseek-openai-parse-response allocator root)]
                                 (deepseek-openai-event emitter
                                                        request
                                                        (ModelRequestCompleted)
-                                                       (JsonString (load (field response response-id))))
-                                (ModelOk response)))))))))))))
+                                                       (model-completion-payload allocator request (mut response)))
+                                (ModelOk (load response))))))))))))))
 
 (defn deepseek-openai-execute-stream [(context (ptr DeepSeekOpenAIContext))
                                       (request (ptr ModelRequest))
@@ -485,12 +485,12 @@
                                          (ModelRequestFailed)
                                          (JsonString message))
                   (model-failure "deepseek-openai" status message))
-                (let [response (deepseek-stream-response state)]
+                (let [(mut response) (deepseek-stream-response state)]
                   (deepseek-openai-event emitter
                                          request
                                          (ModelRequestCompleted)
-                                         (JsonString (load (field response response-id))))
-                  (ModelOk response))))))))
+                                         (model-completion-payload allocator request (mut response)))
+                  (ModelOk (load response)))))))))
 
 (impl ModelProvider DeepSeekOpenAIContext
   (provider-name [(self (ptr DeepSeekOpenAIContext))]

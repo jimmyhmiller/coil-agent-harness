@@ -1,0 +1,69 @@
+(module harness-bash-tool-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defn bash-call [(allocator (ptr Allocator))
+                 (id (slice u8))
+                 (command (slice u8))] (-> ToolCall)
+  (let [call (alloc/stack ToolCall)
+        (mut arguments) (json-object allocator)]
+    (json-object-put! (mut arguments) "command" (JsonString command))
+    (store! (field call id) id)
+    (store! (field call name) "bash")
+    (store! (field call arguments) (load arguments))
+    (store! (field call raw-arguments) "")
+    (load call)))
+
+(deftest bash-captures-both-streams-and-exit-status
+         (let [allocator (malloc-allocator)
+               tool (alloc/stack BashTool)
+               call (alloc/stack ToolCall)
+               context (alloc/stack ToolExecutionContext)]
+           (store! (field tool cwd) ".")
+           (store! call
+                   (bash-call allocator
+                              "bash-1"
+                              "printf 'hello'; printf 'problem' >&2; exit 7"))
+           (store! (field context run-id) "bash-run")
+           (store! (field context cancellation)
+                   (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [result (execute-bash tool call context allocator)
+                 output (load (field result output))]
+             (assert (match-else (load (field result status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert (match (json-string-at output "stdout")
+                       (Some [value] (str-eq value "hello"))
+                       (None [] false)))
+             (assert (match (json-string-at output "stderr")
+                       (Some [value] (str-eq value "problem"))
+                       (None [] false)))
+             (assert-eq (json-number-i64 (json-get output "exit_code")) 7))))
+
+(deftest bash-refuses-a-pre-cancelled-run
+         (let [allocator (malloc-allocator)
+               tool (alloc/stack BashTool)
+               call (alloc/stack ToolCall)
+               context (alloc/stack ToolExecutionContext)
+               cancellation (cancellation-token-new allocator)]
+           (store! (field tool cwd) ".")
+           (store! call (bash-call allocator "bash-2" "printf 'should not run'"))
+           (cancellation-request! cancellation)
+           (store! (field context run-id) "bash-run")
+           (store! (field context cancellation) cancellation)
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [result (execute-bash tool call context allocator)]
+             (assert (match-else (load (field result status))
+                                 (ToolErrored [] true)
+                                 (_ false)))
+             (assert (str-eq (load (field result error)) "command cancelled")))
+           (cancellation-token-close! cancellation)))

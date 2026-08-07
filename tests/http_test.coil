@@ -43,7 +43,7 @@
 (defn reject-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
   (cast usize 0))
 
-(deftest streaming-callback-delivers-captures-and-propagates-backpressure
+(deftest curl-stream-callback-delivers-bounds-capture-and-propagates-stop
          (let [allocator (malloc-allocator)
                observed (box allocator i64 0)
                capture (alloc/stack StreamingCapture)

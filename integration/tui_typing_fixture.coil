@@ -1,0 +1,44 @@
+(module harness-tui-typing-fixture)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "harness-tui-input-editor" :use *)
+(import "harness-tui-output" :use *)
+(import "harness-tui-render-input" :use *)
+(import "harness-tui-terminal" :use *)
+(import "harness-tui-view" :use *)
+(import "harness-tui-view-layout" :use *)
+
+;; PTY-only fixture for the exact regression seen in the interactive prompt:
+;; redraw once per typed character, then commit the line once.
+(defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
+  (let [allocator (malloc-allocator)
+        overrides (terminal-overrides-from-env allocator)
+        profile (terminal-detect-profile allocator overrides)
+        (mut editor) (input-editor-new allocator)
+        (mut renderer) (input-renderer-new)
+        (mut at) 0]
+    (loop (if (>= (load at) 20)
+              (break)
+              (do
+                (input-editor-apply! (mut editor) (InputInsert "x"))
+                (match-else (view-input "❯ "
+                                        (input-editor-text (mut editor))
+                                        (load (field editor cursor))
+                                        (load (field profile height)))
+                            (ViewInputNode [input]
+                                           (let [(mut layout)
+                                                   (view-layout-input allocator
+                                                                      input
+                                                                      (load (field profile width)))
+                                                 (mut operations)
+                                                   (input-renderer-plan! (mut renderer)
+                                                                         (mut layout))]
+                                             (tui-output-execute-plan! allocator
+                                                                       profile
+                                                                       (mut operations))))
+                            (_ 0))
+                (store! at (+ (load at) 1)))))
+    (let [(mut committed) (input-renderer-commit-plan! (mut renderer) allocator)]
+      (tui-output-execute-plan! allocator profile (mut committed)))
+    0))

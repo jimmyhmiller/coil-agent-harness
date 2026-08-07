@@ -112,6 +112,23 @@ current-directory lookup, fd I/O, sleep, readiness polling, and bidirectional Co
 App Server pipes. The harness uses Coil's supported hosted libraries directly and
 contains no application-owned native shim.
 
+## Ownership and presentation boundaries
+
+Storage lifetime is part of the architecture, not an allocator parameter chosen by
+each helper. Process, service, run, turn, tool-call, TUI-session, and TUI-cycle data
+live in explicitly owned Coil regions. Background runs use the synchronized
+`AllocationDomain` region owner. Data moves from a child lifetime to an ancestor only
+through an explicit promotion/copy boundary; a pointer or slice derived from a stack
+temporary never crosses a function or thread boundary. The complete rules are in
+`docs/decisions/0008-lifetime-owned-arenas.md`.
+
+Terminal presentation follows one pipeline: semantic state produces a declarative
+layout tree, the pure layout engine resolves it into a frame and semantic anchors,
+the renderer plans a frame transition, and the terminal driver executes typed
+operations. Input, approvals, conversation blocks, and service responses do not own
+separate formatting/cursor protocols. Application code does not emit presentation
+bytes. See `docs/decisions/0009-declarative-terminal-layout.md`.
+
 ## Deliberate next boundaries
 
 - Approval round-trips for interactive Codex App Server requests.

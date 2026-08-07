@@ -160,6 +160,7 @@
               (break)
               (let [ready
                       (shutdown-signal-wait-listener shutdown
+                                                     allocator
                                                      (load (field listener fd))
                                                      100)]
                 (cond (= ready 0) 0

@@ -10,7 +10,8 @@
 (extern raise :cc c [i32] (-> i32))
 
 (defstruct ListenerWaitJob
-  [(listener (ptr HttpListener))
+  [(allocator (ptr Allocator))
+   (listener (ptr HttpListener))
    (shutdown (ptr ShutdownSignal))
    (result (ptr i64))])
 
@@ -22,23 +23,26 @@
               (if (shutdown-signal-requested? (load (field job shutdown)))
                   (store! done true)
                   (shutdown-signal-wait-listener (load (field job shutdown))
+                                                 (load (field job allocator))
                                                  (load (field (load (field job listener)) fd))
                                                  25))))
     (store! (load (field job result)) 0)
     (cast (ptr i8) 0)))
 
 (deftest wakes-a-bounded-listener-loop-for-graceful-shutdown
-         (let [listener (alloc/stack HttpListener)
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack HttpListener)
                shutdown (alloc/stack ShutdownSignal)
                result (alloc/stack i64)
                job (alloc/stack ListenerWaitJob)
                worker (alloc/stack Thread)]
-           (match (http-listener-open 0)
+           (match (http-listener-open allocator 0)
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
            (store! shutdown (shutdown-signal-new))
            (assert (shutdown-signal-valid? shutdown))
            (store! result -1)
+           (store! (field job allocator) allocator)
            (store! (field job listener) listener)
            (store! (field job shutdown) shutdown)
            (store! (field job result) result)

@@ -1,45 +1,111 @@
 (module harness-shutdown-signal)
 
 (import "coil.alloc" :as alloc :use *)
-
-(extern harness_shutdown_open :cc c [] (-> (ptr i8)))
-(extern harness_shutdown_install :cc c [(ptr i8)] (-> i64))
-(extern harness_shutdown_request :cc c [(ptr i8)] (-> i64))
-(extern harness_shutdown_requested :cc c [(ptr i8)] (-> i64))
-(extern harness_shutdown_wait_listener :cc c [(ptr i8) i32 i32] (-> i64))
-(extern harness_shutdown_close :cc c [(ptr i8)] (-> i64))
+(import "coil.cancellation" :as cancellation)
+(import "coil.match" :use *)
+(import "coil.selectors" :as selectors)
+(import "coil.signals" :as signals)
+(import "coil.slice" :use *)
+(import "coil.time" :as time)
 
 (defstruct ShutdownSignal
-  [(handle (ptr i8))])
+  [(cancellation cancellation/Cancellation)
+   (signals signals/SignalSubscription)
+   (valid bool)
+   (installed bool)])
 
 (defn shutdown-signal-new [] (-> ShutdownSignal)
   (let [shutdown (alloc/stack ShutdownSignal)]
-    (store! (field shutdown handle) (harness_shutdown_open))
+    (match (cancellation/cancellation-init (field shutdown cancellation))
+      (Err [failure] (store! (field shutdown valid) false))
+      (Ok [token] (store! (field shutdown valid) true)))
+    (store! (field shutdown installed) false)
     (load shutdown)))
 
 (defn shutdown-signal-valid? [(shutdown (ptr ShutdownSignal))] (-> bool)
-  (!= (load (field shutdown handle)) (cast (ptr i8) 0)))
+  (load (field shutdown valid)))
 
 (defn shutdown-signal-install! [(shutdown (ptr ShutdownSignal))] (-> i64)
-  (harness_shutdown_install (load (field shutdown handle))))
+  (let [numbers (alloc/stack (array i32 2))]
+    (store! (index numbers 0) 2)
+    (store! (index numbers 1) 15)
+    (match (signals/signal-subscribe (field shutdown signals)
+                                     (slice-new [i32] (index numbers 0) 2))
+      (Err [failure] -1)
+      (Ok [subscription]
+          (do (store! (field shutdown installed) true) 0)))))
 
 (defn shutdown-signal-request! [(shutdown (ptr ShutdownSignal))] (-> i64)
-  (harness_shutdown_request (load (field shutdown handle))))
+  (cancellation/cancellation-request! (field shutdown cancellation)))
+
+(defn shutdown-signal-drain! [(shutdown (ptr ShutdownSignal))] (-> bool)
+  (if (not (load (field shutdown installed)))
+      false
+      (match (time/duration-millis 0)
+        (Err [failure] false)
+        (Ok [duration]
+            (match (selectors/wait-fd-for (load (field (field shutdown signals) read-fd))
+                                          (selectors/interest-readable)
+                                          duration)
+              (Err [failure] false)
+              (Ok [ready]
+                  (match (signals/signal-read (field shutdown signals))
+                    (Err [failure] false)
+                    (Ok [number]
+                        (do
+                          (cancellation/cancellation-request! (field shutdown cancellation))
+                          true)))))))))
 
 (defn shutdown-signal-requested? [(shutdown (ptr ShutdownSignal))] (-> bool)
-  (= (harness_shutdown_requested (load (field shutdown handle))) 1))
+  (or (cancellation/cancellation-requested? (field shutdown cancellation))
+      (shutdown-signal-drain! shutdown)))
 
 (defn shutdown-signal-wait-listener [(shutdown (ptr ShutdownSignal))
+                                     (allocator (ptr Allocator))
                                      (listener-fd i64)
                                      (timeout-ms i64)] (-> i64)
-  (harness_shutdown_wait_listener (load (field shutdown handle))
-                                  (cast i32 listener-fd)
-                                  (cast i32 timeout-ms)))
+  (let [watches (alloc/stack (array selectors/Watch 3))
+        count (if (load (field shutdown installed)) 3 2)]
+    (store! (index watches 0)
+            (selectors/watch (cast i32 listener-fd)
+                             (selectors/interest-readable)
+                             1))
+    (store! (index watches 1)
+            (cancellation/cancellation-watch (field shutdown cancellation) 2))
+    (when (load (field shutdown installed))
+      (store! (index watches 2)
+              (signals/signal-watch (field shutdown signals) 3))
+      0)
+    (match (time/duration-millis timeout-ms)
+      (Err [failure] -1)
+      (Ok [duration]
+          (match (selectors/wait-many-for allocator
+                                          (slice-new [selectors/Watch]
+                                                     (index watches 0)
+                                                     count)
+                                          duration)
+            (Err [failure]
+                 (match failure
+                   (selectors/Timeout [] 0)
+                   (selectors/InvalidFd [] -1)
+                   (selectors/Syscall [code] -1)))
+            (Ok [selection]
+                (let [selected (alloc/stack selectors/Selection)]
+                  (store! selected selection)
+                  (cond (= (load (field selected token)) 1) 1
+                        (= (load (field selected token)) 2) 2
+                        :else
+                          (do
+                            (shutdown-signal-drain! shutdown)
+                            2)))))))))
 
 (defn shutdown-signal-close! [(shutdown (ptr ShutdownSignal))] (-> i64)
-  (let [handle (load (field shutdown handle))]
-    (if (= handle (cast (ptr i8) 0))
-        0
-        (do
-          (store! (field shutdown handle) (cast (ptr i8) 0))
-          (harness_shutdown_close handle)))))
+  (when (load (field shutdown installed))
+    (signals/signal-close! (field shutdown signals))
+    (store! (field shutdown installed) false)
+    0)
+  (when (load (field shutdown valid))
+    (cancellation/cancellation-close! (field shutdown cancellation))
+    (store! (field shutdown valid) false)
+    0)
+  0)
