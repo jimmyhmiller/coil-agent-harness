@@ -1,0 +1,118 @@
+;; The observer sink: the piece that lets a run publish without waiting on
+;; anyone watching it.
+;;
+;; `emit-event-for-agent` holds the emitter lock across `publish-event`, so
+;; anything slow here stalls ALL event emission for that run. This sink
+;; therefore only encodes and enqueues -- it performs no I/O and never blocks.
+;; A separate drain moves queued envelopes onto subscriber transports.
+;;
+;; The queue is bounded and drops the OLDEST envelope when full. Dropping is the
+;; only honest option: growing without bound turns one stalled subscriber into
+;; an out-of-memory kill for the whole harness, and blocking turns it into a
+;; stalled run. Drops are counted so the gap is reportable rather than silent.
+(module harness-bus-observer)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-publisher" :use *)
+
+(defstruct BusObserverSink
+  [(allocator (ptr Allocator))
+   (queue (ArrayList Envelope))
+   (capacity i64)
+   (dropped i64)
+   (next-id i64)])
+
+(defn bus-observer-init! [(sink (ptr BusObserverSink))
+                          (allocator (ptr Allocator))
+                          (capacity i64)] (-> i64)
+  (store! (field sink allocator) allocator)
+  (store! (field sink queue) (al-new [Envelope] allocator))
+  ;; A capacity of zero would silently discard everything, which reads as "the
+  ;; bus is broken" rather than "the queue is full". Refuse it.
+  (store! (field sink capacity) (if (< capacity 1) 1 capacity))
+  (store! (field sink dropped) 0)
+  (store! (field sink next-id) 1)
+  0)
+
+;; Decimal formatting, written out because `int->str` is a comptime primitive
+;; and the message id is built at runtime.
+(defn decimal [(allocator (ptr Allocator)) (value i64)] (-> (slice u8))
+  (if (= value 0)
+      "0"
+      (let [(mut buffer) (sb-new allocator)
+            (mut digits) (al-new [i64] allocator)
+            (mut remaining) value]
+        (loop (if (<= (load remaining) 0)
+                  (break)
+                  (do
+                    (al-push! [i64] (mut digits) (% (load remaining) 10))
+                    (store! remaining (/ (load remaining) 10)))))
+        (let [n (al-len [i64] (load digits))
+              (mut i) 0]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (do
+                      (sb-push-byte! (mut buffer)
+                                     (cast u8 (+ 48 (al-get [i64] (load digits) (- (- n 1) (load i))))))
+                      (store! i (+ (load i) 1))))))
+        (sb-str (load buffer)))))
+
+(defn bus-observer-pending [(sink (ptr BusObserverSink))] (-> i64)
+  (al-len [Envelope] (load (field sink queue))))
+
+(defn bus-observer-dropped [(sink (ptr BusObserverSink))] (-> i64)
+  (load (field sink dropped)))
+
+(defn bus-observer-at [(sink (ptr BusObserverSink)) (index i64)] (-> (ptr Envelope))
+  (primitive/index (load (field (field sink queue) data)) index))
+
+;; Remove everything the caller has finished sending.
+(defn bus-observer-clear! [(sink (ptr BusObserverSink))] (-> i64)
+  (let [n (bus-observer-pending sink)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do (al-pop! [Envelope] (mut (field sink queue)))
+                  (store! i (+ (load i) 1)))))
+    n))
+
+;; Drop the oldest entry to make room. Oldest rather than newest because a
+;; subscriber that fell behind is better served by recent state than by a stale
+;; prefix it can no longer act on.
+(defn drop-oldest! [(sink (ptr BusObserverSink))] (-> i64)
+  (let [n (bus-observer-pending sink)
+        (mut i) 1]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (store! (bus-observer-at sink (- (load i) 1))
+                        (load (bus-observer-at sink (load i))))
+                (store! i (+ (load i) 1)))))
+    (al-pop! [Envelope] (mut (field sink queue)))
+    (store! (field sink dropped) (+ (load (field sink dropped)) 1))
+    0))
+
+(impl EventSink BusObserverSink
+  (publish-event [(self (ptr BusObserverSink)) (event (ptr Event))] (-> i64)
+                 (let [allocator (load (field self allocator))
+                       topic (run-topic allocator (load (field event run-id)))]
+                   ;; An event with no run id has no topic to publish on. That
+                   ;; is not a failure of the run, so report success.
+                   (if (= (slice-len topic) 0)
+                       0
+                       (let [body (json-stringify allocator (event-to-json allocator event))
+                             id (decimal allocator (load (field self next-id)))
+                             envelope (alloc/stack Envelope)]
+                         (store! (field self next-id) (+ (load (field self next-id)) 1))
+                         (store! envelope (event-envelope id topic body))
+                         (when (>= (bus-observer-pending self) (load (field self capacity)))
+                           (drop-oldest! self))
+                         (al-push! [Envelope] (mut (field self queue)) (load envelope))
+                         0)))))
