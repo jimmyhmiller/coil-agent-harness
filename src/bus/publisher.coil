@@ -1,0 +1,53 @@
+;; Projecting journal events onto bus topics.
+;;
+;; This is the piece that makes an attached TUI an ordinary subscriber rather
+;; than a special client. A run publishes to its own topic and never learns who
+;; is listening, so zero, one, or several observers all cost the run the same
+;; and none of them can block it.
+;;
+;; The topic name is a convention, not a type, because subscribers must be able
+;; to name a topic before the run exists -- a TUI subscribes to `run.<id>` at
+;; the moment it asks for the run to start, not after the first event arrives.
+(module harness-bus-publisher)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-protocol" :use *)
+
+(const RUN_TOPIC_PREFIX "run.")
+
+;; The topic a run's events are published on. Returns an empty slice if the
+;; allocation fails, which callers must treat as "do not publish" rather than
+;; publishing to the empty topic.
+(defn run-topic [(allocator (ptr Allocator)) (run-id (slice u8))] (-> (slice u8))
+  (if (= (slice-len run-id) 0)
+      ""
+      (match (str-concat allocator RUN_TOPIC_PREFIX run-id)
+        (Some [topic] topic)
+        (None [] ""))))
+
+;; True when `topic` names a run topic at all. A subscriber that asks for a
+;; malformed topic should be rejected rather than silently never receiving.
+(defn run-topic? [(topic (slice u8))] (-> bool)
+  (and (> (slice-len topic) (slice-len RUN_TOPIC_PREFIX))
+       (str-eq (subslice [u8] topic 0 (slice-len RUN_TOPIC_PREFIX))
+               RUN_TOPIC_PREFIX)))
+
+;; The run id a topic refers to, or an empty slice if it is not a run topic.
+(defn run-topic-id [(topic (slice u8))] (-> (slice u8))
+  (if (not (run-topic? topic))
+      ""
+      (subslice [u8] topic (slice-len RUN_TOPIC_PREFIX) (slice-len topic))))
+
+;; Wrap an already-encoded event as a bus message.
+;;
+;; The body arrives encoded rather than as a typed event: the publisher must not
+;; impose a format on payloads, and the journal already has a canonical encoding
+;; for events. Keeping the body opaque here is what lets the envelope and the
+;; payload use different codecs.
+(defn event-envelope [(message-id (slice u8))
+                      (topic (slice u8))
+                      (body (slice u8))] (-> Envelope)
+  (envelope-new message-id (Service) (Topic topic) (Event) body))

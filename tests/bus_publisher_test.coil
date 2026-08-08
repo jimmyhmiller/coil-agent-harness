@@ -1,0 +1,66 @@
+(module harness-bus-publisher-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.assert" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-router" :use *)
+(import "harness-bus-publisher" :use *)
+
+(deftest a-run-topic-is-derived-from-the-run-id
+         (let [allocator (malloc-allocator)]
+           (assert (str-eq (run-topic allocator "chat-1") "run.chat-1"))
+           (assert (run-topic? "run.chat-1"))
+           (assert (str-eq (run-topic-id "run.chat-1") "chat-1"))))
+
+;; An empty run id must not produce the bare prefix -- that would be a topic
+;; every subscriber to "run." silently joined.
+(deftest an-empty-run-id-produces-no-topic
+         (let [allocator (malloc-allocator)]
+           (assert (= (slice-len (run-topic allocator "")) 0))))
+
+(deftest a-non-run-topic-is-rejected
+         (assert (not (run-topic? "chat-1")))
+         (assert (not (run-topic? "run.")))
+         (assert (not (run-topic? "runs.chat-1")))
+         (assert (= (slice-len (run-topic-id "chat-1")) 0)))
+
+;; The whole point: a run publishes once and every attached observer receives
+;; it, without the run knowing they exist.
+(deftest every-observer-of-a-run-receives-its-events
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)
+               envelope (alloc/stack Envelope)]
+           (store! router (router-new allocator))
+           (let [topic (run-topic allocator "chat-1")
+                 first-tui (router-attach! router (Agent "tui-1"))
+                 second-tui (router-attach! router (Agent "tui-2"))
+                 unrelated (router-attach! router (Agent "tui-3"))
+                 (mut out) (al-new [i64] allocator)]
+             (router-subscribe! router first-tui topic)
+             (router-subscribe! router second-tui topic)
+             (router-subscribe! router unrelated (run-topic allocator "chat-2"))
+             (store! envelope (event-envelope "e-1" topic "{\"event\":\"run.started\"}"))
+             (assert (= (router-recipients router envelope (mut out)) 2)))))
+
+;; A run with no observers must still be publishable -- the run cannot be made
+;; to care whether anyone is listening.
+(deftest publishing-to-a-run-nobody-watches-is-not-an-error
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)
+               envelope (alloc/stack Envelope)]
+           (store! router (router-new allocator))
+           (let [(mut out) (al-new [i64] allocator)]
+             (store! envelope
+                     (event-envelope "e-1" (run-topic allocator "chat-1") "{}"))
+             (assert (= (router-recipients router envelope (mut out)) 0)))))
+
+(deftest a-published-event-comes-from-the-service
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack Envelope)]
+           (store! envelope
+                   (event-envelope "e-1" (run-topic allocator "chat-1") "{}"))
+           (assert (address-eq (load (field envelope from)) (Service)))
+           (assert (address-eq (load (field envelope to)) (Topic "run.chat-1")))))
