@@ -239,3 +239,56 @@
            (socket/unix-listener-close! listener)
            (remove-path SOCKET_PATH)
            (remove-path JOURNAL_PATH)))
+
+;; A client that connects and then goes silent must be refused on a bound, not
+;; waited on. Once the bus shares a thread with the run service, waiting here
+;; would stall every other client -- so this is a liveness test, not a politeness
+;; one. It fails by hanging rather than by asserting, which is why the timeout
+;; matters more than the return value.
+(deftest a-silent-client-is-refused-on-a-deadline-rather-than-waited-on
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               codec (alloc/stack MessagePackCodec)
+               observer (alloc/stack BusObserverSink)
+               router (alloc/stack Router)
+               server (alloc/stack BusServer)
+               silent (alloc/stack UnixTransport)]
+           (remove-path SOCKET_PATH)
+           (match (socket/unix-listen listener SOCKET_PATH 8)
+             (Err [_] (assert false))
+             (Ok [_] 0))
+           (bus-observer-init! observer allocator 16)
+           (store! router (router-new allocator))
+           (bus-server-init! server allocator router observer codec)
+
+           ;; Connect and deliberately send nothing, holding the socket open.
+           (assert (= (unix-transport-connect! silent SOCKET_PATH) 0))
+           (assert (= (bus-server-accept! server listener) -1))
+           (assert (= (bus-server-live-count server) 0))
+
+           (transport-close! silent)
+           (bus-server-close! server)
+           (socket/unix-listener-close! listener)
+           (remove-path SOCKET_PATH)))
+
+;; Polling with a short accept timeout must not report a phantom subscriber when
+;; nothing is pending -- the serve loop calls this on every tick.
+(deftest polling-an-idle-listener-reports-nothing-pending
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               codec (alloc/stack MessagePackCodec)
+               observer (alloc/stack BusObserverSink)
+               router (alloc/stack Router)
+               server (alloc/stack BusServer)]
+           (remove-path SOCKET_PATH)
+           (match (socket/unix-listen listener SOCKET_PATH 8)
+             (Err [_] (assert false))
+             (Ok [_] 0))
+           (bus-observer-init! observer allocator 16)
+           (store! router (router-new allocator))
+           (bus-server-init! server allocator router observer codec)
+           (assert (= (bus-server-accept-for! server listener 1) 0))
+           (assert (= (bus-server-live-count server) 0))
+           (bus-server-close! server)
+           (socket/unix-listener-close! listener)
+           (remove-path SOCKET_PATH)))

@@ -18,6 +18,7 @@
 (import "coil.match" :use *)
 (import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
+(import "coil.selectors" :as selectors)
 (import "coil.socket" :as socket)
 (import "coil.str" :use *)
 (import "coil.time" :as time)
@@ -28,6 +29,9 @@
 (import "harness-bus-observer" :use *)
 
 ;; How long to wait for a newly-connected client to send its Subscribe frame.
+;; This is a hard bound, not a hope: without it a client that connects and stays
+;; silent blocks the accept path forever, and once the bus shares a thread with
+;; the run service that means one silent client wedges the whole server.
 (const HANDSHAKE_TIMEOUT_MS 2000)
 
 (defstruct Subscriber
@@ -109,14 +113,31 @@
     (store! (field subscriber alive) false))
   0)
 
+;; True when `transport` has data to read within the handshake timeout.
+;; The read that follows can then only block on bytes already in flight.
+(defn handshake-readable? [(transport (ptr UnixTransport))] (-> bool)
+  (match (time/duration-millis HANDSHAKE_TIMEOUT_MS)
+    (Err [_] false)
+    (Ok [timeout]
+        (match (selectors/wait-fd-for (load (field (field transport connection) fd))
+                                      (selectors/interest-readable)
+                                      timeout)
+          (Err [_] false)
+          (Ok [_] true)))))
+
 ;; Accept one pending connection and complete its Subscribe handshake.
 ;; Returns 1 if a subscriber was added, 0 if nothing was pending, -1 on a
 ;; malformed or silent client (which is not a server error).
-(defn bus-server-accept! [(server (ptr BusServer))
-                          (listener (ptr socket/UnixListener))] (-> i64)
+;;
+;; `accept-timeout-ms` is how long to wait for a pending connection. A server
+;; sharing a thread with other work passes a small value and polls; a dedicated
+;; accept loop can pass a larger one.
+(defn bus-server-accept-for! [(server (ptr BusServer))
+                              (listener (ptr socket/UnixListener))
+                              (accept-timeout-ms i64)] (-> i64)
   (let [allocator (load (field server allocator))
         accepted (alloc/stack socket/UnixConnection)]
-    (match (time/duration-millis HANDSHAKE_TIMEOUT_MS)
+    (match (time/duration-millis accept-timeout-ms)
       (Err [_] -1)
       (Ok [timeout]
           (match (socket/unix-accept-for listener accepted timeout)
@@ -127,6 +148,10 @@
                       envelope (alloc/stack Envelope)
                       out (alloc/stack (slice u8))]
                   (unix-transport-adopt! transport (load accepted))
+                  (if (not (handshake-readable? transport))
+                      ;; Connected and went quiet. Refusing is the only safe
+                      ;; option: waiting on it would stall every other client.
+                      (do (transport-close! transport) -1)
                   (if (!= (frame-read transport allocator out) FRAME_OK)
                       ;; Connected and said nothing, or died mid-handshake.
                       (do (transport-close! transport) -1)
@@ -159,7 +184,12 @@
                               ;; Anything else is a client that does not speak
                               ;; the handshake. Refuse it rather than guessing
                               ;; what it wanted.
-                              (_ (do (transport-close! transport) -1)))))))))))))
+                              (_ (do (transport-close! transport) -1))))))))))))))
+
+;; Accept with the default handshake timeout, for callers that own the thread.
+(defn bus-server-accept! [(server (ptr BusServer))
+                          (listener (ptr socket/UnixListener))] (-> i64)
+  (bus-server-accept-for! server listener HANDSHAKE_TIMEOUT_MS))
 
 ;; Move every queued envelope onto the subscribers that should receive it.
 ;; Returns the number of successful writes. A subscriber whose write fails is
