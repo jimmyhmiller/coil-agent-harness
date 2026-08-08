@@ -1,0 +1,147 @@
+;; Minimal-repaint planning for the live region.
+;;
+;; The existing planner erases every live row and rewrites all of them. For a
+;; streamed response that is a twenty-row footer erased and repainted on every
+;; token, which is what flicker actually is: rows going blank and coming back.
+;;
+;; This plans the same repaint as a diff instead. Rows that did not change are
+;; stepped over; only changed rows are erased and rewritten. Identical frames
+;; produce no erases and no writes at all.
+;;
+;; Two constraints make this correct rather than merely smaller:
+;;
+;;   It only applies when nothing was committed this frame. Committed output
+;;   pushes the live region down the screen, so every row's contents move and a
+;;   diff against the old rows would be comparing the wrong positions.
+;;
+;;   It only applies when the height is unchanged. A grown or shrunk live region
+;;   needs rows reserved or erased, which is repaint work regardless.
+;;
+;; Both cases fall back to the full repaint, so the diff is an optimization that
+;; can always be declined -- never a second rendering path that could disagree
+;; with the first.
+(module harness-tui-diff)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-terminal-operation" :use *)
+
+(defn style-role-same? [(left StyleRole) (right StyleRole)] (-> bool)
+  (= (style-role-index left) (style-role-index right)))
+
+(defn style-role-index [(role StyleRole)] (-> i64)
+  (match role
+    (RolePrimary [] 0)
+    (RoleMuted [] 1)
+    (RoleSuccess [] 2)
+    (RoleWarning [] 3)
+    (RoleFailure [] 4)))
+
+;; Rows are compared by their spans, not by the flattened line text: two rows
+;; with identical characters but different styling are different rows, and
+;; repainting one as if it matched would leave the wrong colour on screen.
+(defn frame-line-same? [(left (ref FrameLine)) (right (ref FrameLine))] (-> bool)
+  (let [left-spans (load (field left spans))
+        right-spans (load (field right spans))
+        count (al-len [FrameSpan] left-spans)]
+    (if (!= count (al-len [FrameSpan] right-spans))
+        false
+        (let [(mut i) 0
+              (mut same) true]
+          (loop (if (>= (load i) count)
+                    (break)
+                    (let [a (al-get [FrameSpan] left-spans (load i))
+                          b (al-get [FrameSpan] right-spans (load i))]
+                      (if (and (str-eq (load (field a text)) (load (field b text)))
+                               (style-role-same? (load (field a role))
+                                                 (load (field b role))))
+                          (store! i (+ (load i) 1))
+                          (do (store! same false) (break))))))
+          (load same)))))
+
+;; True when the two frames differ in no row at all.
+(defn frame-same? [(left (ptr Frame)) (right (ptr Frame))] (-> bool)
+  (let [left-lines (load (field left lines))
+        right-lines (load (field right lines))
+        count (al-len [FrameLine] left-lines)]
+    (if (!= count (al-len [FrameLine] right-lines))
+        false
+        (let [(mut i) 0
+              (mut same) true]
+          (loop (if (>= (load i) count)
+                    (break)
+                    (if (frame-line-same? (al-get [FrameLine] left-lines (load i))
+                                          (al-get [FrameLine] right-lines (load i)))
+                        (store! i (+ (load i) 1))
+                        (do (store! same false) (break)))))
+          (load same)))))
+
+;; Can a diff be planned between these two live frames?
+(defn diffable? [(committed (ptr Frame))
+                 (previous (ptr Frame))
+                 (next (ptr Frame))] (-> bool)
+  (and (= (al-len [FrameLine] (load (field committed lines))) 0)
+       (= (al-len [FrameLine] (load (field previous lines)))
+          (al-len [FrameLine] (load (field next lines))))))
+
+(defn plan-write-line! [(operations (ptr (ArrayList TerminalOperation)))
+                        (line (ref FrameLine))] (-> i64)
+  (let [spans (load (field line spans))
+        count (al-len [FrameSpan] spans)
+        (mut i) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [span (al-get [FrameSpan] spans (load i))]
+                (push-operation! operations (TerminalSetRole (load (field span role))))
+                (push-operation! operations (TerminalWrite (load (field span text))))
+                (store! i (+ (load i) 1)))))
+    (push-operation! operations (TerminalResetStyle))
+    0))
+
+(defn push-operation! [(operations (ptr (ArrayList TerminalOperation)))
+                       (operation TerminalOperation)] (-> i64)
+  (al-push! [TerminalOperation] (mut operations) operation)
+  0)
+
+;; Plan the minimal repaint that turns `previous` into `next` on screen.
+;;
+;; The cursor is assumed to be on the LAST row of the live region, which is
+;; where the full planner leaves it, and is left there again -- so a diffed
+;; frame and a repainted frame are interchangeable from the caller's side.
+;;
+;; Returns the number of rows actually rewritten.
+(defn plan-live-diff! [(operations (ptr (ArrayList TerminalOperation)))
+                       (previous (ptr Frame))
+                       (next (ptr Frame))] (-> i64)
+  (let [previous-lines (load (field previous lines))
+        next-lines (load (field next lines))
+        height (al-len [FrameLine] next-lines)
+        (mut rewritten) 0]
+    (if (= height 0)
+        0
+        (do
+          ;; Walk to the top of the live region.
+          (when (> height 1)
+            (push-operation! operations (TerminalCursorUp (- height 1)))
+            0)
+          (let [(mut row) 0]
+            (loop (if (>= (load row) height)
+                      (break)
+                      (do
+                        (unless (frame-line-same?
+                                 (al-get [FrameLine] previous-lines (load row))
+                                 (al-get [FrameLine] next-lines (load row)))
+                          ;; Only a changed row costs an erase and a rewrite.
+                          (push-operation! operations (TerminalCarriageReturn))
+                          (push-operation! operations (TerminalEraseLine))
+                          (plan-write-line! operations
+                                            (al-get [FrameLine] next-lines (load row)))
+                          (store! rewritten (+ (load rewritten) 1)))
+                        (when (< (+ (load row) 1) height)
+                          (push-operation! operations (TerminalCursorDown 1))
+                          0)
+                        (store! row (+ (load row) 1))))))
+          (load rewritten)))))
