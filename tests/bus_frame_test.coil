@@ -1,0 +1,158 @@
+;; Framing tests. The transport below hands back at most `chunk` bytes per read,
+;; because the bug framing exists to prevent -- assuming a read returns
+;; everything asked for -- only appears under fragmentation. A transport that
+;; always returns the full request would let a broken `read-exactly` pass.
+(module harness-bus-frame-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-frame" :use *)
+
+(defstruct ChunkedTransport
+  [(bytes (array u8 4096))
+   (written i64)
+   (cursor i64)
+   (chunk i64)])
+
+(defn chunked-new [(slot (ptr ChunkedTransport)) (chunk i64)] (-> i64)
+  (store! (field slot written) 0)
+  (store! (field slot cursor) 0)
+  (store! (field slot chunk) chunk)
+  0)
+
+(impl Transport ChunkedTransport
+  (transport-read [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+                  (let [available (- (load (field self written)) (load (field self cursor)))
+                        bounded (if (< length (load (field self chunk)))
+                                    length
+                                    (load (field self chunk)))
+                        n (if (< available bounded) available bounded)
+                        source (primitive/cast (ptr u8) (field self bytes))
+                        destination (primitive/cast (ptr u8) buffer)
+                        (mut i) 0]
+                    (loop (if (>= (load i) n)
+                              (break)
+                              (do
+                                (store! (primitive/index destination (load i))
+                                        (load (primitive/index source
+                                                               (+ (load (field self cursor))
+                                                                  (load i)))))
+                                (store! i (+ (load i) 1)))))
+                    (store! (field self cursor) (+ (load (field self cursor)) n))
+                    n))
+  (transport-write [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+                   (let [destination (primitive/cast (ptr u8) (field self bytes))
+                         source (primitive/cast (ptr u8) buffer)
+                         (mut i) 0]
+                     (loop (if (>= (load i) length)
+                               (break)
+                               (do
+                                 (store! (primitive/index destination
+                                                          (+ (load (field self written))
+                                                             (load i)))
+                                         (load (primitive/index source (load i))))
+                                 (store! i (+ (load i) 1)))))
+                     (store! (field self written) (+ (load (field self written)) length))
+                     length))
+  (transport-close! [(self (ptr ChunkedTransport))] (-> i64) 0))
+
+;; Write one frame, read it back, and report whether the payload survived.
+(defn round-trip-payload? [(chunk i64) (payload (slice u8))] (-> bool)
+  (let [allocator (malloc-allocator)
+        transport (alloc/stack ChunkedTransport)
+        out (alloc/stack (slice u8))]
+    (chunked-new transport chunk)
+    (if (!= (frame-write! transport payload) FRAME_OK)
+        false
+        (if (!= (frame-read transport allocator out) FRAME_OK)
+            false
+            (str-eq (load out) payload)))))
+
+(deftest a-frame-round-trips-when-reads-return-everything
+         (assert (round-trip-payload? 4096 "hello bus")))
+
+;; One byte per read is the worst case a real socket can produce.
+(deftest a-frame-round-trips-when-reads-are-fragmented
+         (assert (round-trip-payload? 1 "hello bus"))
+         (assert (round-trip-payload? 3 "a somewhat longer payload than the chunk")))
+
+(deftest an-empty-frame-is-legal
+         (assert (round-trip-payload? 1 "")))
+
+;; Closing between frames is orderly shutdown; the reader must say so rather
+;; than reporting a failure.
+(deftest a-clean-close-between-frames-reports-eof
+         (let [allocator (malloc-allocator)
+               transport (alloc/stack ChunkedTransport)
+               out (alloc/stack (slice u8))]
+           (chunked-new transport 4096)
+           (assert (= (frame-read transport allocator out) FRAME_EOF))))
+
+;; Closing part-way through a frame is a protocol violation, and must be
+;; distinguishable from the orderly case above.
+(deftest a-close-mid-frame-reports-truncation
+         (let [allocator (malloc-allocator)
+               transport (alloc/stack ChunkedTransport)
+               out (alloc/stack (slice u8))]
+           (chunked-new transport 4096)
+           (assert (= (frame-write! transport "hello bus") FRAME_OK))
+           ;; Drop the last two payload bytes, as an interrupted peer would.
+           (store! (field transport written) (- (load (field transport written)) 2))
+           (assert (= (frame-read transport allocator out) FRAME_TRUNCATED))))
+
+;; A peer that claims an enormous length must be refused before anything is
+;; allocated on its behalf.
+(deftest an-oversized-length-is-refused-before-allocating
+         (let [allocator (malloc-allocator)
+               transport (alloc/stack ChunkedTransport)
+               out (alloc/stack (slice u8))
+               header (alloc/stack FrameHeader)]
+           (chunked-new transport 4096)
+           (header-encode! header (+ MAX_FRAME_BYTES 1))
+           (transport-write transport
+                            (primitive/cast (ptr i8) (field header bytes))
+                            FRAME_HEADER_BYTES)
+           (assert (= (frame-read transport allocator out) FRAME_TOO_LARGE))))
+
+(deftest the-header-encodes-big-endian
+         (let [header (alloc/stack FrameHeader)
+               bytes (primitive/cast (ptr u8) (field header bytes))]
+           (header-encode! header 66051)
+           (assert (= (primitive/cast i64 (load (primitive/index bytes 0))) 0))
+           (assert (= (primitive/cast i64 (load (primitive/index bytes 1))) 1))
+           (assert (= (primitive/cast i64 (load (primitive/index bytes 2))) 2))
+           (assert (= (primitive/cast i64 (load (primitive/index bytes 3))) 3))
+           (assert (= (header-decode header) 66051))))
+
+;; The layer above: an envelope encoded by a codec, framed, unframed, decoded.
+(deftest an-envelope-survives-encode-frame-unframe-decode
+         (let [allocator (malloc-allocator)
+               transport (alloc/stack ChunkedTransport)
+               codec (alloc/stack MessagePackCodec)
+               original (alloc/stack Envelope)
+               decoded (alloc/stack Envelope)
+               out (alloc/stack (slice u8))]
+           (chunked-new transport 1)
+           (store! original
+                   (envelope-new "msg-1"
+                                 (Agent "tui-7")
+                                 (Topic "run.chat-1")
+                                 (Instruction)
+                                 "summarize the diff"))
+           (match (codec-encode codec allocator original)
+             (Err [_] (assert false))
+             (Ok [encoded]
+                 (do
+                   (assert (= (frame-write! transport encoded) FRAME_OK))
+                   (assert (= (frame-read transport allocator out) FRAME_OK))
+                   (match (codec-decode codec allocator (load out) decoded)
+                     (Err [_] (assert false))
+                     (Ok [_]
+                         (do
+                           (assert (str-eq (load (field decoded id)) "msg-1"))
+                           (assert (address-eq (load (field decoded to))
+                                               (Topic "run.chat-1")))))))))))

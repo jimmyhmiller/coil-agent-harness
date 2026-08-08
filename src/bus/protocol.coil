@@ -202,17 +202,23 @@
 ;; Transport -- how bytes move
 ;; ---------------------------------------------------------------------------
 
-(defsum TransportError
-  (TransportClosed [])
-  (TransportFailed [(code i64)])
-  (TransportTruncated []))
+;; Transport results are plain integers rather than a Result, on purpose.
+;; Aggregates crossing a trait object are not ABI-stable across Coil backends,
+;; and the transport is the hottest dyn call in the system -- every frame byte
+;; goes through it. A non-negative value is a byte count (0 means the peer
+;; closed cleanly); a negative value is one of these codes.
+(const TRANSPORT_CLOSED -1)
+(const TRANSPORT_FAILED -2)
+
+(defn transport-error-name [(code i64)] (-> (slice u8))
+  (cond (= code TRANSPORT_CLOSED) "transport closed"
+        (= code TRANSPORT_FAILED) "transport failed"
+        :else "unknown transport error"))
 
 ;; A bidirectional byte stream. Deliberately smaller than a socket: a unix
 ;; socket, a TCP connection, and an in-memory pipe used by tests all satisfy it,
 ;; which is what keeps local and remote on one code path.
 (deftrait Transport [Self]
-  (transport-read [(self (ptr Self)) (buffer (ptr i8)) (length i64)]
-                  (-> (Result i64 TransportError)))
-  (transport-write [(self (ptr Self)) (buffer (ptr i8)) (length i64)]
-                   (-> (Result i64 TransportError)))
+  (transport-read [(self (ptr Self)) (buffer (ptr i8)) (length i64)] (-> i64))
+  (transport-write [(self (ptr Self)) (buffer (ptr i8)) (length i64)] (-> i64))
   (transport-close! [(self (ptr Self))] (-> i64)))

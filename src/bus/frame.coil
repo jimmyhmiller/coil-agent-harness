@@ -1,0 +1,158 @@
+;; Framing: turning a byte stream into discrete messages.
+;;
+;; A frame is a 4-byte big-endian length followed by exactly that many payload
+;; bytes. Framing is deliberately independent of the codec -- a MessagePack
+;; frame and a JSON frame are framed identically -- so a relay can forward or
+;; count frames without decoding them.
+;;
+;; Every function here returns a plain i64 for the same reason the Transport
+;; trait does: these sit directly on top of dyn calls, and aggregates crossing a
+;; trait object are not ABI-stable.
+(module harness-bus-frame)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "harness-bus-protocol" :use *)
+
+(const FRAME_HEADER_BYTES 4)
+
+;; A peer must not be able to make us allocate arbitrarily by claiming a huge
+;; length. 16 MiB is far above any real envelope and far below anything that
+;; threatens the process.
+(const MAX_FRAME_BYTES 16777216)
+
+(const FRAME_OK 0)
+(const FRAME_EOF -1)        ;; peer closed cleanly, between frames
+(const FRAME_TRUNCATED -2)  ;; peer closed mid-frame -- not the same as EOF
+(const FRAME_TOO_LARGE -3)
+(const FRAME_IO -4)
+(const FRAME_OOM -5)
+
+(defn frame-error-name [(code i64)] (-> (slice u8))
+  (cond (= code FRAME_OK) "ok"
+        (= code FRAME_EOF) "peer closed"
+        (= code FRAME_TRUNCATED) "peer closed mid-frame"
+        (= code FRAME_TOO_LARGE) "frame exceeds the maximum size"
+        (= code FRAME_IO) "transport failure"
+        (= code FRAME_OOM) "out of memory"
+        :else "unknown framing error"))
+
+;; Array lengths must be literals, so this 4 and FRAME_HEADER_BYTES are checked
+;; against each other below rather than sharing one definition.
+(defstruct FrameHeader [(bytes (array u8 4))])
+(static-assert (= (primitive/sizeof FrameHeader) FRAME_HEADER_BYTES)
+               "frame header must be exactly FRAME_HEADER_BYTES wide")
+
+;; A stream read returns what it has, not what was asked for, so every read of a
+;; known-length region has to loop. Getting this wrong shows up only under
+;; fragmentation, which is why it lives in one place.
+(defn read-exactly [(transport (dyn Transport))
+                    (buffer (ptr i8))
+                    (length i64)] (-> i64)
+  (let [(mut filled) 0]
+    (block :done
+           (loop (if (>= (load filled) length)
+                     (break)
+                     (let [n (transport-read transport
+                                             (primitive/index buffer (load filled))
+                                             (- length (load filled)))]
+                       (cond (= n 0)
+                               ;; Closing between frames is orderly shutdown;
+                               ;; closing part-way through one is a protocol
+                               ;; violation. The caller needs to tell them apart.
+                               (return-from :done
+                                            (if (= (load filled) 0)
+                                                FRAME_EOF
+                                                FRAME_TRUNCATED))
+                             (< n 0) (return-from :done FRAME_IO)
+                             :else (do (store! filled (+ (load filled) n)) 0)))))
+           FRAME_OK)))
+
+(defn write-all [(transport (dyn Transport))
+                 (buffer (ptr i8))
+                 (length i64)] (-> i64)
+  (let [(mut sent) 0]
+    (block :done
+           (loop (if (>= (load sent) length)
+                     (break)
+                     (let [n (transport-write transport
+                                              (primitive/index buffer (load sent))
+                                              (- length (load sent)))]
+                       (cond (< n 0) (return-from :done FRAME_IO)
+                             (= n 0) (return-from :done FRAME_TRUNCATED)
+                             :else (do (store! sent (+ (load sent) n)) 0)))))
+           FRAME_OK)))
+
+;; Big-endian so a frame header reads the same on every machine and is legible
+;; in a hex dump.
+(defn header-encode! [(header (ptr FrameHeader)) (length i64)] (-> i64)
+  (let [bytes (primitive/cast (ptr u8) (field header bytes))]
+    (store! (primitive/index bytes 0)
+            (primitive/cast u8 (primitive/iand (primitive/ishr length 24) 255)))
+    (store! (primitive/index bytes 1)
+            (primitive/cast u8 (primitive/iand (primitive/ishr length 16) 255)))
+    (store! (primitive/index bytes 2)
+            (primitive/cast u8 (primitive/iand (primitive/ishr length 8) 255)))
+    (store! (primitive/index bytes 3)
+            (primitive/cast u8 (primitive/iand length 255)))
+    0))
+
+(defn header-decode [(header (ptr FrameHeader))] (-> i64)
+  (let [bytes (primitive/cast (ptr u8) (field header bytes))]
+    (+ (+ (primitive/ishl (primitive/cast i64 (load (primitive/index bytes 0))) 24)
+          (primitive/ishl (primitive/cast i64 (load (primitive/index bytes 1))) 16))
+       (+ (primitive/ishl (primitive/cast i64 (load (primitive/index bytes 2))) 8)
+          (primitive/cast i64 (load (primitive/index bytes 3)))))))
+
+;; Write one frame. Returns FRAME_OK or a negative code.
+(defn frame-write! [(transport (dyn Transport)) (payload (slice u8))] (-> i64)
+  (let [length (slice-len payload)
+        header (alloc/stack FrameHeader)]
+    (if (> length MAX_FRAME_BYTES)
+        FRAME_TOO_LARGE
+        (do
+          (header-encode! header length)
+          (let [head (write-all transport
+                                (primitive/cast (ptr i8) (field header bytes))
+                                FRAME_HEADER_BYTES)]
+            (if (!= head FRAME_OK)
+                head
+                ;; A zero-length frame is legal and carries no body, so skip the
+                ;; write rather than calling with a null-ish pointer.
+                (if (= length 0)
+                    FRAME_OK
+                    (write-all transport
+                               (primitive/cast (ptr i8) (slice-data payload))
+                               length))))))))
+
+;; Read one frame into `out`. Returns FRAME_OK, FRAME_EOF when the peer closed
+;; cleanly between frames, or a negative code.
+(defn frame-read [(transport (dyn Transport))
+                  (allocator (ptr Allocator))
+                  (out (ptr (slice u8)))] (-> i64)
+  (let [header (alloc/stack FrameHeader)
+        head (read-exactly transport
+                           (primitive/cast (ptr i8) (field header bytes))
+                           FRAME_HEADER_BYTES)]
+    (if (!= head FRAME_OK)
+        head
+        (let [length (header-decode header)]
+          (cond (> length MAX_FRAME_BYTES) FRAME_TOO_LARGE
+                (= length 0)
+                  (do (store! out (slice-new [u8] (primitive/cast (ptr u8) 0) 0))
+                      FRAME_OK)
+                :else
+                  (let [buffer (unwrap-ptr [u8] (alloc-slice [u8] allocator length))]
+                    (if (= (primitive/cast i64 buffer) 0)
+                        FRAME_OOM
+                        (let [body (read-exactly transport
+                                                 (primitive/cast (ptr i8) buffer)
+                                                 length)]
+                          (if (!= body FRAME_OK)
+                              ;; A peer that closes here has already committed to
+                              ;; a length, so this is truncation even though the
+                              ;; read itself saw a clean close.
+                              (if (= body FRAME_EOF) FRAME_TRUNCATED body)
+                              (do (store! out (slice-new [u8] buffer length))
+                                  FRAME_OK))))))))))
