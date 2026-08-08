@@ -420,7 +420,7 @@
         (mut rendered-count) 0
         (mut model) (presentation-model-new allocator)
         (mut policy) (transcript-policy-new)
-        (mut inline-renderer) (inline-renderer-new)
+        (mut inline-renderer) (inline-renderer-new-retaining allocator)
         (mut run-input) (input-reader-lifecycle-new)
         (mut run-decoder) (input-decoder-new allocator)
         (mut input-open) false
@@ -590,6 +590,9 @@
       (input-reader-finish! allocator (mut run-input) profile)
       (store! input-open false)
       0)
+    ;; Release the retained live frame; the watch is over and its last
+    ;; retention would otherwise outlive the loop.
+    (inline-renderer-close! (mut inline-renderer))
     (tui-output-write-line allocator 1 "")
     0))
 
