@@ -1,0 +1,161 @@
+;; The diff planner is only useful if the renderer actually reaches it across
+;; consecutive frames, which needs the previous frame to survive the arena it
+;; was built in. These drive the real renderer twice and count what the second
+;; plan costs.
+(module harness-tui-render-diff-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-terminal-operation" :use *)
+(import "harness-tui-render-inline" :use *)
+
+(defn push-row! [(frame (ptr Frame)) (text (slice u8))] (-> i64)
+  (let [allocator (load (field frame allocator))
+        (mut spans) (al-new [FrameSpan] allocator)]
+    (al-push! [FrameSpan] (mut spans) (frame-span text (str-len text) (RolePrimary)))
+    (frame-push-spans! frame (load spans))))
+
+(defn build-live [(allocator (ptr Allocator))
+                  (slot (ptr Frame))
+                  (rows i64)
+                  (changed-row i64)] (-> i64)
+  (store! slot (frame-new allocator))
+  (let [(mut i) 0]
+    (loop (if (>= (load i) rows)
+              (break)
+              (do
+                (push-row! slot (if (= (load i) changed-row) "CHANGED" "steady row"))
+                (store! i (+ (load i) 1))))))
+  0)
+
+(defn count-writes [(operations (ArrayList TerminalOperation))] (-> i64)
+  (let [count (al-len [TerminalOperation] operations)
+        (mut i) 0
+        (mut found) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (do
+                (match-else (al-get [TerminalOperation] operations (load i))
+                  (TerminalWrite [_] (store! found (+ (load found) 1)))
+                  (_ 0))
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+(defn count-erases [(operations (ArrayList TerminalOperation))] (-> i64)
+  (let [count (al-len [TerminalOperation] operations)
+        (mut i) 0
+        (mut found) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (do
+                (match-else (al-get [TerminalOperation] operations (load i))
+                  (TerminalEraseLine [] (store! found (+ (load found) 1)))
+                  (_ 0))
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+;; The first plan has nothing retained, so it must repaint -- and the second,
+;; identical, must not. The contrast between the two numbers is the whole claim.
+(deftest a-second-identical-frame-costs-nothing-to-repaint
+         (let [allocator (malloc-allocator)
+               renderer (alloc/stack InlineRenderer)
+               committed (alloc/stack Frame)
+               live (alloc/stack Frame)]
+           (store! renderer (inline-renderer-new-retaining allocator))
+           (store! committed (frame-new allocator))
+           (build-live allocator live 20 -1)
+
+           (let [first-plan (inline-renderer-plan-with! renderer allocator committed live)]
+             ;; Nothing retained yet, so all twenty rows are painted. There are
+             ;; no erases because there was no previous live region to clear --
+             ;; writes are what the first frame costs.
+             (assert (= (count-writes first-plan) 20)))
+
+           ;; A fresh frame with identical content, as a re-render would build.
+           (let [again (alloc/stack Frame)]
+             (build-live allocator again 20 -1)
+             (let [second-plan (inline-renderer-plan-with! renderer allocator committed again)]
+               (assert (= (count-erases second-plan) 0))
+               (assert (= (count-writes second-plan) 0))))
+
+           (inline-renderer-close! renderer)))
+
+(deftest a-later-frame-repaints-only-the-row-that-changed
+         (let [allocator (malloc-allocator)
+               renderer (alloc/stack InlineRenderer)
+               committed (alloc/stack Frame)
+               live (alloc/stack Frame)]
+           (store! renderer (inline-renderer-new-retaining allocator))
+           (store! committed (frame-new allocator))
+           (build-live allocator live 20 -1)
+           (inline-renderer-plan-with! renderer allocator committed live)
+
+           (let [changed (alloc/stack Frame)]
+             (build-live allocator changed 20 11)
+             (let [plan (inline-renderer-plan-with! renderer allocator committed changed)]
+               (assert (= (count-erases plan) 1))))
+
+           (inline-renderer-close! renderer)))
+
+;; Retention must survive many frames, not just one -- if the copy borrowed the
+;; caller's arena this would read freed memory rather than diffing.
+(deftest retention-holds-across-many-frames
+         (let [allocator (malloc-allocator)
+               renderer (alloc/stack InlineRenderer)
+               committed (alloc/stack Frame)]
+           (store! renderer (inline-renderer-new-retaining allocator))
+           (store! committed (frame-new allocator))
+           (let [(mut i) 0]
+             (loop (if (>= (load i) 50)
+                       (break)
+                       (let [live (alloc/stack Frame)]
+                         (build-live allocator live 8 -1)
+                         (let [plan (inline-renderer-plan-with! renderer allocator committed live)]
+                           ;; Every frame after the first is identical, so only
+                           ;; the first may repaint.
+                           (when (> (load i) 0)
+                             (assert (= (count-erases plan) 0))))
+                         (store! i (+ (load i) 1))))))
+           (inline-renderer-close! renderer)))
+
+;; Committed output moves the live region, so the diff must be declined even
+;; though the live frame itself is unchanged.
+(deftest committed-output-forces-a-repaint
+         (let [allocator (malloc-allocator)
+               renderer (alloc/stack InlineRenderer)
+               committed (alloc/stack Frame)
+               live (alloc/stack Frame)]
+           (store! renderer (inline-renderer-new-retaining allocator))
+           (store! committed (frame-new allocator))
+           (build-live allocator live 6 -1)
+           (inline-renderer-plan-with! renderer allocator committed live)
+
+           (let [again (alloc/stack Frame)
+                 with-commit (alloc/stack Frame)]
+             (build-live allocator again 6 -1)
+             (store! with-commit (frame-new allocator))
+             (push-row! with-commit "a committed line")
+             (let [plan (inline-renderer-plan-with! renderer allocator with-commit again)]
+               (assert (> (count-erases plan) 0))))
+
+           (inline-renderer-close! renderer)))
+
+;; The original constructor must keep its original behaviour: always repaint.
+(deftest a-non-retaining-renderer-still-repaints
+         (let [allocator (malloc-allocator)
+               renderer (alloc/stack InlineRenderer)
+               committed (alloc/stack Frame)
+               live (alloc/stack Frame)
+               again (alloc/stack Frame)]
+           (store! renderer (inline-renderer-new))
+           (store! committed (frame-new allocator))
+           (build-live allocator live 10 -1)
+           (build-live allocator again 10 -1)
+           (inline-renderer-plan-with! renderer allocator committed live)
+           (let [plan (inline-renderer-plan-with! renderer allocator committed again)]
+             (assert (> (count-erases plan) 0)))))

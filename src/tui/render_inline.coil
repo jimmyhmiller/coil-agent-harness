@@ -2,6 +2,8 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-tui-diff" :use *)
 (import "harness-tui-frame" :use *)
 (import "harness-tui-terminal-operation" :use *)
 
@@ -9,11 +11,64 @@
 ;; would scroll the terminal whenever that row is at the bottom of the viewport,
 ;; turning every streamed delta into another scrollback entry. Stable output is
 ;; the only output allowed to advance beyond the final rendered row.
-(defstruct InlineRenderer [(previous-live-height i64)])
+;; `owner` is null for a renderer that does not retain frames, which keeps the
+;; original constructor working and makes diffing strictly opt-in. A retaining
+;; renderer keeps its own deep copy of the last live frame so the next one can
+;; be diffed against it; see harness-tui-diff for why it copies rather than
+;; hashes.
+(defstruct InlineRenderer
+  [(previous-live-height i64)
+   (owner (ptr Allocator))
+   (retained Frame)
+   (retained-domain (ptr AllocationDomain))
+   (has-retained bool)])
+
+;; Retain the live frame for the next plan, releasing the previous retention.
+;; The old domain is closed only AFTER the new copy exists, so a failed
+;; allocation leaves the renderer with no retention rather than a dangling one.
+(defn inline-renderer-retain! [(renderer (ptr InlineRenderer))
+                               (live (ptr Frame))] (-> i64)
+  (let [owner (load (field renderer owner))]
+    (if (= owner (cast (ptr Allocator) 0))
+        0
+        (let [domain (allocation-domain-open owner)]
+          (if (not (allocation-domain-valid? domain))
+              (do (store! (field renderer has-retained) false) 0)
+              (let [previous-domain (load (field renderer retained-domain))
+                    had-previous (load (field renderer has-retained))
+                    clone (alloc/stack Frame)]
+                (frame-clone! (allocation-domain-allocator domain) live clone)
+                (store! (field renderer retained) (load clone))
+                (store! (field renderer retained-domain) domain)
+                (store! (field renderer has-retained) true)
+                (when had-previous
+                  (allocation-domain-close! owner previous-domain)
+                  0)
+                0))))))
+
+;; Release the retained frame. A renderer that outlives its allocator must be
+;; closed, or the last retention leaks.
+(defn inline-renderer-close! [(renderer (ptr InlineRenderer))] (-> i64)
+  (when (load (field renderer has-retained))
+    (allocation-domain-close! (load (field renderer owner))
+                              (load (field renderer retained-domain)))
+    (store! (field renderer has-retained) false)
+    0)
+  0)
+
+;; A renderer that diffs consecutive live frames instead of repainting them.
+(defn inline-renderer-new-retaining [(owner (ptr Allocator))] (-> InlineRenderer)
+  (let [renderer (alloc/stack InlineRenderer)]
+    (store! (field renderer previous-live-height) 0)
+    (store! (field renderer owner) owner)
+    (store! (field renderer has-retained) false)
+    (load renderer)))
 
 (defn inline-renderer-new [] (-> InlineRenderer)
   (let [renderer (alloc/stack InlineRenderer)]
     (store! (field renderer previous-live-height) 0)
+    (store! (field renderer owner) (cast (ptr Allocator) 0))
+    (store! (field renderer has-retained) false)
     (load renderer)))
 
 (defn inline-operations-new [(allocator (ptr Allocator))] (-> (ArrayList TerminalOperation))
@@ -140,12 +195,21 @@
                                   (live (ptr Frame))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
         live-height (al-len [FrameLine] (load (field live lines)))]
-    (inline-plan-clear-live! (mut operations)
-                             (load (field renderer previous-live-height)))
-    (inline-plan-frame! (mut operations) committed)
-    (inline-plan-reserve-live! (mut operations) live-height)
-    (inline-plan-live-frame! (mut operations) live)
+    ;; Diff when the retained frame makes it valid; otherwise repaint. The two
+    ;; paths leave the cursor in the same place and produce the same screen, so
+    ;; declining the diff is always safe.
+    (if (and (load (field renderer has-retained))
+             (diffable? committed (field renderer retained) live))
+        (plan-live-diff! (mut operations) (field renderer retained) live)
+        (do
+          (inline-plan-clear-live! (mut operations)
+                                   (load (field renderer previous-live-height)))
+          (inline-plan-frame! (mut operations) committed)
+          (inline-plan-reserve-live! (mut operations) live-height)
+          (inline-plan-live-frame! (mut operations) live)
+          0))
     (store! (field renderer previous-live-height) live-height)
+    (inline-renderer-retain! renderer live)
     (load operations)))
 
 (defn inline-renderer-plan! [(renderer (ptr InlineRenderer))

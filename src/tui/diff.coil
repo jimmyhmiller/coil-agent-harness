@@ -145,3 +145,52 @@
                           0)
                         (store! row (+ (load row) 1))))))
           (load rewritten)))))
+
+;; ---------------------------------------------------------------------------
+;; Retention
+;;
+;; Diffing needs the previous frame to still exist when the next one arrives,
+;; but frames are built in a per-frame scratch arena that is gone by then. So
+;; the renderer keeps its own deep copy.
+;;
+;; Copying rather than hashing is deliberate. A 64-bit content hash would be
+;; cheaper and is what many terminal diffs use, but a collision shows up as a
+;; row that silently never repaints -- a wrong character left on screen with no
+;; way to notice. A retained copy is bounded by the terminal height (tens of
+;; rows), so exactness costs almost nothing here and removes the failure mode
+;; entirely.
+;; ---------------------------------------------------------------------------
+
+(defn copy-text [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) text)
+    (sb-finish! (mut buffer))))
+
+;; Deep-copy `source` into `out`, owning every byte in `allocator`. The copy
+;; must not borrow the source's text: the whole point is to outlive it.
+(defn frame-clone! [(allocator (ptr Allocator))
+                    (source (ptr Frame))
+                    (out (ptr Frame))] (-> i64)
+  (store! out (frame-new allocator))
+  (let [lines (load (field source lines))
+        count (al-len [FrameLine] lines)
+        (mut row) 0]
+    (loop (if (>= (load row) count)
+              (break)
+              (let [line (al-get [FrameLine] lines (load row))
+                    spans (load (field line spans))
+                    span-count (al-len [FrameSpan] spans)
+                    (mut copied) (al-new [FrameSpan] allocator)
+                    (mut span-at) 0]
+                (loop (if (>= (load span-at) span-count)
+                          (break)
+                          (let [span (al-get [FrameSpan] spans (load span-at))]
+                            (al-push! [FrameSpan]
+                                      (mut copied)
+                                      (frame-span (copy-text allocator (load (field span text)))
+                                                  (load (field span cells))
+                                                  (load (field span role))))
+                            (store! span-at (+ (load span-at) 1)))))
+                (frame-push-spans! out (load copied))
+                (store! row (+ (load row) 1)))))
+    0))
