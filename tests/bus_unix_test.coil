@@ -1,0 +1,128 @@
+;; The unix carrier, exercised through exactly the same framing and codec calls
+;; as the TCP carrier in bus_tcp_test. Those calls take a `(dyn Transport)`, so
+;; the fact that this file changes only the setup -- and not a single assertion
+;; about frames or envelopes -- is the evidence that the abstraction holds.
+(module harness-bus-unix-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :as str :use *)
+(import "coil.time" :as time)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-frame" :use *)
+(import "harness-bus-unix" :use *)
+
+;; Declared here rather than in coil.socket on purpose: externs are not deduped
+;; across modules, and `unlink` already exists in the compiler's own modules, so
+;; a second declaration in the stdlib would break any binary pulling in both.
+(extern unlink :cc c [(ptr i8)] (-> i32))
+
+(const SOCKET_PATH "/tmp/harness-bus-unix-test.sock")
+
+;; The stdlib cannot tell a stale socket file from a live server's, so removing
+;; it is the caller's job. Here the test owns the path outright.
+(defn remove-socket-path [] (-> i64)
+  (let [c-path (str/str->cstr (malloc-allocator) SOCKET_PATH)]
+    (if (= (cast i64 c-path) 0)
+        0
+        (do (unlink c-path) 0))))
+
+(defn connect-pair [(listener (ptr socket/UnixListener))
+                    (client (ptr UnixTransport))
+                    (server (ptr UnixTransport))] (-> bool)
+  (remove-socket-path)
+  (match (socket/unix-listen listener SOCKET_PATH 8)
+    (Err [_] false)
+    (Ok [_]
+        (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
+            false
+            (match (time/duration-seconds 2)
+              (Err [_] false)
+              (Ok [duration]
+                  (let [accepted (alloc/stack socket/UnixConnection)]
+                    (match (socket/unix-accept-for listener accepted duration)
+                      (Err [_] false)
+                      (Ok [_]
+                          (do (unix-transport-adopt! server (load accepted))
+                              true))))))))))
+
+(defn teardown [(listener (ptr socket/UnixListener))
+                (client (ptr UnixTransport))
+                (server (ptr UnixTransport))] (-> i64)
+  (transport-close! client)
+  (transport-close! server)
+  (socket/unix-listener-close! listener)
+  (remove-socket-path))
+
+(deftest an-envelope-crosses-a-unix-socket
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               client (alloc/stack UnixTransport)
+               server (alloc/stack UnixTransport)
+               codec (alloc/stack MessagePackCodec)
+               original (alloc/stack Envelope)
+               decoded (alloc/stack Envelope)
+               out (alloc/stack (slice u8))]
+           (assert (connect-pair listener client server))
+           (store! original
+                   (envelope-new "msg-1"
+                                 (Agent "tui-7")
+                                 (Topic "run.chat-1")
+                                 (Instruction)
+                                 "summarize the diff"))
+           (match (codec-encode codec allocator original)
+             (Err [_] (assert false))
+             (Ok [encoded]
+                 (do
+                   (assert (= (frame-write! client encoded) FRAME_OK))
+                   (assert (= (frame-read server allocator out) FRAME_OK))
+                   (match (codec-decode codec allocator (load out) decoded)
+                     (Err [_] (assert false))
+                     (Ok [_]
+                         (do
+                           (assert (str-eq (load (field decoded id)) "msg-1"))
+                           (assert (address-eq (load (field decoded to))
+                                               (Topic "run.chat-1")))))))))
+           (teardown listener client server)))
+
+(deftest back-to-back-frames-stay-separate-on-one-unix-connection
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               client (alloc/stack UnixTransport)
+               server (alloc/stack UnixTransport)
+               first-out (alloc/stack (slice u8))
+               second-out (alloc/stack (slice u8))
+               third-out (alloc/stack (slice u8))]
+           (assert (connect-pair listener client server))
+           (assert (= (frame-write! client "one") FRAME_OK))
+           (assert (= (frame-write! client "") FRAME_OK))
+           (assert (= (frame-write! client "three") FRAME_OK))
+           (assert (= (frame-read server allocator first-out) FRAME_OK))
+           (assert (= (frame-read server allocator second-out) FRAME_OK))
+           (assert (= (frame-read server allocator third-out) FRAME_OK))
+           (assert (str-eq (load first-out) "one"))
+           (assert (= (slice-len (load second-out)) 0))
+           (assert (str-eq (load third-out) "three"))
+           (teardown listener client server)))
+
+(deftest a-closed-unix-peer-reports-eof-not-failure
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               client (alloc/stack UnixTransport)
+               server (alloc/stack UnixTransport)
+               out (alloc/stack (slice u8))]
+           (assert (connect-pair listener client server))
+           (transport-close! client)
+           (assert (= (frame-read server allocator out) FRAME_EOF))
+           (teardown listener client server)))
+
+;; Dialling a path nothing is serving must fail rather than hang or succeed --
+;; this is the check the coil session used to prove the stdlib binding really
+;; executes, and it is worth keeping at this layer too.
+(deftest connecting-to-a-missing-socket-path-fails
+         (let [client (alloc/stack UnixTransport)]
+           (remove-socket-path)
+           (assert (= (unix-transport-connect! client SOCKET_PATH) TRANSPORT_FAILED))))

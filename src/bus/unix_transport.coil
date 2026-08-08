@@ -1,0 +1,63 @@
+;; A unix-socket carrier for the bus.
+;;
+;; Sibling of tcp_transport.coil, implementing the same Transport trait. Nothing
+;; above this file changes to use it -- that is the whole point of the trait:
+;; local and remote differ in one module, not in the protocol.
+;;
+;; A unix socket is addressed by a filesystem path, so the path's permissions
+;; are the authentication. There is no port to allocate and no bearer token to
+;; present or leak; a peer that can open the file is authorized, and one that
+;; cannot is not.
+;;
+;; The socket file's lifecycle belongs to the caller. `unix-listen` fails with
+;; EADDRINUSE on a path that already exists, including one left behind by a
+;; process that died, and coil.socket deliberately does not unlink on the
+;; caller's behalf because it cannot tell a stale endpoint from a live server's.
+;; A server that wants to rebind must remove the path itself, having decided
+;; that nothing is serving it.
+(module harness-bus-unix)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "harness-bus-protocol" :use *)
+
+(defstruct UnixTransport [(connection socket/UnixConnection)])
+
+;; Take ownership of a connection accepted elsewhere (the server side).
+(defn unix-transport-adopt! [(transport (ptr UnixTransport))
+                             (connection socket/UnixConnection)] (-> i64)
+  (store! (field transport connection) connection)
+  0)
+
+;; Dial a peer (the client side). Returns 0, or a negative transport code.
+(defn unix-transport-connect! [(transport (ptr UnixTransport))
+                               (path (slice u8))] (-> i64)
+  (match (socket/unix-connect (field transport connection) path)
+    (Err [failure] TRANSPORT_FAILED)
+    (Ok [_] 0)))
+
+;; See tcp_transport.coil: going through coil.socket's own stable error
+;; numbering rather than matching the sum keeps this working as variants are
+;; added, and a peer disconnecting is the only case the bus distinguishes.
+(const SOCKET_ERROR_CLOSED 2)
+
+(defn socket-error-transport-code [(failure socket/SocketError)] (-> i64)
+  (if (= (socket/socket-error-code failure) SOCKET_ERROR_CLOSED)
+      TRANSPORT_CLOSED
+      TRANSPORT_FAILED))
+
+(impl Transport UnixTransport
+  (transport-read [(self (ptr UnixTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+                  (match (socket/unix-read (field self connection) buffer length)
+                    (Err [failure] (socket-error-transport-code failure))
+                    ;; 0 is a clean close, which framing reads as EOF between
+                    ;; frames and truncation part-way through one.
+                    (Ok [n] n)))
+  (transport-write [(self (ptr UnixTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+                   (match (socket/unix-write (field self connection) buffer length)
+                     (Err [failure] (socket-error-transport-code failure))
+                     (Ok [n] n)))
+  (transport-close! [(self (ptr UnixTransport))] (-> i64)
+                    (socket/unix-connection-close! (field self connection))))
