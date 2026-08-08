@@ -1,0 +1,114 @@
+;; End-to-end over a real socket: encode, frame, cross a loopback TCP
+;; connection, unframe, decode. The in-memory transport in bus_frame_test cannot
+;; catch a mistake in the socket adapter itself -- byte counts, partial writes,
+;; or a mishandled clean close -- so this exercises the one layer that talks to
+;; the kernel.
+(module harness-bus-tcp-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :use *)
+(import "coil.time" :as time)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-frame" :use *)
+(import "harness-bus-tcp" :use *)
+
+;; Bring up a connected pair on the loopback interface. Port 0 lets the kernel
+;; pick, so the test never collides with a real service or another test run.
+(defn connect-pair [(allocator (ptr Allocator))
+                    (listener (ptr socket/TcpListener))
+                    (client (ptr TcpTransport))
+                    (server (ptr TcpTransport))] (-> bool)
+  (match (socket/tcp-listen allocator listener "127.0.0.1" 0 true 8)
+    (Err [_] false)
+    (Ok [_]
+        (match (socket/tcp-listener-port listener)
+          (Err [_] false)
+          (Ok [port]
+              (if (!= (tcp-transport-connect! allocator client "127.0.0.1" port) 0)
+                  false
+                  (match (time/duration-seconds 2)
+                    (Err [_] false)
+                    (Ok [duration]
+                        (let [accepted (alloc/stack socket/TcpConnection)]
+                          (match (socket/tcp-accept-for listener accepted duration)
+                            (Err [_] false)
+                            (Ok [_]
+                                (do (tcp-transport-adopt! server (load accepted))
+                                    true))))))))))))
+
+(deftest an-envelope-crosses-a-real-socket
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/TcpListener)
+               client (alloc/stack TcpTransport)
+               server (alloc/stack TcpTransport)
+               codec (alloc/stack MessagePackCodec)
+               original (alloc/stack Envelope)
+               decoded (alloc/stack Envelope)
+               out (alloc/stack (slice u8))]
+           (assert (connect-pair allocator listener client server))
+           (store! original
+                   (envelope-new "msg-1"
+                                 (Agent "tui-7")
+                                 (Topic "run.chat-1")
+                                 (Instruction)
+                                 "summarize the diff"))
+           (match (codec-encode codec allocator original)
+             (Err [_] (assert false))
+             (Ok [encoded]
+                 (do
+                   (assert (= (frame-write! client encoded) FRAME_OK))
+                   (assert (= (frame-read server allocator out) FRAME_OK))
+                   (match (codec-decode codec allocator (load out) decoded)
+                     (Err [_] (assert false))
+                     (Ok [_]
+                         (do
+                           (assert (str-eq (load (field decoded id)) "msg-1"))
+                           (assert (str-eq (load (field decoded body))
+                                           "summarize the diff"))
+                           (assert (address-eq (load (field decoded to))
+                                               (Topic "run.chat-1")))))))))
+           (transport-close! client)
+           (transport-close! server)
+           (socket/tcp-listener-close! listener)))
+
+;; Several frames on one connection must not bleed into each other -- this is
+;; what the length prefix buys, and a socket delivers them coalesced.
+(deftest back-to-back-frames-stay-separate-on-one-connection
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/TcpListener)
+               client (alloc/stack TcpTransport)
+               server (alloc/stack TcpTransport)
+               first-out (alloc/stack (slice u8))
+               second-out (alloc/stack (slice u8))
+               third-out (alloc/stack (slice u8))]
+           (assert (connect-pair allocator listener client server))
+           (assert (= (frame-write! client "one") FRAME_OK))
+           (assert (= (frame-write! client "") FRAME_OK))
+           (assert (= (frame-write! client "three") FRAME_OK))
+           (assert (= (frame-read server allocator first-out) FRAME_OK))
+           (assert (= (frame-read server allocator second-out) FRAME_OK))
+           (assert (= (frame-read server allocator third-out) FRAME_OK))
+           (assert (str-eq (load first-out) "one"))
+           (assert (= (slice-len (load second-out)) 0))
+           (assert (str-eq (load third-out) "three"))
+           (transport-close! client)
+           (transport-close! server)
+           (socket/tcp-listener-close! listener)))
+
+;; A peer closing between frames is orderly shutdown, and must arrive as EOF
+;; rather than as a transport failure.
+(deftest a-closed-peer-reports-eof-not-failure
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/TcpListener)
+               client (alloc/stack TcpTransport)
+               server (alloc/stack TcpTransport)
+               out (alloc/stack (slice u8))]
+           (assert (connect-pair allocator listener client server))
+           (transport-close! client)
+           (assert (= (frame-read server allocator out) FRAME_EOF))
+           (transport-close! server)
+           (socket/tcp-listener-close! listener)))
