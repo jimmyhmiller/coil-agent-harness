@@ -1,0 +1,218 @@
+;; The agent bus wire protocol.
+;;
+;; Three abstractions, each a trait, so that none of the three is baked in:
+;;
+;;   Transport  -- how bytes move (a unix socket locally, TCP for a remote
+;;                 harness). Remote execution is not a separate protocol; it is
+;;                 this one over a different carrier.
+;;   Codec      -- how an envelope becomes bytes. MessagePack on the wire, JSON
+;;                 when a human or a foreign client has to read it. The bus
+;;                 itself never names a format.
+;;   Address    -- who a message is for. Participants name peers and topics,
+;;                 never connections, so a subagent, a TUI, and a remote
+;;                 operator are the same kind of thing to the router.
+;;
+;; The envelope body is opaque bytes on purpose. Routing must not require
+;; understanding payloads, so a relay can forward a message whose type it has
+;; never seen -- and a payload can use a different codec than the envelope.
+(module harness-bus-protocol)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coil.serde" :use *)
+(import "coil.serde.derive" :use *)
+(import "coil.serde.json" :use *)
+(import "coil.serde.msgpack" :use *)
+
+;; ---------------------------------------------------------------------------
+;; Addressing
+;; ---------------------------------------------------------------------------
+
+;; A destination. `Agent` is one mailbox -- a run, a subagent, an attached TUI.
+;; `Topic` is publish/subscribe, which is what lets several observers watch one
+;; run without the run knowing they exist. `Service` is the harness itself.
+(defsum Address
+  (Agent [(id (slice u8))])
+  (Topic [(name (slice u8))])
+  (Broadcast [])
+  (Service []))
+
+(derive-serde-sum Address)
+
+(defn address-eq [(left Address) (right Address)] (-> bool)
+  (match left
+    (Agent [left-id]
+           (match right
+             (Agent [right-id] (str-eq left-id right-id))
+             (Topic [_] false)
+             (Broadcast [] false)
+             (Service [] false)))
+    (Topic [left-name]
+           (match right
+             (Topic [right-name] (str-eq left-name right-name))
+             (Agent [_] false)
+             (Broadcast [] false)
+             (Service [] false)))
+    (Broadcast []
+               (match right
+                 (Broadcast [] true)
+                 (Agent [_] false)
+                 (Topic [_] false)
+                 (Service [] false)))
+    (Service []
+             (match right
+               (Service [] true)
+               (Agent [_] false)
+               (Topic [_] false)
+               (Broadcast [] false)))))
+
+;; True when a message addressed to `to` should be delivered to `subject`.
+;; Broadcast reaches everyone; a topic reaches its subscribers, which the
+;; router resolves before calling this.
+(defn address-matches? [(to Address) (subject Address)] (-> bool)
+  (match to
+    (Broadcast [] true)
+    (Agent [_] (address-eq to subject))
+    (Topic [_] (address-eq to subject))
+    (Service [] (address-eq to subject))))
+
+;; ---------------------------------------------------------------------------
+;; Messages
+;; ---------------------------------------------------------------------------
+
+;; What a message is for. Kept deliberately small: anything richer belongs in
+;; the body, where it can evolve without a protocol version bump.
+(defsum MessageKind
+  (Instruction [])
+  (Reply [])
+  (Event [])
+  (Subscribe [])
+  (Unsubscribe [])
+  (Ping [])
+  (Pong []))
+
+(derive-serde-sum MessageKind)
+
+(const PROTOCOL_VERSION 1)
+
+;; One routable message. `correlation` carries the id of the message being
+;; answered, which is what makes request/response work over a bus that is
+;; otherwise fire-and-forget.
+(defstruct Envelope
+  [(version i64)
+   (id (slice u8))
+   (correlation (Option (slice u8)))
+   (from Address)
+   (to Address)
+   (kind MessageKind)
+   (body (slice u8))])
+
+(derive-serde Envelope)
+
+(defn envelope-new [(id (slice u8))
+                    (from Address)
+                    (to Address)
+                    (kind MessageKind)
+                    (body (slice u8))] (-> Envelope)
+  (let [envelope (alloc/stack Envelope)]
+    (store! (field envelope version) PROTOCOL_VERSION)
+    (store! (field envelope id) id)
+    (store! (field envelope correlation) (None [(slice u8)]))
+    (store! (field envelope from) from)
+    (store! (field envelope to) to)
+    (store! (field envelope kind) kind)
+    (store! (field envelope body) body)
+    (load envelope)))
+
+;; A reply is an ordinary message that names the message it answers, so the
+;; router needs no special case for it.
+(defn envelope-reply [(id (slice u8))
+                      (request (ptr Envelope))
+                      (from Address)
+                      (body (slice u8))] (-> Envelope)
+  (let [envelope (alloc/stack Envelope)]
+    (store! envelope
+            (envelope-new id from (load (field request from)) (Reply) body))
+    (store! (field envelope correlation) (Some (load (field request id))))
+    (load envelope)))
+
+;; ---------------------------------------------------------------------------
+;; Codec -- how an envelope becomes bytes
+;; ---------------------------------------------------------------------------
+
+;; A wire format. Adding a format is one impl and touches nothing else.
+;;
+;; Envelopes cross this boundary by pointer, never by value: passing an
+;; aggregate containing sums through a trait object is not ABI-stable across
+;; Coil backends, and the failure mode is a segfault at the call rather than a
+;; type error. `codec-decode` therefore writes through `out` and returns only a
+;; status. The same convention is used for dynamic calls in run_service.
+(deftrait Codec [Self]
+  (codec-name [(self (ptr Self))] (-> (slice u8)))
+  (codec-encode [(self (ptr Self))
+                 (allocator (ptr Allocator))
+                 (envelope (ptr Envelope))]
+                (-> (Result (slice u8) SerError)))
+  (codec-decode [(self (ptr Self))
+                 (allocator (ptr Allocator))
+                 (source (slice u8))
+                 (out (ptr Envelope))]
+                (-> (Result i64 DeError))))
+
+;; The default on the wire: compact, binary, no escaping cost.
+(defstruct MessagePackCodec [(reserved u8)])
+
+(impl Codec MessagePackCodec
+  (codec-name [(self (ptr MessagePackCodec))] (-> (slice u8)) "msgpack")
+  (codec-encode [(self (ptr MessagePackCodec))
+                 (allocator (ptr Allocator))
+                 (envelope (ptr Envelope))]
+                (-> (Result (slice u8) SerError))
+                (to-msgpack-bytes [Envelope] allocator (load envelope)))
+  (codec-decode [(self (ptr MessagePackCodec))
+                 (allocator (ptr Allocator))
+                 (source (slice u8))
+                 (out (ptr Envelope))]
+                (-> (Result i64 DeError))
+                (match (from-msgpack [Envelope] allocator source)
+                  (Err [failure] (Err failure))
+                  (Ok [decoded] (do (store! out decoded) (Ok 0))))))
+
+;; For debugging, journals, and clients that would rather not speak binary.
+(defstruct JsonCodec [(reserved u8)])
+
+(impl Codec JsonCodec
+  (codec-name [(self (ptr JsonCodec))] (-> (slice u8)) "json")
+  (codec-encode [(self (ptr JsonCodec))
+                 (allocator (ptr Allocator))
+                 (envelope (ptr Envelope))]
+                (-> (Result (slice u8) SerError))
+                (to-json-str [Envelope] allocator (load envelope)))
+  (codec-decode [(self (ptr JsonCodec))
+                 (allocator (ptr Allocator))
+                 (source (slice u8))
+                 (out (ptr Envelope))]
+                (-> (Result i64 DeError))
+                (match (from-json [Envelope] allocator source)
+                  (Err [failure] (Err failure))
+                  (Ok [decoded] (do (store! out decoded) (Ok 0))))))
+
+;; ---------------------------------------------------------------------------
+;; Transport -- how bytes move
+;; ---------------------------------------------------------------------------
+
+(defsum TransportError
+  (TransportClosed [])
+  (TransportFailed [(code i64)])
+  (TransportTruncated []))
+
+;; A bidirectional byte stream. Deliberately smaller than a socket: a unix
+;; socket, a TCP connection, and an in-memory pipe used by tests all satisfy it,
+;; which is what keeps local and remote on one code path.
+(deftrait Transport [Self]
+  (transport-read [(self (ptr Self)) (buffer (ptr i8)) (length i64)]
+                  (-> (Result i64 TransportError)))
+  (transport-write [(self (ptr Self)) (buffer (ptr i8)) (length i64)]
+                   (-> (Result i64 TransportError)))
+  (transport-close! [(self (ptr Self))] (-> i64)))

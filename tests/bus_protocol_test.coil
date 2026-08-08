@@ -1,0 +1,87 @@
+;; The protocol's central claim is that no format is baked in. These tests hold
+;; the envelope fixed and vary only the codec, so a regression that reaches for
+;; a concrete format inside the protocol fails here rather than at a remote
+;; peer that speaks the other one.
+(module harness-bus-protocol-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-protocol" :use *)
+
+(defn sample-envelope [] (-> Envelope)
+  (envelope-new "msg-1"
+                (Agent "tui-7")
+                (Topic "run.chat-1")
+                (Instruction)
+                "summarize the diff"))
+
+;; Round-trip through one codec and assert every field survived. Taking the
+;; codec as a trait object is the point: the body of this function cannot tell
+;; which format it is exercising.
+(defn round-trips? [(allocator (ptr Allocator)) (codec (dyn Codec))] (-> bool)
+  (let [original (alloc/stack Envelope)
+        slot (alloc/stack Envelope)]
+    (store! original (sample-envelope))
+    (match (codec-encode codec allocator original)
+      (Err [_] false)
+      (Ok [encoded]
+          (match (codec-decode codec allocator encoded slot)
+            (Err [_] false)
+            (Ok [_]
+                (and (and (= (load (field slot version)) 1)
+                          (str-eq (load (field slot id)) "msg-1"))
+                     (and (str-eq (load (field slot body)) "summarize the diff")
+                          (and (address-eq (load (field slot from)) (Agent "tui-7"))
+                               (address-eq (load (field slot to))
+                                           (Topic "run.chat-1")))))))))))
+
+(deftest an-envelope-survives-a-messagepack-round-trip
+         (let [allocator (malloc-allocator)
+               codec (alloc/stack MessagePackCodec)]
+           (assert (round-trips? allocator codec))))
+
+(deftest an-envelope-survives-a-json-round-trip
+         (let [allocator (malloc-allocator)
+               codec (alloc/stack JsonCodec)]
+           (assert (round-trips? allocator codec))))
+
+;; Two codecs producing identical bytes would mean one of them is not really
+;; being used -- the round-trip tests above would then pass vacuously.
+(deftest the-two-codecs-produce-different-wire-bytes
+         (let [allocator (malloc-allocator)
+               msgpack (alloc/stack MessagePackCodec)
+               json (alloc/stack JsonCodec)
+               envelope (alloc/stack Envelope)]
+           (store! envelope (sample-envelope))
+           (match (codec-encode msgpack allocator envelope)
+             (Err [_] (assert false))
+             (Ok [binary]
+                 (match (codec-encode json allocator envelope)
+                   (Err [_] (assert false))
+                   (Ok [text]
+                       (assert (not (str-eq binary text)))))))))
+
+(deftest broadcast-reaches-every-participant
+         (assert (address-matches? (Broadcast) (Agent "anyone")))
+         (assert (address-matches? (Broadcast) (Service))))
+
+(deftest a-direct-address-reaches-only-its-own-mailbox
+         (assert (address-matches? (Agent "a") (Agent "a")))
+         (assert (not (address-matches? (Agent "a") (Agent "b"))))
+         (assert (not (address-matches? (Agent "a") (Topic "a")))))
+
+(deftest a-reply-carries-the-id-of-the-message-it-answers
+         (let [request (alloc/stack Envelope)]
+           (store! request (sample-envelope))
+           (let [reply (alloc/stack Envelope)]
+             (store! reply
+                     (envelope-reply "msg-2" request (Service) "done"))
+             ;; The reply goes back to the requester, not to the topic the
+             ;; request was published on.
+             (assert (address-eq (load (field reply to)) (Agent "tui-7")))
+             (assert (match (load (field reply correlation))
+                       (Some [value] (str-eq value "msg-1"))
+                       (None [] false))))))
