@@ -1,0 +1,51 @@
+;; Attaching the bus to the event stream without touching the emitter.
+;;
+;; `EventEmitter` already writes through an `EventSink`, so the bus does not
+;; need a hook in the emitter -- it needs a sink that forwards to two. Wiring
+;; becomes a construction-time decision rather than a change to how events are
+;; produced.
+;;
+;; Two rules, both load-bearing:
+;;
+;;   Durable first. An observer must never see an event the journal has not
+;;   recorded, or a crash between the two leaves a subscriber believing
+;;   something happened that the journal will never show.
+;;
+;;   Observers cannot fail a run. A subscriber that goes away, falls behind, or
+;;   errors must not take down the run being watched -- the run did not ask to
+;;   be observed and cannot be made to care.
+;;
+;; A warning for whatever gets plugged in as the observer sink: `emit-event-for-agent`
+;; holds the emitter lock across `publish-event`, so anything slow here stalls
+;; ALL event emission for that run. The observer sink must enqueue, never do I/O.
+(module harness-bus-event-sink)
+
+(import "coil.alloc" :as alloc :use *)
+(import "harness-event" :use *)
+
+(defstruct TeeEventSink
+  [(durable (ptr (dyn EventSink)))
+   (observers (ptr (dyn EventSink)))])
+
+;; Initialize in final storage rather than returning by value, matching
+;; `event-emitter-init!` -- copying a boxed trait object through a returned
+;; aggregate crosses an ownership boundary.
+(defn tee-event-sink-init! [(sink (ptr TeeEventSink))
+                            (allocator (ptr Allocator))
+                            (durable (dyn EventSink))
+                            (observers (dyn EventSink))] (-> i64)
+  (store! (field sink durable) (alloc/box allocator (dyn EventSink) durable))
+  (store! (field sink observers) (alloc/box allocator (dyn EventSink) observers))
+  0)
+
+(impl EventSink TeeEventSink
+  (publish-event [(self (ptr TeeEventSink)) (event (ptr Event))] (-> i64)
+                 (let [durable-code (publish-event (load (load (field self durable))) event)]
+                   (if (!= durable-code 0)
+                       ;; The durable write failed, so there is nothing worth
+                       ;; showing an observer. Report it and stop.
+                       durable-code
+                       (do
+                         ;; Result deliberately discarded -- see the header.
+                         (publish-event (load (load (field self observers))) event)
+                         0)))))

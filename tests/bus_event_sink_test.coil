@@ -1,0 +1,110 @@
+(module harness-bus-event-sink-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-bus-event-sink" :use *)
+
+;; Records what it saw and can be told to fail, so ordering and failure handling
+;; are observable rather than inferred.
+(defstruct RecordingSink
+  [(calls i64)
+   (last-sequence i64)
+   (result i64)
+   (peer (ptr RecordingSink))
+   (saw-peer-calls i64)])
+
+(defn recording-init! [(sink (ptr RecordingSink)) (result i64)] (-> i64)
+  (store! (field sink calls) 0)
+  (store! (field sink last-sequence) -1)
+  (store! (field sink result) result)
+  (store! (field sink peer) (cast (ptr RecordingSink) 0))
+  (store! (field sink saw-peer-calls) -1)
+  0)
+
+(impl EventSink RecordingSink
+  (publish-event [(self (ptr RecordingSink)) (event (ptr Event))] (-> i64)
+                 (store! (field self calls) (+ (load (field self calls)) 1))
+                 (store! (field self last-sequence) (load (field event sequence)))
+                 ;; Recording the peer's call count at the moment we run is what
+                 ;; makes ordering testable without timestamps.
+                 (when (!= (load (field self peer)) (cast (ptr RecordingSink) 0))
+                   (store! (field self saw-peer-calls)
+                           (load (field (load (field self peer)) calls))))
+                 (load (field self result))))
+
+(defn sample-event [(event (ptr Event)) (sequence i64)] (-> i64)
+  (store! (field event version) 1)
+  (store! (field event sequence) sequence)
+  (store! (field event timestamp-ms) 1000)
+  (store! (field event kind) (RunStarted))
+  (store! (field event run-id) "chat-1")
+  (store! (field event agent-id) "chat-1")
+  (store! (field event operation-id) "op-1")
+  (store! (field event parent-operation-id) "")
+  (store! (field event provider) "fake")
+  (store! (field event model) "fake-model")
+  (store! (field event payload) (JsonNull))
+  0)
+
+(deftest both-sinks-receive-every-event
+         (let [allocator (malloc-allocator)
+               durable (alloc/stack RecordingSink)
+               observers (alloc/stack RecordingSink)
+               tee (alloc/stack TeeEventSink)
+               event (alloc/stack Event)]
+           (recording-init! durable 0)
+           (recording-init! observers 0)
+           (tee-event-sink-init! tee allocator durable observers)
+           (sample-event event 7)
+           (assert (= (publish-event tee event) 0))
+           (assert (= (load (field durable calls)) 1))
+           (assert (= (load (field observers calls)) 1))
+           (assert (= (load (field observers last-sequence)) 7))))
+
+;; An observer must never see an event the journal has not recorded yet.
+(deftest the-durable-sink-runs-before-observers
+         (let [allocator (malloc-allocator)
+               durable (alloc/stack RecordingSink)
+               observers (alloc/stack RecordingSink)
+               tee (alloc/stack TeeEventSink)
+               event (alloc/stack Event)]
+           (recording-init! durable 0)
+           (recording-init! observers 0)
+           ;; The observer reports how many times the durable sink had already
+           ;; run when it was called.
+           (store! (field observers peer) durable)
+           (tee-event-sink-init! tee allocator durable observers)
+           (sample-event event 1)
+           (publish-event tee event)
+           (assert (= (load (field observers saw-peer-calls)) 1))))
+
+;; Losing a subscriber must not fail the run that was being watched.
+(deftest an-observer-failure-does-not-fail-the-event
+         (let [allocator (malloc-allocator)
+               durable (alloc/stack RecordingSink)
+               observers (alloc/stack RecordingSink)
+               tee (alloc/stack TeeEventSink)
+               event (alloc/stack Event)]
+           (recording-init! durable 0)
+           (recording-init! observers -1)
+           (tee-event-sink-init! tee allocator durable observers)
+           (sample-event event 1)
+           (assert (= (publish-event tee event) 0))
+           (assert (= (load (field durable calls)) 1))))
+
+;; A failed durable write is real failure, and there is nothing worth showing an
+;; observer -- so it must be reported and the observer must not run.
+(deftest a-durable-failure-is-reported-and-skips-observers
+         (let [allocator (malloc-allocator)
+               durable (alloc/stack RecordingSink)
+               observers (alloc/stack RecordingSink)
+               tee (alloc/stack TeeEventSink)
+               event (alloc/stack Event)]
+           (recording-init! durable -1)
+           (recording-init! observers 0)
+           (tee-event-sink-init! tee allocator durable observers)
+           (sample-event event 1)
+           (assert (= (publish-event tee event) -1))
+           (assert (= (load (field observers calls)) 0))))
