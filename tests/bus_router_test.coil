@@ -1,0 +1,133 @@
+(module harness-bus-router-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.assert" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-router" :use *)
+
+(defn deliver [(router (ptr Router))
+               (from Address)
+               (to Address)
+               (out (mut (ArrayList i64)))] (-> i64)
+  (let [envelope (alloc/stack Envelope)]
+    (store! envelope (envelope-new "m" from to (Instruction) "body"))
+    (router-recipients router envelope (mut out))))
+
+(defn only-recipient [(out (ArrayList i64))] (-> i64)
+  (if (= (al-len [i64] out) 1) (al-get [i64] out 0) -1))
+
+(deftest a-direct-message-reaches-exactly-one-mailbox
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [alice (router-attach! router (Agent "alice"))
+                 bob (router-attach! router (Agent "bob"))
+                 (mut out) (al-new [i64] allocator)]
+             (assert (= (deliver router (Agent "alice") (Agent "bob") (mut out)) 1))
+             (assert (= (only-recipient (load out)) bob))
+             (assert (!= (only-recipient (load out)) alice)))))
+
+(deftest a-topic-reaches-subscribers-and-nobody-else
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [publisher (router-attach! router (Agent "runner"))
+                 watcher (router-attach! router (Agent "tui"))
+                 bystander (router-attach! router (Agent "other"))
+                 (mut out) (al-new [i64] allocator)]
+             (router-subscribe! router watcher "run.1")
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut out)) 1))
+             (assert (= (only-recipient (load out)) watcher)))))
+
+;; Two observers of one run is the whole reason topics exist -- the run must not
+;; need to know how many are watching.
+(deftest a-topic-reaches-every-subscriber
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [runner (router-attach! router (Agent "runner"))
+                 first-watcher (router-attach! router (Agent "tui-1"))
+                 second-watcher (router-attach! router (Agent "tui-2"))
+                 (mut out) (al-new [i64] allocator)]
+             (router-subscribe! router first-watcher "run.1")
+             (router-subscribe! router second-watcher "run.1")
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut out)) 2)))))
+
+;; Without this a broadcast echoes, and a participant publishing on a topic it
+;; also subscribes to processes its own traffic.
+(deftest a-sender-never-receives-its-own-message
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [runner (router-attach! router (Agent "runner"))
+                 (mut broadcast-out) (al-new [i64] allocator)
+                 (mut topic-out) (al-new [i64] allocator)]
+             (router-subscribe! router runner "run.1")
+             (assert (= (deliver router (Agent "runner") (Broadcast) (mut broadcast-out)) 0))
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut topic-out)) 0)))))
+
+(deftest a-broadcast-reaches-everyone-except-the-sender
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [sender (router-attach! router (Agent "a"))
+                 second (router-attach! router (Agent "b"))
+                 third (router-attach! router (Agent "c"))
+                 (mut out) (al-new [i64] allocator)]
+             (assert (= (deliver router (Agent "a") (Broadcast) (mut out)) 2)))))
+
+;; Service traffic is for the harness itself; participants must not see it.
+(deftest service-messages-reach-no-participant
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [agent (router-attach! router (Agent "a"))
+                 (mut out) (al-new [i64] allocator)]
+             (assert (= (deliver router (Agent "b") (Service) (mut out)) 0)))))
+
+(deftest unsubscribing-stops-delivery
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [watcher (router-attach! router (Agent "tui"))
+                 (mut before) (al-new [i64] allocator)
+                 (mut after) (al-new [i64] allocator)]
+             (router-subscribe! router watcher "run.1")
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut before)) 1))
+             (assert (= (router-unsubscribe! router watcher "run.1") 1))
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut after)) 0)))))
+
+;; A client that drops and re-subscribes must not receive doubles.
+(deftest subscribing-twice-does-not-duplicate-delivery
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [watcher (router-attach! router (Agent "tui"))
+                 (mut out) (al-new [i64] allocator)]
+             (router-subscribe! router watcher "run.1")
+             (router-subscribe! router watcher "run.1")
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut out)) 1)))))
+
+(deftest attaching-one-address-twice-reuses-its-mailbox
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [first (router-attach! router (Agent "a"))
+                 again (router-attach! router (Agent "a"))]
+             (assert (= first again))
+             (assert (= (router-count router) 1)))))
+
+(deftest a-detached-participant-stops-receiving
+         (let [allocator (malloc-allocator)
+               router (alloc/stack Router)]
+           (store! router (router-new allocator))
+           (let [watcher (router-attach! router (Agent "tui"))
+                 (mut before) (al-new [i64] allocator)
+                 (mut after) (al-new [i64] allocator)]
+             (router-subscribe! router watcher "run.1")
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut before)) 1))
+             (assert (= (router-detach! router watcher) 1))
+             (assert (= (deliver router (Agent "runner") (Topic "run.1") (mut after)) 0)))))

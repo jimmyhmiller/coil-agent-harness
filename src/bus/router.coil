@@ -1,0 +1,163 @@
+;; Routing: deciding who receives a message.
+;;
+;; The router is deliberately pure -- it owns no sockets and performs no I/O. It
+;; answers one question ("given this envelope, which attached participants
+;; should receive it?") and a caller does the writing. That split is what makes
+;; delivery testable without a network, and it is why a subagent, an attached
+;; TUI, and a remote peer need no special cases here: they differ only in the
+;; transport the caller pairs with each participant.
+(module harness-bus-router)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-protocol" :use *)
+
+;; Handle returned by attach. Callers pair it with whatever transport they hold
+;; for that participant; the router never learns what that is.
+(const ROUTER_NO_PARTICIPANT -1)
+
+(defstruct Participant
+  [(address Address)
+   (topics (ArrayList (slice u8)))
+   (attached bool)])
+
+(defstruct Router
+  [(allocator (ptr Allocator))
+   (participants (ArrayList Participant))])
+
+(defn router-new [(allocator (ptr Allocator))] (-> Router)
+  (let [router (alloc/stack Router)]
+    (store! (field router allocator) allocator)
+    (store! (field router participants) (al-new [Participant] allocator))
+    (load router)))
+
+(defn router-count [(router (ptr Router))] (-> i64)
+  (al-len [Participant] (load (field router participants))))
+
+(defn router-participant [(router (ptr Router)) (handle i64)] (-> (ptr Participant))
+  (primitive/index (load (field (field router participants) data)) handle))
+
+;; Find an attached participant by address. Detached slots are skipped so a
+;; handle is never silently reused for a different participant.
+(defn router-find [(router (ptr Router)) (address Address)] (-> i64)
+  (let [n (router-count router)
+        (mut i) 0
+        (mut found) ROUTER_NO_PARTICIPANT]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [participant (router-participant router (load i))]
+                (if (and (load (field participant attached))
+                         (address-eq (load (field participant address)) address))
+                    (do (store! found (load i)) (break))
+                    (store! i (+ (load i) 1))))))
+    (load found)))
+
+;; Attach a participant, returning its handle. Attaching an address that is
+;; already attached returns the existing handle rather than creating a second
+;; mailbox for one identity.
+(defn router-attach! [(router (ptr Router)) (address Address)] (-> i64)
+  (let [existing (router-find router address)]
+    (if (!= existing ROUTER_NO_PARTICIPANT)
+        existing
+        (let [participant (alloc/stack Participant)]
+          (store! (field participant address) address)
+          (store! (field participant topics)
+                  (al-new [(slice u8)] (load (field router allocator))))
+          (store! (field participant attached) true)
+          (al-push! [Participant] (mut (field router participants)) (load participant))
+          (- (router-count router) 1)))))
+
+;; Detaching leaves the slot in place so existing handles stay meaningful; the
+;; participant simply stops receiving.
+(defn router-detach! [(router (ptr Router)) (handle i64)] (-> i64)
+  (if (or (< handle 0) (>= handle (router-count router)))
+      0
+      (let [participant (router-participant router handle)]
+        (store! (field participant attached) false)
+        1)))
+
+(defn participant-subscribed? [(participant (ptr Participant)) (topic (slice u8))] (-> bool)
+  (let [topics (field participant topics)
+        n (al-len [(slice u8)] (load topics))
+        (mut i) 0
+        (mut found) false]
+    (loop (if (>= (load i) n)
+              (break)
+              (if (str-eq (al-get [(slice u8)] (load topics) (load i)) topic)
+                  (do (store! found true) (break))
+                  (store! i (+ (load i) 1)))))
+    (load found)))
+
+;; Subscribing twice is a no-op rather than an error: a client that reconnects
+;; and re-subscribes should not accumulate duplicate deliveries.
+(defn router-subscribe! [(router (ptr Router)) (handle i64) (topic (slice u8))] (-> i64)
+  (if (or (< handle 0) (>= handle (router-count router)))
+      0
+      (let [participant (router-participant router handle)]
+        (if (participant-subscribed? participant topic)
+            0
+            (do
+              (al-push! [(slice u8)] (mut (field participant topics)) topic)
+              1)))))
+
+(defn router-unsubscribe! [(router (ptr Router)) (handle i64) (topic (slice u8))] (-> i64)
+  (if (or (< handle 0) (>= handle (router-count router)))
+      0
+      (let [participant (router-participant router handle)
+            topics (field participant topics)
+            n (al-len [(slice u8)] (load topics))
+            (mut i) 0
+            (mut removed) 0]
+        (loop (if (>= (load i) n)
+                  (break)
+                  (if (str-eq (al-get [(slice u8)] (load topics) (load i)) topic)
+                      (do
+                        ;; Order does not matter, so fill the hole from the end
+                        ;; rather than shifting the tail.
+                        (store! (primitive/index (load (field topics data)) (load i))
+                                (al-get [(slice u8)] (load topics) (- n 1)))
+                        (al-pop! [(slice u8)] (mut topics))
+                        (store! removed 1)
+                        (break))
+                      (store! i (+ (load i) 1)))))
+        (load removed))))
+
+;; Should this participant receive this envelope?
+;;
+;; A sender never receives its own message. Without that rule a broadcast would
+;; echo, and a participant subscribed to a topic it also publishes on would
+;; process its own traffic -- which reads as a loop the first time it happens.
+(defn delivers-to? [(participant (ptr Participant))
+                    (envelope (ptr Envelope))] (-> bool)
+  (if (not (load (field participant attached)))
+      false
+      (let [address (load (field participant address))]
+        (if (address-eq address (load (field envelope from)))
+            false
+            (match (load (field envelope to))
+              (Agent [_] (address-eq address (load (field envelope to))))
+              (Topic [name] (participant-subscribed? participant name))
+              (Broadcast [] true)
+              ;; Service messages are for the harness, not for participants.
+              (Service [] false))))))
+
+;; Append the handle of every participant that should receive `envelope`.
+;; Returns the number appended. The caller does the writing, so a slow or
+;; broken peer cannot stall routing for everyone else.
+(defn router-recipients [(router (ptr Router))
+                         (envelope (ptr Envelope))
+                         (out (mut (ArrayList i64)))] (-> i64)
+  (let [n (router-count router)
+        (mut i) 0
+        (mut delivered) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (delivers-to? (router-participant router (load i)) envelope)
+                  (al-push! [i64] (mut out) (load i))
+                  (store! delivered (+ (load delivered) 1)))
+                (store! i (+ (load i) 1)))))
+    (load delivered)))
