@@ -1,14 +1,13 @@
 ;; The server loop against real sockets and real emitted events.
 ;;
 ;; Three subscribers, two of which want the same run, prove fan-out actually
-;; reaches more than one socket.
+;; reaches more than one socket. The last case kills a subscriber mid-stream,
+;; which is what decides whether one broken client can hurt the others.
 ;;
-;; The dead-subscriber case is NOT here, and its absence is deliberate: writing
-;; to a closed peer raises SIGPIPE and kills the process, and there is currently
-;; no way to take SIGPIPE off its default action from Coil. The exact repro and
-;; the fix it needs are in docs/bus-known-gaps.md -- this test file stays green
-;; so a real regression is visible, and the crash is tracked there rather than
-;; hidden here.
+;; That last case used to kill the process: writing to a closed peer raised
+;; SIGPIPE, and nothing in Coil could take it off its default action. Fixed in
+;; coil.socket (SO_NOSIGPIPE on Darwin, MSG_NOSIGNAL on Linux), so a closed peer
+;; now surfaces as an ordinary write error and the subscriber is retired.
 (module harness-bus-server-test)
 
 (import "coil.alloc" :as alloc :use *)
@@ -185,3 +184,58 @@
            (transport-close! client)
            (socket/unix-listener-close! listener)
            (remove-path SOCKET_PATH)))
+
+;; The case that decides whether one broken client can hurt the others: a
+;; subscriber whose socket is gone.
+(deftest a-dead-subscriber-is-retired-and-the-others-keep-receiving
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               codec (alloc/stack MessagePackCodec)
+               journal (alloc/stack EventJournal)
+               observer (alloc/stack BusObserverSink)
+               tee (alloc/stack TeeEventSink)
+               emitter (alloc/stack EventEmitter)
+               router (alloc/stack Router)
+               server (alloc/stack BusServer)
+               sequence (alloc/stack i64)
+               doomed (alloc/stack UnixTransport)
+               survivor (alloc/stack UnixTransport)]
+           (remove-path SOCKET_PATH)
+           (remove-path JOURNAL_PATH)
+           (match (socket/unix-listen listener SOCKET_PATH 8)
+             (Err [_] (assert false))
+             (Ok [_] 0))
+           (match (event-journal-open allocator JOURNAL_PATH true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (bus-observer-init! observer allocator 64)
+           (tee-event-sink-init! tee allocator journal observer)
+           (store! sequence 1)
+           (event-emitter-init! emitter allocator tee sequence)
+           (store! router (router-new allocator))
+           (bus-server-init! server allocator router observer codec)
+
+           (assert (subscribe-client! allocator doomed codec (run-topic allocator "chat-1")))
+           (assert (= (bus-server-accept! server listener) 1))
+           (assert (subscribe-client! allocator survivor codec (run-topic allocator "chat-1")))
+           (assert (= (bus-server-accept! server listener) 1))
+           (assert (= (bus-server-live-count server) 2))
+
+           ;; The client goes away without telling the server.
+           (transport-close! doomed)
+
+           (assert (> (emit-sample emitter (RunStarted)) 0))
+           (bus-server-drain! server)
+           (assert (> (emit-sample emitter (RunCompleted)) 0))
+           (bus-server-drain! server)
+
+           ;; The survivor got everything; the dead one was dropped.
+           (assert (str-eq (receive-event-kind survivor codec allocator) "run.started"))
+           (assert (str-eq (receive-event-kind survivor codec allocator) "run.completed"))
+           (assert (= (bus-server-live-count server) 1))
+
+           (bus-server-close! server)
+           (event-journal-close! journal)
+           (socket/unix-listener-close! listener)
+           (remove-path SOCKET_PATH)
+           (remove-path JOURNAL_PATH)))
