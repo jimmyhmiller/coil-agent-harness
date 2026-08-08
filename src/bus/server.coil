@@ -1,0 +1,217 @@
+;; The bus server: accepting subscribers and moving queued events onto their
+;; sockets.
+;;
+;; This is the loop that was living in the end-to-end test. It does the two
+;; things the observer sink deliberately refuses to do -- I/O, and blocking --
+;; on a thread that is not the one emitting events, so a subscriber can be slow
+;; or dead without a run ever noticing.
+;;
+;; Subscribing is an explicit handshake rather than an implicit "you get
+;; everything": on accept, a client sends one Subscribe envelope naming the
+;; topic it wants. Reading it is the only place the server blocks on a client,
+;; and it is bounded, because a client that connects and says nothing must not
+;; hold an accept slot forever.
+(module harness-bus-server)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :use *)
+(import "coil.time" :as time)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-frame" :use *)
+(import "harness-bus-unix" :use *)
+(import "harness-bus-router" :use *)
+(import "harness-bus-observer" :use *)
+
+;; How long to wait for a newly-connected client to send its Subscribe frame.
+(const HANDSHAKE_TIMEOUT_MS 2000)
+
+(defstruct Subscriber
+  [(transport (ptr UnixTransport))
+   (handle i64)
+   (alive bool)])
+
+(defstruct BusServer
+  [(allocator (ptr Allocator))
+   (router (ptr Router))
+   (observer (ptr BusObserverSink))
+   (codec (ptr (dyn Codec)))
+   (subscribers (ArrayList Subscriber))
+   (next-id i64)])
+
+(defn bus-server-init! [(server (ptr BusServer))
+                        (allocator (ptr Allocator))
+                        (router (ptr Router))
+                        (observer (ptr BusObserverSink))
+                        (codec (dyn Codec))] (-> i64)
+  (store! (field server allocator) allocator)
+  (store! (field server router) router)
+  (store! (field server observer) observer)
+  (store! (field server codec) (alloc/box allocator (dyn Codec) codec))
+  (store! (field server subscribers) (al-new [Subscriber] allocator))
+  (store! (field server next-id) 1)
+  0)
+
+(defn bus-server-subscriber-count [(server (ptr BusServer))] (-> i64)
+  (al-len [Subscriber] (load (field server subscribers))))
+
+(defn bus-server-subscriber [(server (ptr BusServer)) (index i64)] (-> (ptr Subscriber))
+  (primitive/index (load (field (field server subscribers) data)) index))
+
+(defn bus-server-live-count [(server (ptr BusServer))] (-> i64)
+  (let [n (bus-server-subscriber-count server)
+        (mut i) 0
+        (mut live) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (load (field (bus-server-subscriber server (load i)) alive))
+                  (store! live (+ (load live) 1)))
+                (store! i (+ (load i) 1)))))
+    (load live)))
+
+;; Decimal formatting for generated subscriber identities. Same reason as in the
+;; observer: `int->str` is comptime-only.
+(defn subscriber-name [(allocator (ptr Allocator)) (n i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)
+        (mut digits) (al-new [i64] allocator)
+        (mut remaining) n]
+    (sb-push-str! (mut buffer) "sub-")
+    (if (= n 0)
+        (sb-push-byte! (mut buffer) (cast u8 48))
+        (do
+          (loop (if (<= (load remaining) 0)
+                    (break)
+                    (do
+                      (al-push! [i64] (mut digits) (% (load remaining) 10))
+                      (store! remaining (/ (load remaining) 10)))))
+          (let [count (al-len [i64] (load digits))
+                (mut i) 0]
+            (loop (if (>= (load i) count)
+                      (break)
+                      (do
+                        (sb-push-byte! (mut buffer)
+                                       (cast u8 (+ 48 (al-get [i64] (load digits)
+                                                              (- (- count 1) (load i))))))
+                        (store! i (+ (load i) 1))))))))
+    (sb-str (load buffer))))
+
+;; Drop a subscriber: close its socket and stop routing to it. Detaching from
+;; the router rather than deleting the slot keeps existing handles meaningful.
+(defn retire-subscriber! [(server (ptr BusServer)) (subscriber (ptr Subscriber))] (-> i64)
+  (when (load (field subscriber alive))
+    (transport-close! (load (field subscriber transport)))
+    (router-detach! (load (field server router)) (load (field subscriber handle)))
+    (store! (field subscriber alive) false))
+  0)
+
+;; Accept one pending connection and complete its Subscribe handshake.
+;; Returns 1 if a subscriber was added, 0 if nothing was pending, -1 on a
+;; malformed or silent client (which is not a server error).
+(defn bus-server-accept! [(server (ptr BusServer))
+                          (listener (ptr socket/UnixListener))] (-> i64)
+  (let [allocator (load (field server allocator))
+        accepted (alloc/stack socket/UnixConnection)]
+    (match (time/duration-millis HANDSHAKE_TIMEOUT_MS)
+      (Err [_] -1)
+      (Ok [timeout]
+          (match (socket/unix-accept-for listener accepted timeout)
+            ;; No pending connection is the common case, not a failure.
+            (Err [_] 0)
+            (Ok [_]
+                (let [transport (alloc/box allocator UnixTransport (zeroed UnixTransport))
+                      envelope (alloc/stack Envelope)
+                      out (alloc/stack (slice u8))]
+                  (unix-transport-adopt! transport (load accepted))
+                  (if (!= (frame-read transport allocator out) FRAME_OK)
+                      ;; Connected and said nothing, or died mid-handshake.
+                      (do (transport-close! transport) -1)
+                      (match (codec-decode (load (load (field server codec)))
+                                           allocator
+                                           (load out)
+                                           envelope)
+                        (Err [_] (do (transport-close! transport) -1))
+                        (Ok [_]
+                            (match-else (load (field envelope kind))
+                              (Subscribe []
+                                         (let [topic (load (field envelope body))
+                                               name (subscriber-name allocator
+                                                                     (load (field server next-id)))
+                                               handle (router-attach! (load (field server router))
+                                                                      (Agent name))
+                                               subscriber (alloc/stack Subscriber)]
+                                           (store! (field server next-id)
+                                                   (+ (load (field server next-id)) 1))
+                                           (router-subscribe! (load (field server router))
+                                                              handle
+                                                              topic)
+                                           (store! (field subscriber transport) transport)
+                                           (store! (field subscriber handle) handle)
+                                           (store! (field subscriber alive) true)
+                                           (al-push! [Subscriber]
+                                                     (mut (field server subscribers))
+                                                     (load subscriber))
+                                           1))
+                              ;; Anything else is a client that does not speak
+                              ;; the handshake. Refuse it rather than guessing
+                              ;; what it wanted.
+                              (_ (do (transport-close! transport) -1)))))))))))))
+
+;; Move every queued envelope onto the subscribers that should receive it.
+;; Returns the number of successful writes. A subscriber whose write fails is
+;; retired rather than retried -- the queue is bounded and a broken socket will
+;; not fix itself, so holding events for it only costs live subscribers.
+(defn bus-server-drain! [(server (ptr BusServer))] (-> i64)
+  (let [allocator (load (field server allocator))
+        observer (load (field server observer))
+        router (load (field server router))
+        codec (load (load (field server codec)))
+        pending (bus-observer-pending observer)
+        (mut queued) 0
+        (mut written) 0]
+    (loop (if (>= (load queued) pending)
+              (break)
+              (let [envelope (bus-observer-at observer (load queued))
+                    (mut recipients) (al-new [i64] allocator)]
+                (router-recipients router envelope (mut recipients))
+                (when (> (al-len [i64] (load recipients)) 0)
+                  ;; Encode once per envelope, not once per recipient.
+                  (match (codec-encode codec allocator envelope)
+                    (Err [_] 0)
+                    (Ok [bytes]
+                        (let [count (al-len [i64] (load recipients))
+                              (mut r) 0]
+                          (loop (if (>= (load r) count)
+                                    (break)
+                                    (let [handle (al-get [i64] (load recipients) (load r))
+                                          total (bus-server-subscriber-count server)
+                                          (mut s) 0]
+                                      (loop (if (>= (load s) total)
+                                                (break)
+                                                (let [subscriber (bus-server-subscriber server (load s))]
+                                                  (when (and (load (field subscriber alive))
+                                                             (= (load (field subscriber handle)) handle))
+                                                    (if (!= (frame-write! (load (field subscriber transport))
+                                                                          bytes)
+                                                            FRAME_OK)
+                                                        (retire-subscriber! server subscriber)
+                                                        (store! written (+ (load written) 1))))
+                                                  (store! s (+ (load s) 1)))))
+                                      (store! r (+ (load r) 1)))))
+                          0))))
+                (store! queued (+ (load queued) 1)))))
+    (bus-observer-clear! observer)
+    (load written)))
+
+(defn bus-server-close! [(server (ptr BusServer))] (-> i64)
+  (let [n (bus-server-subscriber-count server)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do (retire-subscriber! server (bus-server-subscriber server (load i)))
+                  (store! i (+ (load i) 1)))))
+    0))

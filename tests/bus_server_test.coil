@@ -1,0 +1,187 @@
+;; The server loop against real sockets and real emitted events.
+;;
+;; Three subscribers, two of which want the same run, prove fan-out actually
+;; reaches more than one socket.
+;;
+;; The dead-subscriber case is NOT here, and its absence is deliberate: writing
+;; to a closed peer raises SIGPIPE and kills the process, and there is currently
+;; no way to take SIGPIPE off its default action from Coil. The exact repro and
+;; the fix it needs are in docs/bus-known-gaps.md -- this test file stays green
+;; so a real regression is visible, and the crash is tracked there rather than
+;; hidden here.
+(module harness-bus-server-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :as str :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-bus-protocol" :use *)
+(import "harness-bus-frame" :use *)
+(import "harness-bus-unix" :use *)
+(import "harness-bus-router" :use *)
+(import "harness-bus-publisher" :use *)
+(import "harness-bus-observer" :use *)
+(import "harness-bus-event-sink" :use *)
+(import "harness-bus-server" :use *)
+
+(extern unlink :cc c [(ptr i8)] (-> i32))
+
+(const SOCKET_PATH "/tmp/harness-bus-server-test.sock")
+(const JOURNAL_PATH "/tmp/harness-bus-server-test.jsonl")
+
+(defn remove-path [(path (slice u8))] (-> i64)
+  (let [c-path (str/str->cstr (malloc-allocator) path)]
+    (if (= (cast i64 c-path) 0) 0 (do (unlink c-path) 0))))
+
+;; Connect a client and complete the Subscribe handshake from its side.
+(defn subscribe-client! [(allocator (ptr Allocator))
+                         (client (ptr UnixTransport))
+                         (codec (dyn Codec))
+                         (topic (slice u8))] (-> bool)
+  (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
+      false
+      (let [envelope (alloc/stack Envelope)]
+        (store! envelope
+                (envelope-new "sub" (Agent "client") (Service) (Subscribe) topic))
+        (match (codec-encode codec allocator envelope)
+          (Err [_] false)
+          (Ok [bytes] (= (frame-write! client bytes) FRAME_OK))))))
+
+;; Read one event name off a client socket, or "" if nothing arrives.
+(defn receive-event-kind [(transport (ptr UnixTransport))
+                          (codec (dyn Codec))
+                          (allocator (ptr Allocator))] (-> (slice u8))
+  (let [out (alloc/stack (slice u8))
+        envelope (alloc/stack Envelope)]
+    (if (!= (frame-read transport allocator out) FRAME_OK)
+        ""
+        (match (codec-decode codec allocator (load out) envelope)
+          (Err [_] "")
+          (Ok [_]
+              (let [parsed (alloc/stack JsonParseResult)]
+                (store! parsed (json-parse allocator (load (field envelope body))))
+                (if (not (load (field parsed ok)))
+                    ""
+                    (match (json-string-at (load (field parsed value)) "event")
+                      (Some [name] name)
+                      (None [] "")))))))))
+
+(defn emit-sample [(emitter (ptr EventEmitter)) (kind EventKind)] (-> i64)
+  (emit-event emitter 1000 kind "chat-1" "op-1" "" "fake" "fake-model" (JsonNull)))
+
+(deftest the-server-fans-one-run-out-to-every-subscriber-of-it
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               codec (alloc/stack MessagePackCodec)
+               journal (alloc/stack EventJournal)
+               observer (alloc/stack BusObserverSink)
+               tee (alloc/stack TeeEventSink)
+               emitter (alloc/stack EventEmitter)
+               router (alloc/stack Router)
+               server (alloc/stack BusServer)
+               sequence (alloc/stack i64)
+               watcher-a (alloc/stack UnixTransport)
+               watcher-b (alloc/stack UnixTransport)
+               bystander (alloc/stack UnixTransport)]
+           (remove-path SOCKET_PATH)
+           (remove-path JOURNAL_PATH)
+           (match (socket/unix-listen listener SOCKET_PATH 8)
+             (Err [_] (assert false))
+             (Ok [_] 0))
+           (match (event-journal-open allocator JOURNAL_PATH true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (bus-observer-init! observer allocator 64)
+           (tee-event-sink-init! tee allocator journal observer)
+           (store! sequence 1)
+           (event-emitter-init! emitter allocator tee sequence)
+           (store! router (router-new allocator))
+           (bus-server-init! server allocator router observer codec)
+
+           ;; Two subscribers want chat-1; one wants a different run entirely.
+           (assert (subscribe-client! allocator watcher-a codec (run-topic allocator "chat-1")))
+           (assert (= (bus-server-accept! server listener) 1))
+           (assert (subscribe-client! allocator watcher-b codec (run-topic allocator "chat-1")))
+           (assert (= (bus-server-accept! server listener) 1))
+           (assert (subscribe-client! allocator bystander codec (run-topic allocator "chat-2")))
+           (assert (= (bus-server-accept! server listener) 1))
+           (assert (= (bus-server-live-count server) 3))
+
+           (assert (> (emit-sample emitter (RunStarted)) 0))
+           ;; One event, two recipients -- fan-out, not a broadcast to everyone.
+           (assert (= (bus-server-drain! server) 2))
+           (assert (str-eq (receive-event-kind watcher-a codec allocator) "run.started"))
+           (assert (str-eq (receive-event-kind watcher-b codec allocator) "run.started"))
+
+           (bus-server-close! server)
+           (event-journal-close! journal)
+           (socket/unix-listener-close! listener)
+           (remove-path SOCKET_PATH)
+           (remove-path JOURNAL_PATH)))
+
+;; A client that connects and never sends its Subscribe frame must not become a
+;; subscriber, and must not wedge the accept path.
+(deftest a-client-that-never-subscribes-is-refused
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               codec (alloc/stack MessagePackCodec)
+               observer (alloc/stack BusObserverSink)
+               router (alloc/stack Router)
+               server (alloc/stack BusServer)
+               silent (alloc/stack UnixTransport)]
+           (remove-path SOCKET_PATH)
+           (match (socket/unix-listen listener SOCKET_PATH 8)
+             (Err [_] (assert false))
+             (Ok [_] 0))
+           (bus-observer-init! observer allocator 16)
+           (store! router (router-new allocator))
+           (bus-server-init! server allocator router observer codec)
+
+           (assert (= (unix-transport-connect! silent SOCKET_PATH) 0))
+           ;; Close without ever sending a Subscribe frame.
+           (transport-close! silent)
+           (assert (= (bus-server-accept! server listener) -1))
+           (assert (= (bus-server-live-count server) 0))
+
+           (bus-server-close! server)
+           (socket/unix-listener-close! listener)
+           (remove-path SOCKET_PATH)))
+
+;; A client that speaks the protocol but not the handshake is refused too,
+;; rather than being guessed at.
+(deftest a-client-that-sends-the-wrong-kind-is-refused
+         (let [allocator (malloc-allocator)
+               listener (alloc/stack socket/UnixListener)
+               codec (alloc/stack MessagePackCodec)
+               observer (alloc/stack BusObserverSink)
+               router (alloc/stack Router)
+               server (alloc/stack BusServer)
+               client (alloc/stack UnixTransport)
+               envelope (alloc/stack Envelope)]
+           (remove-path SOCKET_PATH)
+           (match (socket/unix-listen listener SOCKET_PATH 8)
+             (Err [_] (assert false))
+             (Ok [_] 0))
+           (bus-observer-init! observer allocator 16)
+           (store! router (router-new allocator))
+           (bus-server-init! server allocator router observer codec)
+
+           (assert (= (unix-transport-connect! client SOCKET_PATH) 0))
+           (store! envelope
+                   (envelope-new "x" (Agent "client") (Service) (Instruction) "run.chat-1"))
+           (match (codec-encode codec allocator envelope)
+             (Err [_] (assert false))
+             (Ok [bytes] (assert (= (frame-write! client bytes) FRAME_OK))))
+           (assert (= (bus-server-accept! server listener) -1))
+           (assert (= (bus-server-live-count server) 0))
+
+           (bus-server-close! server)
+           (transport-close! client)
+           (socket/unix-listener-close! listener)
+           (remove-path SOCKET_PATH)))
