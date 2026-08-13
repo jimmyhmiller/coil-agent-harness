@@ -1,17 +1,22 @@
 (module harness-orchestration-tools)
 
 (import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
+(import "harness-system" :use *)
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-(defstruct SpawnSubagentTool [(service (ptr RunService))])
+(defstruct SpawnSubagentsTool [(service (ptr RunService))])
 (defstruct CreateWorkflowNodeTool [(service (ptr RunService))])
 (defstruct QueryWorkflowTool [(service (ptr RunService))])
 (defstruct QueryRunTool [(service (ptr RunService))])
+(defstruct StartAsyncTool [(service (ptr RunService))])
+(defstruct NotifyAsyncTool [(service (ptr RunService))])
 
 (defn orchestration-string [(arguments Json) (key (slice u8))] (-> (slice u8))
   (match (json-string-at arguments key)
@@ -39,6 +44,23 @@
                 (orchestration-string (load (field response body)) "message")))
     (load result)))
 
+(defn orchestration-run-exists? [(service (ptr RunService))
+                                 (run-id (slice u8))] (-> bool)
+  (let [recovery (service-recover-into service (load (field service allocator)))
+        (mut found) false]
+    (when (load (field recovery ok))
+      (let [(mut at) 0
+            count (al-len [Json] (load (field recovery events)))]
+        (loop (if (>= (load at) count)
+                  (break)
+                  (let [event (al-get [Json] (load (field recovery events)) (load at))]
+                    (if (and (str-eq (orchestration-string event "event") "run.created")
+                             (str-eq (orchestration-string event "run_id") run-id))
+                        (do (store! found true) (break))
+                        (store! at (+ (load at) 1)))))))
+      0)
+    (load found)))
+
 (defn orchestration-base-command [(allocator (ptr Allocator))
                                   (call (ptr ToolCall))
                                   (context (ptr ToolExecutionContext))] (-> Json)
@@ -58,16 +80,104 @@
     (json-put-string! (mut command) "prompt" (orchestration-string arguments "prompt"))
     (load command)))
 
-(defn execute-spawn-subagent [(self (ptr SpawnSubagentTool))
-                              (call (ptr ToolCall))
-                              (context (ptr ToolExecutionContext))
-                              (allocator (ptr Allocator))] (-> ToolResult)
-  (let [(mut command) (orchestration-base-command allocator call context)
-        actor (concat-or-empty allocator "agent:" (load (field context run-id)))]
-    (orchestration-result call
-                          (service-submit-run (load (field self service))
-                                              (mut command)
-                                              actor))))
+(defn execute-spawn-subagents [(self (ptr SpawnSubagentsTool))
+                               (call (ptr ToolCall))
+                               (context (ptr ToolExecutionContext))
+                               (allocator (ptr Allocator))] (-> ToolResult)
+  (let [agents (json-get (load (field call arguments)) "agents")
+        (mut handles) (json-array allocator)
+        (mut ok) true
+        (mut error) ""]
+    (match (json-array-items agents)
+      (None [] (do (store! ok false) (store! error "agents must be an array")))
+      (Some [items]
+            (let [(mut at) 0
+                  count (al-len [Json] (load items))]
+              ;; Validate the complete batch before starting any child. A bad
+              ;; or repeated ID must not leave the caller with a partial batch.
+              (loop (if (or (>= (load at) count) (not (load ok)))
+                        (break)
+                        (let [agent (al-get [Json] (load items) (load at))
+                              run-id (orchestration-string agent "run_id")
+                              (mut earlier) 0
+                              (mut duplicate) false]
+                          (loop (if (>= (load earlier) (load at))
+                                    (break)
+                                    (if (str-eq run-id
+                                                (orchestration-string (al-get [Json]
+                                                                              (load items)
+                                                                              (load earlier))
+                                                                      "run_id"))
+                                        (do (store! duplicate true) (break))
+                                        (store! earlier (+ (load earlier) 1)))))
+                          (when (or (= (str-len run-id) 0)
+                                    (or (load duplicate)
+                                        (orchestration-run-exists? (load (field self service))
+                                                                   run-id)))
+                            (store! ok false)
+                            (store! error
+                                    (if (= (str-len run-id) 0)
+                                        "every agent requires a non-empty run_id"
+                                        (concat-or-empty allocator
+                                                         "run_id is not unique: "
+                                                         run-id)))
+                            0)
+                          (store! at (+ (load at) 1)))))
+              (store! at 0)
+              (loop (if (or (>= (load at) count) (not (load ok)))
+                        (break)
+                        (let [agent (al-get [Json] (load items) (load at))
+                              run-id (orchestration-string agent "run_id")
+                              (mut command) (json-object allocator)]
+                          (json-object-put! (mut command) "version" (json-integer allocator 1))
+                          (json-put-string! (mut command)
+                                            "command_id"
+                                            (concat-or-empty allocator
+                                                             (orchestration-command-id allocator
+                                                                                       (load (field context run-id))
+                                                                                       (load (field call id)))
+                                                             (concat-or-empty allocator ":" run-id)))
+                          (json-put-string! (mut command) "run_id" run-id)
+                          (json-put-string! (mut command)
+                                            "parent_run_id"
+                                            (load (field context run-id)))
+                          (json-put-string! (mut command)
+                                            "provider"
+                                            (orchestration-string agent "provider"))
+                          (json-put-string! (mut command)
+                                            "model"
+                                            (orchestration-string agent "model"))
+                          (json-put-string! (mut command)
+                                            "prompt"
+                                            (orchestration-string agent "prompt"))
+                          (json-object-put! (mut command) "notify_parent" (JsonBool false))
+                          (let [response
+                                  (service-submit-run (load (field self service))
+                                                      (mut command)
+                                                      (concat-or-empty allocator
+                                                                       "agent:"
+                                                                       (load (field context run-id))))]
+                            (if (and (>= (load (field response status)) 200)
+                                     (< (load (field response status)) 300))
+                                (do
+                                  (json-array-push! (mut handles) (JsonString run-id))
+                                  0)
+                                (do
+                                  (store! ok false)
+                                  (store! error
+                                          (orchestration-string (load (field response body))
+                                                                "message")))))
+                          (store! at (+ (load at) 1))))))))
+    (let [(mut result)
+            (tool-result-empty (load (field call id))
+                               (if (load ok) (ToolSucceeded) (ToolErrored)))
+          (mut output) (json-object allocator)]
+      (json-object-put! (mut output) "handles" (load handles))
+      (store! (field result output) (load output))
+      (when (not (load ok))
+        (store! (field result error) (load error))
+        0)
+      (load result))))
 
 (defn execute-create-workflow-node [(self (ptr CreateWorkflowNodeTool))
                                     (call (ptr ToolCall))
@@ -106,13 +216,185 @@
                                                                     "run_id")
                                               0)))
 
-(impl ToolImplementation SpawnSubagentTool
-  (execute-tool [(self (ptr SpawnSubagentTool))
+(defn orchestration-parent-command [(service (ptr RunService))
+                                    (run-id (slice u8))] (-> Json)
+  (let [recovery (service-recover-into service (load (field service allocator)))
+        (mut found) (JsonNull)]
+    (when (load (field recovery ok))
+      (let [(mut i) (al-len [Json] (load (field recovery events)))]
+        (loop (if (<= (load i) 0)
+                  (break)
+                  (do
+                    (store! i (- (load i) 1))
+                    (let [event
+                            (al-get [Json]
+                                    (load (field recovery events))
+                                    (load i))]
+                      (when (and (str-eq (orchestration-string event "event") "run.created")
+                                 (str-eq (orchestration-string event "run_id") run-id))
+                        (store! found (json-get event "payload"))
+                        (break)))))))
+      0)
+    (load found)))
+
+(defn execute-start-async [(self (ptr StartAsyncTool))
+                           (call (ptr ToolCall))
+                           (context (ptr ToolExecutionContext))
+                           (allocator (ptr Allocator))] (-> ToolResult)
+  (let [arguments (load (field call arguments))
+        tool-name (orchestration-string arguments "tool_name")]
+    (if (or (str-eq tool-name "start_async_tool")
+            (or (str-eq tool-name "spawn_subagents")
+                (str-eq tool-name "notify_async")))
+        (let [(mut result) (tool-result-empty (load (field call id)) (ToolDenied))]
+          (store! (field result error) "asynchronous orchestration tools cannot wrap themselves")
+          (load result))
+        (let [encoded-arguments (json-get arguments "arguments")
+              decoded-arguments
+                (match encoded-arguments
+                  ;; The public strict schema carries arbitrary nested tool
+                  ;; arguments as JSON text. Decode them before handing the
+                  ;; request to the local async-tool provider.
+                  (JsonString [text]
+                              (let [parsed (json-parse allocator text)]
+                                (if (load (field parsed ok))
+                                    (load (field parsed value))
+                                    (JsonNull))))
+                  (_ (JsonNull)))]
+          (if (match-else decoded-arguments
+                          (JsonObject [_ _] false)
+                          (_ true))
+              (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
+                (store! (field result error) "arguments must encode a JSON object")
+                (load result))
+              (let [(mut spec) (json-object allocator)
+                    (mut command) (json-object allocator)
+                    parent
+                      (orchestration-parent-command (load (field self service))
+                                                    (load (field context run-id)))
+                    run-id (orchestration-string arguments "run_id")]
+                (json-put-string! (mut spec) "tool_name" tool-name)
+                (json-object-put! (mut spec)
+                                  "arguments"
+                                  (json-clone allocator decoded-arguments))
+                (json-object-put! (mut command) "version" (json-integer allocator 1))
+                (json-put-string! (mut command)
+                                  "command_id"
+                                  (orchestration-command-id allocator
+                                                            (load (field context run-id))
+                                                            (load (field call id))))
+                (json-put-string! (mut command) "run_id" run-id)
+                (json-put-string! (mut command)
+                                  "parent_run_id"
+                                  (load (field context run-id)))
+                (json-put-string! (mut command) "provider" "async-tool")
+                (json-put-string! (mut command) "model" "async-tool")
+                (json-put-string! (mut command)
+                                  "prompt"
+                                  (json-stringify allocator (load spec)))
+                (json-put-string! (mut command)
+                                  "parent_conversation_id"
+                                  (orchestration-string parent "conversation_id"))
+                (json-object-put! (mut command) "notify_parent" (JsonBool false))
+                (orchestration-result call
+                                      (service-submit-run (load (field self service))
+                                                          (mut command)
+                                                          (concat-or-empty allocator
+                                                                           "agent:"
+                                                                           (load (field context run-id)))))))))))
+
+(defn notify-async-command [(allocator (ptr Allocator))
+                            (call (ptr ToolCall))
+                            (context (ptr ToolExecutionContext))
+                            (parent Json)
+                            (group-id (slice u8))
+                            (notification-id (slice u8))
+                            (node-id (slice u8))
+                            (handles Json)] (-> Json)
+  (let [(mut command) (json-object allocator)
+        (mut prompt) (sb-new allocator)]
+    (sb-push-str! (mut prompt)
+                  "The requested asynchronous operations have all reached terminal states. Use query_run for each handle, then report their completed, failed, or cancelled results to the user without asking them to poll. Handles: ")
+    (sb-push-str! (mut prompt) (json-stringify allocator handles))
+    (json-object-put! (mut command) "version" (json-integer allocator 1))
+    (json-put-string! (mut command)
+                      "command_id"
+                      (concat-or-empty allocator
+                                       (orchestration-command-id allocator
+                                                                 (load (field context run-id))
+                                                                 (load (field call id)))
+                                       (concat-or-empty allocator ":" node-id)))
+    (json-put-string! (mut command) "run_id" notification-id)
+    (json-put-string! (mut command) "provider" (orchestration-string parent "provider"))
+    (json-put-string! (mut command) "model" (orchestration-string parent "model"))
+    (json-put-string! (mut command) "conversation_id" (orchestration-string parent "conversation_id"))
+    (json-put-string! (mut command) "notification_parent_run_id" (load (field context run-id)))
+    (json-put-string! (mut command) "prompt" (sb-finish! (mut prompt)))
+    (json-put-string! (mut command) "workflow_id" group-id)
+    (json-object-put! (mut command) "workflow_version" (json-integer allocator 1))
+    (json-put-string! (mut command) "node_id" node-id)
+    (json-object-put! (mut command) "depends_on" (json-clone allocator handles))
+    (json-object-put! (mut command) "allow_external_dependencies" (JsonBool true))
+    (json-put-string! (mut command) "dependency_policy" "terminal")
+    (load command)))
+
+(defn execute-notify-async [(self (ptr NotifyAsyncTool))
+                            (call (ptr ToolCall))
+                            (context (ptr ToolExecutionContext))
+                            (allocator (ptr Allocator))] (-> ToolResult)
+  (let [arguments (load (field call arguments))
+        group-id (orchestration-string arguments "group_id")
+        handles (json-get arguments "handles")
+        parent
+          (orchestration-parent-command (load (field self service))
+                                        (load (field context run-id)))
+        (mut registrations) (json-array allocator)
+        (mut ok) true
+        (mut error) ""]
+    (let [notification-id (concat-or-empty allocator "notification:" group-id)
+          (mut command)
+            (notify-async-command allocator
+                                  call
+                                  context
+                                  parent
+                                  group-id
+                                  notification-id
+                                  "all"
+                                  handles)
+          response
+            (service-submit-run (load (field self service))
+                                (mut command)
+                                "agent-notification")]
+      (if (and (>= (load (field response status)) 200)
+               (< (load (field response status)) 300))
+          (do
+            (json-array-push! (mut registrations) (JsonString notification-id))
+            0)
+          (do
+            (store! ok false)
+            (store! error (orchestration-string (load (field response body)) "message")))))
+    (let [(mut result)
+            (tool-result-empty (load (field call id))
+                               (if (load ok) (ToolSucceeded) (ToolErrored)))
+          (mut output) (json-object allocator)]
+      (json-put-string! (mut output) "group_id" group-id)
+      (json-object-put! (mut output) "notifications" (load registrations))
+      (store! (field result output) (load output))
+      (when (not (load ok))
+        (store! (field result error)
+                (if (> (str-len (load error)) 0)
+                    (load error)
+                    "invalid asynchronous notification group"))
+        0)
+      (load result))))
+
+(impl ToolImplementation SpawnSubagentsTool
+  (execute-tool [(self (ptr SpawnSubagentsTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
-                (execute-spawn-subagent self call context allocator)))
+                (execute-spawn-subagents self call context allocator)))
 
 (impl ToolImplementation CreateWorkflowNodeTool
   (execute-tool [(self (ptr CreateWorkflowNodeTool))
@@ -138,6 +420,22 @@
                 (-> ToolResult)
                 (execute-query-run self call context allocator)))
 
+(impl ToolImplementation StartAsyncTool
+  (execute-tool [(self (ptr StartAsyncTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-start-async self call context allocator)))
+
+(impl ToolImplementation NotifyAsyncTool
+  (execute-tool [(self (ptr NotifyAsyncTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-notify-async self call context allocator)))
+
 (defn orchestration-property! [(allocator (ptr Allocator))
                                (properties (mut Json))
                                (name (slice u8))
@@ -160,6 +458,21 @@
     (json-array-push! (mut alternatives) (load null-type))
     (json-object-put! (mut property) "anyOf" (load alternatives))
     (json-object-put! (mut properties) name (load property))
+    0))
+
+(defn orchestration-boolean-property! [(allocator (ptr Allocator))
+                                       (properties (mut Json))
+                                       (name (slice u8))] (-> i64)
+  (orchestration-property! allocator (mut properties) name "boolean"))
+
+(defn orchestration-notification-property! [(allocator (ptr Allocator))
+                                            (properties (mut Json))] (-> i64)
+  (let [(mut property) (json-object allocator)]
+    (json-object-put! (mut property) "type" (JsonString "boolean"))
+    (json-object-put! (mut property)
+                      "description"
+                      (JsonString "Whether the parent agent should receive this child's completion message. This never blocks spawning; use true unless the child should finish silently."))
+    (json-object-put! (mut properties) "notify_parent" (load property))
     0))
 
 (defn orchestration-schema [(allocator (ptr Allocator))
@@ -188,6 +501,82 @@
       (json-array-push! (mut required) (JsonString "node_id"))
       (json-array-push! (mut required) (JsonString "depends_on"))
       0)
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn spawn-subagents-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut agent-properties) (json-object allocator)
+        (mut agent-required) (json-array allocator)
+        (mut agent) (json-object allocator)
+        (mut agents) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (orchestration-property! allocator (mut agent-properties) "run_id" "string")
+    (orchestration-nullable-string-property! allocator (mut agent-properties) "provider")
+    (orchestration-nullable-string-property! allocator (mut agent-properties) "model")
+    (orchestration-property! allocator (mut agent-properties) "prompt" "string")
+    (json-array-push! (mut agent-required) (JsonString "run_id"))
+    (json-array-push! (mut agent-required) (JsonString "provider"))
+    (json-array-push! (mut agent-required) (JsonString "model"))
+    (json-array-push! (mut agent-required) (JsonString "prompt"))
+    (json-object-put! (mut agent) "type" (JsonString "object"))
+    (json-object-put! (mut agent) "properties" (load agent-properties))
+    (json-object-put! (mut agent) "required" (load agent-required))
+    (json-object-put! (mut agent) "additionalProperties" (JsonBool false))
+    (json-object-put! (mut agents) "type" (JsonString "array"))
+    (json-object-put! (mut agents) "items" (load agent))
+    (json-object-put! (mut agents) "minItems" (json-integer allocator 1))
+    (json-object-put! (mut properties) "agents" (load agents))
+    (json-array-push! (mut required) (JsonString "agents"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn start-async-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut properties) (json-object allocator)
+        (mut arguments) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (orchestration-property! allocator (mut properties) "run_id" "string")
+    (orchestration-property! allocator (mut properties) "tool_name" "string")
+    ;; Strict OpenAI/Codex schemas cannot expose an arbitrary object: every
+    ;; object must set additionalProperties=false, which would make it accept
+    ;; no wrapped-tool fields. JSON text keeps this outer schema strict while
+    ;; the selected tool's own schema validates the decoded object at runtime.
+    (json-object-put! (mut arguments) "type" (JsonString "string"))
+    (json-object-put! (mut arguments)
+                      "description"
+                      (JsonString "A JSON-encoded object containing the selected tool's arguments."))
+    (json-object-put! (mut properties) "arguments" (load arguments))
+    (json-array-push! (mut required) (JsonString "run_id"))
+    (json-array-push! (mut required) (JsonString "tool_name"))
+    (json-array-push! (mut required) (JsonString "arguments"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn notify-async-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut properties) (json-object allocator)
+        (mut handles) (json-object allocator)
+        (mut handle) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (orchestration-property! allocator (mut properties) "group_id" "string")
+    (json-object-put! (mut handle) "type" (JsonString "string"))
+    (json-object-put! (mut handles) "type" (JsonString "array"))
+    (json-object-put! (mut handles) "items" (load handle))
+    (json-object-put! (mut handles) "minItems" (json-integer allocator 1))
+    (json-object-put! (mut properties) "handles" (load handles))
+    (json-array-push! (mut required) (JsonString "group_id"))
+    (json-array-push! (mut required) (JsonString "handles"))
     (json-object-put! (mut schema) "type" (JsonString "object"))
     (json-object-put! (mut schema) "properties" (load properties))
     (json-object-put! (mut schema) "required" (load required))
@@ -230,7 +619,8 @@
     (store! (field (field definition spec) strict) true)
     (store! (field (field definition spec) effect) effect)
     (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 30000)
+    (store! (field (field definition spec) timeout-ms)
+            (if (str-eq name "spawn_subagents") 0 30000))
     (store! (field definition implementation) implementation)
     (load definition)))
 
@@ -238,13 +628,13 @@
                                      (allocator (ptr Allocator))
                                      (service (ptr RunService))] (-> i64)
   (tool-register! (mut registry)
-                  (orchestration-definition "spawn_subagent"
-                                            "Create a durable child agent run. Set provider and model to null to inherit the parent, or supply strings as explicit overrides. Use a unique run_id and retain it for later coordination."
-                                            (orchestration-schema allocator false)
+                  (orchestration-definition "spawn_subagents"
+                                            "Start the complete requested set of durable child agents in one non-blocking batch and return their run IDs as handles. Include every child in agents, even when there is only one. Every run_id must be new and unique. Call this tool exactly once per user-requested batch; never retry returned handles. Then call notify_async exactly once with the returned handles. Set provider and model to null to inherit the parent, or supply explicit overrides."
+                                            (spawn-subagents-schema allocator)
                                             (Reversible)
                                             (box allocator
-                                                 SpawnSubagentTool
-                                                 (let [tool (alloc/stack SpawnSubagentTool)]
+                                                 SpawnSubagentsTool
+                                                 (let [tool (alloc/stack SpawnSubagentsTool)]
                                                    (store! (field tool service) service)
                                                    (load tool)))))
   (tool-register! (mut registry)
@@ -275,6 +665,26 @@
                                             (box allocator
                                                  QueryRunTool
                                                  (let [tool (alloc/stack QueryRunTool)]
+                                                   (store! (field tool service) service)
+                                                   (load tool)))))
+  (tool-register! (mut registry)
+                  (orchestration-definition "start_async_tool"
+                                            "Start any registered synchronous harness tool in a durable background run and immediately return its run_id as a handle. Use this for Bash and other ordinary tools; use spawn_subagents for agents. After starting operations, compose their handles with notify_async."
+                                            (start-async-schema allocator)
+                                            (Destructive)
+                                            (box allocator
+                                                 StartAsyncTool
+                                                 (let [tool (alloc/stack StartAsyncTool)]
+                                                   (store! (field tool service) service)
+                                                   (load tool)))))
+  (tool-register! (mut registry)
+                  (orchestration-definition "notify_async"
+                                            "Register one durable parent continuation for a complete set of asynchronous handles from spawn_subagents or start_async_tool. Call this exactly once after every requested operation has started, passing all handles together. It returns immediately; the continuation runs only after every handle completes, fails, or is cancelled, then reports the results together."
+                                            (notify-async-schema allocator)
+                                            (Reversible)
+                                            (box allocator
+                                                 NotifyAsyncTool
+                                                 (let [tool (alloc/stack NotifyAsyncTool)]
                                                    (store! (field tool service) service)
                                                    (load tool)))))
   0)

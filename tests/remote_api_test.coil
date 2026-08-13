@@ -11,7 +11,6 @@
 (import "coil.thread" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
-(import "harness-authorization-mailbox" :use *)
 (import "harness-http" :use *)
 (import "harness-http-listener" :use *)
 (import "harness-json" :use *)
@@ -19,6 +18,7 @@
 (import "harness-service-http-server" :use *)
 (import "harness-shutdown-signal" :use *)
 (import "harness-system" :use *)
+(import "harness-tool" :use *)
 (import "provider-common" :use *)
 
 (defstruct RemoteFakeController [(starts i64)])
@@ -27,6 +27,9 @@
   (start-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                      (-> i64)
                      (do (store! (field self starts) (+ (load (field self starts)) 1)) 0))
+  (request-cancel-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
+                              (-> i64)
+                              0)
   (cancel-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                       (-> RunCancellationResult)
                       (RunCancellationAccepted)))
@@ -93,6 +96,7 @@
     (store! (field request body)
             "{\"version\":1,\"command_id\":\"remote-1\",\"run_id\":\"remote-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
     (store! (field request timeout-ms) 3000)
+    (store! (field request cancellation) (cast (ptr CancellationToken) 0))
     (store! (field (field request chunks) context) (cast (ptr i8) 0))
     (store! (field (field request chunks) consume)
             (fnptr-of discard-http-chunk))
@@ -104,7 +108,6 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
-               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack RemoteFakeController)
                service (alloc/stack RunService)
                listener (alloc/stack HttpListener)
@@ -128,15 +131,11 @@
                (JournalOpenFailed [message] (assert false))
                (JournalOpened [opened] (store! journal opened)))
              (store! emitter (event-emitter-new allocator journal sequence))
-             (match (authorization-mailbox-open allocator)
-               (AuthorizationMailboxOpenFailed [message] (assert false))
-               (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
              (store! (field controller starts) 0)
              (store! (field service allocator) allocator)
              (store! (field service journal-path) path)
              (store! (field service journal) journal)
              (store! (field service emitter) emitter)
-             (store! (field service mailbox) mailbox)
              (store! (field service controller) controller)
              (match (http-listener-open allocator 0)
                (ListenerOpenFailed [message] (assert false))
@@ -238,5 +237,4 @@
                                  (do
                                    (store! reopened opened)
                                    (http-listener-close! reopened)))))
-             (authorization-mailbox-close! allocator mailbox)
              (event-journal-close! journal))))

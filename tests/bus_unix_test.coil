@@ -46,8 +46,9 @@
                     (match (socket/unix-accept-for listener accepted duration)
                       (Err [_] false)
                       (Ok [_]
-                          (do (unix-transport-adopt! server (load accepted))
-                              true))))))))))
+                          (do
+                            (unix-transport-adopt! server (load accepted))
+                            true))))))))))
 
 (defn teardown [(listener (ptr socket/UnixListener))
                 (client (ptr UnixTransport))

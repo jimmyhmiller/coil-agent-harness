@@ -72,7 +72,6 @@
         messages (box allocator (ArrayList Message) (al-new [Message] allocator))
         request (box allocator ModelRequest (zeroed ModelRequest))
         provider (box allocator CloneProvider (zeroed CloneProvider))
-        authorizer (alloc/stack AllowAllAuthorizer)
         count (box allocator i64 0)
         sink (alloc/stack CountSink)
         sequence (box allocator i64 1)
@@ -89,7 +88,7 @@
     (store! (field request reasoning) (ReasoningNone))
     (store! (field request timeout-ms) 10000)
     (store! (field sink count) count)
-    (store! (field emitter sink) sink)
+    (store! (field emitter sink) (box allocator (dyn EventSink) sink))
     (store! (field emitter next-sequence) sequence)
     (store! (field policy max-model-turns) 1)
     (store! (field policy max-parallel-tools) 1)
@@ -97,7 +96,6 @@
             (run-agent-background allocator
                                   provider
                                   request
-                                  authorizer
                                   emitter
                                   (load policy))
           result (agent-run-join (mut handle))]

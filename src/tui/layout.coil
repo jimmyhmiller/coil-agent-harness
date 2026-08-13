@@ -11,6 +11,7 @@
 (import "harness-tui-model" :use *)
 (import "harness-tui-tool-presenter" :use *)
 (import "harness-tui-transcript" :use *)
+(import "harness-tui-syntax" :use *)
 (import "harness-tui-view" :use *)
 (import "harness-tui-view-layout" :use *)
 
@@ -83,6 +84,106 @@
           (sb-finish! (mut output)))
         text)))
 
+;; ---------------------------------------------------------------------------
+;; Markdown fences
+;;
+;; Assistant text is markdown. Only fenced blocks are treated specially; the rest
+;; is left exactly as the model wrote it, because a transcript that rewrites prose
+;; is a transcript you cannot trust to be quoting.
+;;
+;; An unterminated fence -- which every streaming answer has, for as long as it is
+;; still arriving -- highlights what has come in so far and ends there. That makes
+;; the block appear progressively rather than snapping into place at the end.
+;; ---------------------------------------------------------------------------
+
+(defn layout-line-end [(text (slice u8)) (from i64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut at) from]
+    (loop (if (or (>= (load at) n) (= (slice-get [u8] text (load at)) (cast u8 10)))
+              (break)
+              (store! at (+ (load at) 1))))
+    (load at)))
+
+(defn layout-fence-at? [(text (slice u8)) (at i64)] (-> bool)
+  (let [n (slice-len [u8] text)]
+    (and (<= (+ at 3) n)
+         (and (= (slice-get [u8] text at) (cast u8 96))
+              (and (= (slice-get [u8] text (+ at 1)) (cast u8 96))
+                   (= (slice-get [u8] text (+ at 2)) (cast u8 96)))))))
+
+;; Push `body` as alternating prose and code nodes.
+(defn layout-push-markdown! [(allocator (ptr Allocator))
+                             (root (ptr ViewNode))
+                             (body (slice u8))
+                             (first-prefix (slice u8))
+                             (continuation (slice u8))
+                             (role StyleRole)] (-> i64)
+  (let [n (slice-len [u8] body)
+        (mut at) 0
+        (mut prose-start) 0
+        (mut opened) false]
+    (loop (if (> (load at) n)
+              (break)
+              (if (and (< (load at) n)
+                       (and (layout-fence-at? body (load at))
+                            (or (= (load at) 0)
+                                (= (slice-get [u8] body (- (load at) 1)) (cast u8 10)))))
+                  (let [info-end (layout-line-end body (+ (load at) 3))
+                        info (subslice [u8] body (+ (load at) 3) info-end)
+                        code-start (if (< info-end n) (+ info-end 1) n)
+                        ;; Scan for the closing fence at the start of a line.
+                        (mut scan) code-start
+                        (mut close) -1]
+                    ;; Emit the prose that ran up to this fence.
+                    (when (> (load at) (load prose-start))
+                      (view-stack-push! root
+                                        (view-flow role
+                                                   (if (= (load prose-start) 0)
+                                                       first-prefix
+                                                       continuation)
+                                                   continuation
+                                                   (subslice [u8]
+                                                             body
+                                                             (load prose-start)
+                                                             (- (load at) 1))))
+                      0)
+                    (loop (if (or (>= (load scan) n) (>= (load close) 0))
+                              (break)
+                              (if (and (layout-fence-at? body (load scan))
+                                       (or (= (load scan) code-start)
+                                           (= (slice-get [u8] body (- (load scan) 1))
+                                              (cast u8 10))))
+                                  (store! close (load scan))
+                                  (store! scan (+ (layout-line-end body (load scan)) 1)))))
+                    (let [code-end
+                            (if (>= (load close) 0)
+                                (if (> (load close) code-start) (- (load close) 1) code-start)
+                                n)]
+                      (view-stack-push! root
+                                        (view-code info
+                                                   (subslice [u8] body code-start code-end)
+                                                   continuation))
+                      (store! opened true)
+                      (store! at
+                              (if (>= (load close) 0)
+                                  (+ (layout-line-end body (load close)) 1)
+                                  (+ n 1)))
+                      (store! prose-start (load at))))
+                  (store! at (+ (load at) 1)))))
+    ;; Whatever prose is left after the last fence.
+    (when (< (load prose-start) n)
+      (view-stack-push! root
+                        (view-flow role
+                                   (if (= (load prose-start) 0) first-prefix continuation)
+                                   continuation
+                                   (subslice [u8] body (load prose-start) n)))
+      0)
+    ;; A body with no fence at all still has to render.
+    (when (and (not (load opened)) (= n 0))
+      (view-stack-push! root (view-flow role first-prefix continuation ""))
+      0)
+    0))
+
 (defn layout-view-push! [(allocator (ptr Allocator))
                          (root (ptr ViewNode))
                          (item (ref PresentationBlock))
@@ -95,29 +196,55 @@
                                               (if unicode "❯ " "> ")
                                               "  "
                                               (load (field item body)))))
+      ;; A model turn that produced only tool calls still opens an assistant block
+      ;; on `model.request.started` and never receives text. Rendering it emits a
+      ;; bare bullet above every tool group, so an empty turn that has settled
+      ;; contributes no rows at all. An unsettled one still shows progress, and a
+      ;; failed one still shows its bullet so the failure is not silent.
       (AssistantBlock []
-                      (view-stack-push! root
-                                        (view-flow (RolePrimary)
-                                                   (if unicode "● " "assistant: ")
-                                                   "  "
-                                                   (if (and (= (slice-len [u8]
-                                                                          (load (field item body)))
-                                                               0)
-                                                            (match-else (load (field item state))
-                                                                        (PresentationRunning [] true)
-                                                                        (_ false)))
-                                                       "Thinking…"
-                                                       (load (field item body))))))
+                      (let [body (load (field item body))
+                            empty (= (slice-len [u8] body) 0)
+                            unsettled
+                              (match-else (load (field item state))
+                                          (PresentationPending [] true)
+                                          (PresentationRunning [] true)
+                                          (_ false))
+                            failed
+                              (match-else (load (field item state))
+                                          (PresentationSucceeded [] false)
+                                          (_ true))]
+                        (cond (and empty (and (not unsettled) (not failed))) 0
+                              (and empty unsettled)
+                                (view-stack-push! root
+                                                  (view-flow (RolePrimary)
+                                                             (if unicode "● " "assistant: ")
+                                                             "  "
+                                                             "Thinking…"))
+                              :else
+                                (layout-push-markdown! allocator
+                                                       root
+                                                       body
+                                                       (if unicode "● " "assistant: ")
+                                                       "  "
+                                                       (RolePrimary)))))
       (ToolBlock []
                  (let [tool
-                         (present-tool (load (field item title))
+                         (present-tool allocator
+                                       (load (field item title))
                                        (load (field item arguments))
                                        (load (field item result)))
                        heading
                          (layout-join allocator
                                       (load (field tool label))
                                       (load (field tool subject)))
-                       state (layout-state-word (load (field item state)))
+                       ;; The presenter's summary wins when it has one. A bash
+                       ;; call that exits non-zero is a SUCCESSFUL tool call, so
+                       ;; the lifecycle state says "done" while the thing the
+                       ;; user cares about is "exit 1".
+                       state
+                         (if (> (slice-len [u8] (load (field tool summary))) 0)
+                             (load (field tool summary))
+                             (layout-state-word (load (field item state))))
                        show-state
                          (not (and (load (field options compact))
                                    (match-else (load (field item state))
@@ -136,6 +263,30 @@
                                                           (RolePrimary)
                                                           suffix
                                                           (layout-state-role (load (field item state)))))
+                   ;; Why it failed, if it did. A row reading "Read README.md
+                   ;; failed" with no reason is the single least useful thing the
+                   ;; transcript can say -- it looks like the file is at fault
+                   ;; when the actual cause (a deadline, a traversal check) is
+                   ;; sitting unread in the block's detail. Shown even in compact
+                   ;; mode: an error is never the noise compact is stripping.
+                   (when (> (slice-len [u8] (load (field item detail))) 0)
+                     (view-stack-push! root
+                                       (view-flow (RoleFailure)
+                                                  (if unicode "    ⎿ " "    | ")
+                                                  "      "
+                                                  (load (field item detail))))
+                     0)
+                   ;; What the call produced, indented under it. Compact mode drops
+                   ;; it: that mode exists to strip everything that is not the
+                   ;; conversation, and a result preview is the first thing to go.
+                   (when (and (not (load (field options compact)))
+                              (> (slice-len [u8] (load (field tool preview))) 0))
+                     (view-stack-push! root
+                                       (view-flow (RoleMuted)
+                                                  (if unicode "    ⎿ " "    | ")
+                                                  "      "
+                                                  (load (field tool preview))))
+                     0)
                    (when (load (field options expanded))
                      (view-stack-push! root
                                        (view-flow (RoleMuted)
@@ -161,25 +312,6 @@
                                                     (load (field item detail))))
                        0)
                      0)))
-      (ApprovalBlock []
-                     (let [subject
-                             (layout-join allocator
-                                          (load (field item title))
-                                          (load (field item body)))
-                           stable (presentation-state-stable? (load (field item state)))
-                           line
-                             (if stable
-                                 (layout-join allocator
-                                              subject
-                                              (layout-state-word (load (field item state))))
-                                 subject)]
-                       (view-stack-push! root
-                                         (view-flow (if stable
-                                                        (layout-state-role (load (field item state)))
-                                                        (RoleWarning))
-                                                    "  approval: "
-                                                    "    "
-                                                    line))))
       (AgentBlock []
                   (view-stack-push! root
                                     (view-flow (layout-state-role (load (field item state)))

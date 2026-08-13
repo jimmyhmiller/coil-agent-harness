@@ -1,0 +1,63 @@
+(module harness-tui-app-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-run-service" :use *)
+(import "harness-system" :use *)
+(import "harness-tui-app" :use *)
+(import "harness-tui-input-reader" :use *)
+(import "provider-common" :use *)
+
+(deftest automatic-selection-status-shows-the-resolved-model
+         (assert (str-eq (tui-status-provider "auto") "codex"))
+         (assert (str-eq (tui-status-model "auto" "auto") "gpt-5.6-terra")))
+
+(deftest pinned-selection-status-remains-pinned
+         (assert (str-eq (tui-status-provider "claude") "claude"))
+         (assert (str-eq (tui-status-model "claude" "claude-opus-5")
+                         "claude-opus-5")))
+
+(deftest idle-composer-discovers-an-addressed-notification-run
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-tui-notification.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               service (alloc/stack RunService)
+               source (alloc/stack TuiNotificationSource)
+               (mut command) (json-object allocator)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (json-put-string! (mut command) "actor" "agent-notification")
+           (json-put-string! (mut command) "conversation_id" "conversation-1")
+           (emit-event emitter
+                       (now-ms)
+                       (RunCreated)
+                       "notification:child-1"
+                       "notification:child-1"
+                       ""
+                       "fake"
+                       "fake-model"
+                       (load command))
+           (store! (field source service) service)
+           (store! (field source allocator) allocator)
+           (store! (field source conversation-id) "conversation-1")
+           (store! (field source cursor) 0)
+           (store! (field source pending) (al-new [(slice u8)] allocator))
+           (store! (field source pending-next) 0)
+           (assert (input-idle-notification? source))
+           (assert (str-eq (tui-notification-current source) "notification:child-1"))
+           (event-journal-close! journal)))

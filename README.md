@@ -15,9 +15,8 @@ The current slice can:
   `quality`, `subscription`, and `external-agent` routing profiles;
 - assign every event a stable `agent_id` and execute delegated child agents as durable,
   independently cancellable child runs with typed delegation messages;
-- expose one provider-neutral model, continuation, tool, authorization, result, and
-  event contract;
-- validate tool arguments before authorization;
+- expose one provider-neutral model, continuation, tool, result, and event contract;
+- validate tool arguments against their declared schema before execution;
 - execute independent tool calls concurrently with an explicit concurrency bound;
 - continue the model with ordered tool results while preserving opaque provider state;
 - run the entire model/tool loop on a background worker and join it later;
@@ -26,26 +25,21 @@ The current slice can:
   while safely ignoring a torn final record;
 - accept versioned create, cancel, run-query, and cursor-based event-query commands
   through a loopback HTTP service boundary;
-- pause tool execution for durable interactive authorization decisions, with
-  idempotent allow/reject commands and fail-closed cancellation or expiry;
 - rebuild durable run state on restart, relaunch work that was only queued, and
   terminalize work whose in-process outcome can no longer be known;
-- hold a kernel-backed exclusive writer lease for each journal, rejecting a second
-  harness process before it can duplicate recovery or side effects;
 - expose bounded `read_text_file`, `write_text_file`, `create_directory`, `delete_file`,
   and empty-only `remove_directory` tools to service runs, with traversal checks,
-  effect metadata, deadlines, cancellation, and interactive approval.
+  effect metadata, deadlines, and cancellation.
 
 The HTTP listener binds to IPv4 loopback and the CLI exposes a long-running `serve`
 command protected by capability-bearing credentials. Operator credentials can create,
-cancel, inspect, and authorize runs; observer credentials can only inspect runs and
+cancel, and inspect runs; observer credentials can only inspect runs and
 events. Remote/non-loopback deployment still needs TLS termination and transport
 hardening.
 
 The version 1 service routes are `POST /v1/runs`,
-`POST /v1/runs/{run_id}/cancel`, `GET /v1/runs/{run_id}`,
-`GET /v1/runs/{run_id}/events?after={sequence}`, and
-`POST /v1/runs/{run_id}/authorizations/{authorization_id}`. Mutation bodies carry a
+`POST /v1/runs/{run_id}/cancel`, `GET /v1/runs/{run_id}`, and
+`GET /v1/runs/{run_id}/events?after={sequence}`. Mutation bodies carry a
 stable `command_id`; replaying the same command does not repeat its effect.
 
 A create command can pin `provider` and `model`, or set both to `auto` and provide a
@@ -65,8 +59,8 @@ create command with a unique child `run_id` plus `parent_run_id`; the parent mus
 already exist. The service owns `agent_id` and `parent_agent_id` attribution and
 replaces spoofed values. It persists `agent.delegated` and `agent.created` events plus
 a versioned `message` of kind `delegation`; the child prompt is that message's content.
-The child uses the ordinary durable scheduler, budgets, tools, authorization,
-cancellation, queries, and recovery behavior rather than a second agent mechanism.
+The child uses the ordinary durable scheduler, budgets, tools, cancellation,
+queries, and recovery behavior rather than a second agent mechanism.
 Delegated runs inherit the parent run's resolved provider and model by default, so
 subscription authentication follows the same provider strategy automatically. In the
 strict `spawn_subagent` tool schema, pass `provider: null` and `model: null` to inherit;
@@ -89,9 +83,11 @@ sh scripts/e2e.sh
 Launch the local interactive workbench with a durable journal:
 
 ```sh
-./harness tui                 # uses .harness-tui.jsonl
+./harness tui                 # creates a journal under ~/.coil-harness/runs/
 ./harness tui ./work.jsonl    # reopen a specific workspace
 ```
+
+Set `HARNESS_STATE_DIR` to override the default `~/.coil-harness` state root.
 
 Every submitted turn has a durable `conversation_id` distinct from its `run_id`.
 Use `/conversation` to display it and `/new` to start another conversation. To
@@ -108,23 +104,71 @@ provider continuation. Each structured `model.request.completed` payload records
 `response_id`, `provider_session_id`, `cache_key`, and usage including
 `cached_input_tokens`, so cache reuse is auditable in the journal.
 
+Inspecting and monitoring do not require attaching to the process that owns a run.
+The journal observer can project current state, print a filtered action trace, or
+follow a live run. Every command accepts `--run-id`, `--agent-id`, `--operation-id`,
+`--parent-operation-id`, and `--event`, so the same tool can point at any action:
+
+```sh
+python3 scripts/run_observer.py inspect events.jsonl
+python3 scripts/run_observer.py events events.jsonl --run-id run-123
+python3 scripts/run_observer.py watch events.jsonl --run-id run-123 --until-terminal
+```
+
+`inspect` reports wall-clock elapsed time and open model/tool operations. `watch`
+tails new journal events and refreshes that projection every five seconds without
+taking the journal's writer lease.
+
 The terminal opens as a conversational coding-agent client: enter a request at the
-composer and watch model text, tool activity, delegation, workflow events, failures,
-and approval prompts stream into one transcript. Slash commands such as `/agent`,
+composer and watch model text, tool activity, delegation, workflow events, and
+failures stream into one transcript. Slash commands such as `/agent`,
 `/workflow`, `/status`, `/graph`, `/cancel`, and `/model` expose direct controls without
 turning the primary experience into an operator menu. The runtime registry exposes
 `bash`, `spawn_subagent`, `create_workflow_node`, `query_run`, and `query_workflow`, so
-models can construct and coordinate the same durable agent trees and DAGs. Shell
-execution and reversible orchestration calls pass through the interactive
-authorization mailbox.
+models can construct and coordinate the same durable agent trees and DAGs. A
+registered tool runs as soon as its arguments satisfy its schema; the harness has no
+permission layer and does not prompt before shell execution or file mutation.
 
 The interface stays in the normal screen buffer, so terminal scrollback, selection,
-copying, and search continue to work. Enter submits, Ctrl-J or Shift-Enter inserts a
-newline, Tab completes an unambiguous slash command, arrow keys edit or navigate
-history, Ctrl-W deletes a word, Escape or Ctrl-C interrupts active work, and Ctrl-Z
-restores the terminal before suspending. Bracketed paste is enabled only while the
-editor owns the terminal; pasted newlines and slash commands remain inert text until
-an explicit submission.
+copying, and search continue to work.
+
+`/model` opens a picker rather than a text prompt: type to filter, then choose a
+model and a reasoning-effort level (`low` through `max`). Filtering is fuzzy
+subsequence matching over both the name and its description, so `sol` finds
+`gpt-5.6-sol` and `op5` finds Claude Opus 5; a query that matches nothing leaves
+the previous list up rather than blanking it. Models that reject an effort parameter — Haiku 4.5,
+DeepSeek v4 flash — skip the second step and carry no level, so the picker never
+offers a control that does nothing. The chosen effort rides on the durable create
+command and is part of the provider prompt-cache key, so changing it correctly
+misses the cache rather than silently reusing a prefix built at another level.
+Pinning a model the picker does not list is still possible through the HTTP API;
+the catalog is a shortlist, not an allowlist.
+
+Typing `/` opens a completion menu beneath the composer: it filters as you type,
+`↑`/`↓` move the selection, `Tab` extends to the longest shared prefix and then takes
+the highlighted command, `Enter` takes the highlighted command unless what you typed
+is already that command, and `Esc` dismisses it. Menu rows are transient — they are
+erased on submit rather than committed to the transcript. An unrecognised `/command`
+is reported instead of being sent to the model.
+
+Line editing follows readline: `Ctrl-A`/`Ctrl-E` for line ends, `Alt-B`/`Alt-F` by
+word, `Ctrl-W` and `Alt-Backspace` delete the previous word, `Alt-D` the next one,
+`Ctrl-K` and `Ctrl-U` kill to the end and the start of the line, and `Ctrl-R` opens a
+reverse history search whose prompt shows the query and the matched line. `Enter`
+submits, `Ctrl-J` or `Shift-Enter` inserts a newline, `↑`/`↓` navigate history when no
+menu is open, `Ctrl-C` interrupts active work, and `Ctrl-Z` restores the terminal
+before suspending. `Esc` dismisses the completion menu or cancels a reverse search; it
+cancels a run only while one is active, and does nothing at an idle composer.
+
+Bracketed paste is enabled only while the editor owns the terminal; pasted newlines
+and slash commands remain inert text until an explicit submission.
+
+Tool calls render as one record per call with a bounded preview of what they
+produced — the first lines of `bash` output, a byte count for a file write — and a
+non-zero exit status is reported on the record even though the call itself succeeded.
+Fenced code blocks in model output are highlighted per language (keywords, strings,
+numbers, and comments) using semantic style roles, so `NO_COLOR` and screen-reader
+profiles render the same code as plain text without losing the fence that marks it.
 
 Coil automatically uses sequential, ANSI-free output when stdout is redirected, when
 `TERM=dumb`, or when screen-reader mode is enabled. It respects `NO_COLOR`. The
@@ -156,6 +200,56 @@ shutdown. Its default mode makes no model calls. Run `sh scripts/e2e.sh --live-c
 to add two minimal live Codex App Server checks using the lower-cost
 `gpt-5.6-luna` model.
 
+## Talking to Claude Code sessions
+
+The harness speaks Claude Code's local cross-session protocol, so it can find
+and message live Claude Code sessions on the same machine:
+
+```sh
+./harness peers                  # reachable sessions
+./harness peers --all            # plus dead sockets and this session, marked
+./harness send <peer> "message"  # deliver into a session's prompt queue
+```
+
+`<peer>` is a name, pid, session id, name prefix, or a raw `uds:` address or
+socket path. A raw address skips the roster entirely, because reachability never
+depended on registration.
+
+The same protocol can run in a private namespace that has no contact with Claude
+Code in either direction:
+
+```sh
+./harness peers --realm lab            # private namespace, same mechanism
+./harness send --realm lab <peer> "hi"
+HARNESS_BUS_REALM=lab ./harness peers  # or make it the default
+```
+
+`claude-code` is the default realm and is the only one that shares directories
+with Claude Code. Any other name gets its own socket directory
+(`harness-socks-<realm>`) and its own registry under `~/.coil-agent-harness`, so
+peers in it are invisible to Claude Code and it cannot see them. Isolation is by
+directory, which means a private realm still uses the same conformance-tested
+envelope and discovery.
+
+Discovery reads the socket directory and probes each entry by connecting, then
+overlays names from `~/.claude/sessions/`. That ordering is deliberate: the
+directory is the reachability graph and the registry is a cache of names over
+it, so `harness peers` also finds unregistered peers that Claude Code's own
+`ListAgents` cannot see.
+
+Sending currently works; receiving does not — the harness binds no socket, so it
+cannot be messaged or replied to. See [bus dialects](docs/agent-bus-dialects.md)
+for the design and [known gaps](docs/bus-known-gaps.md) for what remains.
+
+The wire format is reverse-engineered and is not a public API; it can change
+without notice. The notes and a reference client live in
+`docs/claude-code-cross-session-protocol/`. Regenerate the conformance vectors
+after touching either side:
+
+```sh
+python3 scripts/generate_cc_conformance.py   # requires node
+```
+
 ## Opt-in live provider tests
 
 Real-network provider tests live under `integration/`, outside every configured source
@@ -180,13 +274,16 @@ coil test integration/deepseek_live_integration.coil
 The OpenAI and Codex tests use the efficient `gpt-5.6-luna` model. API suites include
 both a minimal streaming completion and a forced `echo` tool roundtrip. The Codex
 adapter registers the harness registry as App Server dynamic tools and dispatches
-`item/tool/call` requests through the same authorizer and executor as other providers.
+`item/tool/call` requests through the same executor as other providers.
 
-The configured nesting metaprogram prints authored expression depth by function,
-module, and program. Run `coil lint src/main.coil --use harness.nesting-depth` for
-one application-graph report (file-mode lint requires the explicit `--use`).
-It runs before macro expansion and measures the surface syntax exactly as written;
-see `tools/nesting_depth.coil` for the metric.
+The optional nesting metaprogram warns only when a function body exceeds 24 nested
+surface expressions. Run `coil lint src/main.coil --use harness.nesting-depth` to
+enable it, or override its threshold with
+`--lint-param harness.nesting-depth.maximum=40`. It runs before macro expansion and counts nested s-expressions, including
+ordinary nested calls; it does not detect nested function definitions or indicate a
+correctness/runtime problem. The advisory is intentionally not part of the default
+lint set because expression-tree depth is only a weak maintainability signal. See
+`tools/nesting_depth.coil` for the metric.
 
 ## Credentials
 
@@ -220,9 +317,11 @@ broker with `HARNESS_CODEX_CREDENTIAL_HELPER`. For isolated testing, credentials
 instead be supplied through `HARNESS_CODEX_ACCESS_TOKEN` and
 `HARNESS_CODEX_ACCOUNT_ID`; never put them in command arguments.
 
-Tool authorization currently defaults to allow-all after schema validation. TUI and
-server runs do not pause for approval prompts. A scoped permissions policy will replace
-this temporary default in a future pass.
+The harness has no permission or approval layer. Registration is the only gate: a tool
+in the registry runs whenever the model calls it with schema-valid arguments, including
+`bash` and the file-mutation tools. Point a run at a workspace you are willing to let it
+change. Policy, if it returns, belongs in an out-of-tree plugin rather than in the
+runtime contract.
 
 ## Run a smoke request
 
@@ -262,7 +361,6 @@ src/providers/  OpenAI Responses, Anthropic Messages, DeepSeek dialects, Codex
 src/infra/      HTTP, synchronization, signals, sockets, and allocation adapters over Coil stdlib APIs
 src/persistence/ Append-only event journal and recovery
 src/service/     Durable run projection, versioned API routing, and HTTP serving
-schemas/codex/  Generated schemas for the locally installed Codex App Server protocol
 tests/          Deterministic unit, contract, concurrency, and runtime tests
 ```
 
@@ -271,8 +369,8 @@ generated build products.
 
 Provider adapters own URLs, authentication, request/response formats, and preservation
 of provider-specific continuation state. Runtime code never switches on a provider
-name. Tool proposal, schema validation, authorization, and execution are separate
-steps, each represented by lifecycle events.
+name. Tool proposal, schema validation, and execution are separate steps, each
+represented by lifecycle events.
 
 OpenAI and both DeepSeek dialects share an injectable streaming HTTP transport. The
 production implementation uses libcurl with bounded synchronous chunk delivery;
@@ -282,9 +380,19 @@ HTTP streaming boundary; its optional App Server strategy retains the JSONL subp
 transport for bidirectional RPC.
 Claude uses native Anthropic Messages with OAuth identity headers. Structured
 `tool_use` and `tool_result` blocks flow through the harness's normal validation,
-authorization, execution, continuation, and event lifecycle.
+execution, continuation, and event lifecycle.
 
 ## Important current behavior
+
+- A run has no time limit unless the command asks for one. `timeout_ms` on a create
+  command sets that run's deadline and is honoured verbatim -- there is no default
+  and no ceiling. Omit it, and the run ends only by finishing, failing, or being
+  cancelled, which is the normal case for a task. Three separate bounds used to be
+  derived from one number; they are now distinct: the transport timeout bounds a
+  single HTTP request to the provider, each `ToolSpec` carries its own `timeout_ms`
+  (zero for unbounded), and the run deadline is the opt-in one above. Conflating
+  them meant an expired run clock rejected later tool calls before running them, so
+  a `read_text_file` that never touched the disk reported a deadline error.
 
 - OpenAI uses strict Responses API function definitions and `function_call_output`
   continuation items keyed by `call_id`. Responses are decoded incrementally from
@@ -299,8 +407,8 @@ authorization, execution, continuation, and event lifecycle.
   prompt-cache affinity, streamed output-item reconstruction, and encrypted reasoning
   replay for tool continuations. `HARNESS_CODEX_STRATEGY=app-server` selects the
   persistent JSONL App Server fallback.
-- Registered tool calls are currently authorized immediately after schema validation;
-  there is no interactive approval pause in TUI or server runs.
+- A registered tool executes as soon as its arguments validate. There is no
+  permission check, and no interactive approval pause in TUI or server runs.
 - Parallel tool results retain model call order even when completion order differs.
 - Concurrent event publication is serialized across sequence assignment and journal
   append, so durable records are written in ascending `sequence` order.
@@ -330,6 +438,4 @@ operational hardening and measured gaps rather than introducing another executio
 mechanism. All current provider adapters emit incremental text deltas with bounded
 synchronous backpressure.
 
-See [the roadmap audit](docs/roadmap-audit.md) for the completed slices and the one
-remaining product boundary: interactive Codex App Server approval RPCs need a scoped
-authorization capability added to the provider/runtime contract.
+See [the roadmap audit](docs/roadmap-audit.md) for the completed slices.

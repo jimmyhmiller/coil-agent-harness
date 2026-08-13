@@ -38,19 +38,19 @@
   (Broadcast [])
   (Service []))
 
-(derive-serde-sum Address)
+(derive Serialize Deserialize Address)
 
 (defn address-eq [(left Address) (right Address)] (-> bool)
   (match left
     (Agent [left-id]
            (match right
-             (Agent [right-id] (str-eq left-id right-id))
+             (Agent [right-id] (= left-id right-id))
              (Topic [_] false)
              (Broadcast [] false)
              (Service [] false)))
     (Topic [left-name]
            (match right
-             (Topic [right-name] (str-eq left-name right-name))
+             (Topic [right-name] (= left-name right-name))
              (Agent [_] false)
              (Broadcast [] false)
              (Service [] false)))
@@ -92,7 +92,7 @@
   (Ping [])
   (Pong []))
 
-(derive-serde-sum MessageKind)
+(derive Serialize Deserialize MessageKind)
 
 (const PROTOCOL_VERSION 1)
 
@@ -108,7 +108,7 @@
    (kind MessageKind)
    (body (slice u8))])
 
-(derive-serde Envelope)
+(derive Serialize Deserialize Envelope)
 
 (defn envelope-new [(id (slice u8))
                     (from Address)

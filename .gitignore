@@ -48,6 +48,7 @@ dist/
 /harness-*
 /harness.o
 /.harness-tui*.jsonl
+/.coil-harness/
 /test
 /.coil/
 /.build/

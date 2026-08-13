@@ -128,6 +128,16 @@
                                   (input-escape-prefix? (mut (field decoder escape))
                                                         "[13;2u"))))))))))
 
+;; ESC immediately followed by a byte that is not `[` is an Alt-modified key, not
+;; the start of a CSI sequence. Terminals send Alt this way by default, so without
+;; this branch alt+backspace and alt+b were swallowed by the unknown-prefix check.
+(defn input-decoder-alt-key [(byte u8)] (-> InputDecode)
+  (cond (= byte (cast u8 98)) (InputDecoded (InputWordLeft))
+        (= byte (cast u8 102)) (InputDecoded (InputWordRight))
+        (= byte (cast u8 100)) (InputDecoded (InputDeleteWordForward))
+        (or (= byte (cast u8 127)) (= byte (cast u8 8))) (InputDecoded (InputDeleteWord))
+        :else (InputIgnored)))
+
 (defn input-decoder-finish-escape! [(decoder (ptr InputDecoder))] (-> InputDecode)
   (let [escape (mut (field decoder escape))]
     (cond (input-escape-eq? escape "[A") (InputDecoded (InputHistoryPrevious))
@@ -172,7 +182,12 @@
         (> (al-len [u8] (load (field decoder escape))) 0)
           (do
             (al-push! [u8] (mut (field decoder escape)) byte)
-            (cond (not (input-decoder-escape-known-prefix? decoder))
+            (cond (and (= (al-len [u8] (load (field decoder escape))) 2)
+                       (!= byte (cast u8 91)))
+                    (let [decoded (input-decoder-alt-key byte)]
+                      (al-clear! [u8] (mut (field decoder escape)))
+                      decoded)
+                  (not (input-decoder-escape-known-prefix? decoder))
                     (do
                       (al-clear! [u8] (mut (field decoder escape)))
                       (InputIgnored))
@@ -194,6 +209,9 @@
         (= byte (cast u8 23)) (InputDecoded (InputDeleteWord))
         (= byte (cast u8 1)) (InputDecoded (InputHome))
         (= byte (cast u8 5)) (InputDecoded (InputEnd))
+        (= byte (cast u8 11)) (InputDecoded (InputKillToEnd))
+        (= byte (cast u8 21)) (InputDecoded (InputKillToStart))
+        (= byte (cast u8 18)) (InputDecoded (InputReverseSearch))
         (= byte (cast u8 9)) (InputDecoded (InputComplete))
         (>= byte (cast u8 32))
           (let [single (alloc/stack (array u8 1))]
@@ -202,12 +220,16 @@
                                                    (slice-new [u8] (index single 0) 1)))))
         :else (InputIgnored)))
 
-;; A lone Escape is meaningful only after the reader's short sequence timeout.
+;; A lone Escape is meaningful only after the reader's short sequence timeout. It
+;; dismisses whatever is open; the editor decides what that means. It is NOT an
+;; interrupt: Escape at an idle composer used to write a literal `^C` into the
+;; transcript, and cancelling an active run is the busy reader's job, not this
+;; one's -- the composer is not even accepting input then.
 (defn input-decoder-timeout! [(decoder (ptr InputDecoder))] (-> InputDecode)
   (if (= (al-len [u8] (load (field decoder escape))) 1)
       (do
         (al-clear! [u8] (mut (field decoder escape)))
-        (InputDecoded (InputInterrupt)))
+        (InputDecoded (InputDismiss)))
       (do
         (al-clear! [u8] (mut (field decoder escape)))
         (InputIgnored))))

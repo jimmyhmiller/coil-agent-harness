@@ -3,6 +3,7 @@
 (import "coil.alloc" :use *)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
+(import "harness-tui-command" :use *)
 (import "harness-tui-input-editor" :use *)
 
 (deftest edits-at-utf8-boundaries-without-splitting-scalars
@@ -42,15 +43,113 @@
            (input-editor-apply! (mut editor) (InputDeleteWord))
            (assert (str-eq (input-editor-text (mut editor)) "hello "))))
 
-(deftest completes-unambiguous-slash-commands
+(deftest completes-slash-commands-from-the-registry
          (let [allocator (malloc-allocator)
-               (mut editor) (input-editor-new allocator)]
+               (mut commands) (command-registry-builtin allocator)
+               (mut editor) (input-editor-new-with-commands allocator (mut commands))]
+           ;; One match: Tab extends all the way to the command.
            (input-editor-apply! (mut editor) (InputInsert "/gr"))
            (input-editor-apply! (mut editor) (InputComplete))
            (assert (str-eq (input-editor-text (mut editor)) "/graph"))
+           ;; Several matches that share nothing beyond what was typed: Tab takes
+           ;; the highlighted row, which is the one the menu is already showing.
            (input-editor-clear! (mut editor))
            (input-editor-apply! (mut editor) (InputInsert "/c"))
+           (assert (input-editor-menu-open? (mut editor)))
+           (input-editor-apply! (mut editor) (InputComplete))
+           (assert (str-eq (input-editor-text (mut editor)) "/cancel"))))
+
+(deftest an-editor-without-a-registry-never-completes
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "/gr"))
+           (assert (not (input-editor-menu-open? (mut editor))))
            (assert (match-else (input-editor-apply! (mut editor) (InputComplete))
                                (InputUnchanged [] true)
                                (_ false)))
-           (assert (str-eq (input-editor-text (mut editor)) "/c"))))
+           (assert (str-eq (input-editor-text (mut editor)) "/gr"))))
+
+(deftest the-menu-closes-once-an-argument-is-typed
+         (let [allocator (malloc-allocator)
+               (mut commands) (command-registry-builtin allocator)
+               (mut editor) (input-editor-new-with-commands allocator (mut commands))]
+           (input-editor-apply! (mut editor) (InputInsert "/model"))
+           (assert (input-editor-menu-open? (mut editor)))
+           (input-editor-apply! (mut editor) (InputInsert " codex"))
+           (assert (not (input-editor-menu-open? (mut editor))))))
+
+(deftest escape-dismisses-the-menu-and-typing-brings-it-back
+         (let [allocator (malloc-allocator)
+               (mut commands) (command-registry-builtin allocator)
+               (mut editor) (input-editor-new-with-commands allocator (mut commands))]
+           (input-editor-apply! (mut editor) (InputInsert "/c"))
+           (assert (input-editor-menu-open? (mut editor)))
+           (input-editor-apply! (mut editor) (InputDismiss))
+           (assert (not (input-editor-menu-open? (mut editor))))
+           ;; A dismissed menu must not stay dismissed forever, or the feature
+           ;; silently disappears for the rest of the session.
+           (input-editor-apply! (mut editor) (InputInsert "a"))
+           (assert (input-editor-menu-open? (mut editor)))))
+
+(deftest arrow-keys-drive-the-menu-instead-of-history-while-it-is-open
+         (let [allocator (malloc-allocator)
+               (mut commands) (command-registry-builtin allocator)
+               (mut editor) (input-editor-new-with-commands allocator (mut commands))]
+           (input-editor-apply! (mut editor) (InputInsert "history line"))
+           (input-editor-apply! (mut editor) (InputSubmit))
+           (input-editor-apply! (mut editor) (InputInsert "/c"))
+           (input-editor-apply! (mut editor) (InputHistoryNext))
+           ;; The buffer is untouched: the key moved the selection, not history.
+           (assert (str-eq (input-editor-text (mut editor)) "/c"))
+           (assert (= (input-editor-menu-selected (mut editor)) 1))
+           ;; Up from the top wraps to the bottom rather than sticking.
+           (input-editor-apply! (mut editor) (InputHistoryPrevious))
+           (input-editor-apply! (mut editor) (InputHistoryPrevious))
+           (assert (= (input-editor-menu-selected (mut editor)) 2))
+           (input-editor-apply! (mut editor) (InputHistoryNext))
+           (input-editor-apply! (mut editor) (InputSubmit))
+           (assert (str-eq (input-editor-text (mut editor)) "/cancel"))))
+
+(deftest kills-and-word-motions-operate-around-the-cursor
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "alpha beta gamma"))
+           (input-editor-apply! (mut editor) (InputWordLeft))
+           (input-editor-apply! (mut editor) (InputKillToEnd))
+           (assert (str-eq (input-editor-text (mut editor)) "alpha beta "))
+           (input-editor-apply! (mut editor) (InputWordLeft))
+           (input-editor-apply! (mut editor) (InputKillToStart))
+           (assert (str-eq (input-editor-text (mut editor)) "beta "))
+           (input-editor-apply! (mut editor) (InputHome))
+           (input-editor-apply! (mut editor) (InputDeleteWordForward))
+           (assert (str-eq (input-editor-text (mut editor)) " "))))
+
+(deftest reverse-search-finds-history-and-escape-restores-the-line
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "build the parser"))
+           (input-editor-apply! (mut editor) (InputSubmit))
+           (input-editor-apply! (mut editor) (InputInsert "run the tests"))
+           (input-editor-apply! (mut editor) (InputSubmit))
+           (input-editor-apply! (mut editor) (InputInsert "draft"))
+           (input-editor-apply! (mut editor) (InputReverseSearch))
+           (assert (input-editor-search-active? (mut editor)))
+           (input-editor-apply! (mut editor) (InputInsert "parser"))
+           (assert (str-eq (input-editor-text (mut editor)) "build the parser"))
+           ;; Cancelling puts back exactly what was being typed before Ctrl-R.
+           (input-editor-apply! (mut editor) (InputDismiss))
+           (assert (not (input-editor-search-active? (mut editor))))
+           (assert (str-eq (input-editor-text (mut editor)) "draft"))))
+
+(deftest a-failing-reverse-search-keeps-the-last-match
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)]
+           (input-editor-apply! (mut editor) (InputInsert "run the tests"))
+           (input-editor-apply! (mut editor) (InputSubmit))
+           (input-editor-apply! (mut editor) (InputReverseSearch))
+           (input-editor-apply! (mut editor) (InputInsert "run"))
+           (assert (str-eq (input-editor-text (mut editor)) "run the tests"))
+           (input-editor-apply! (mut editor) (InputInsert "zzz"))
+           ;; No match for "runzzz" -- the buffer must not be cleared out from
+           ;; under the user just because the next keystroke matched nothing.
+           (assert (str-eq (input-editor-text (mut editor)) "run the tests"))))

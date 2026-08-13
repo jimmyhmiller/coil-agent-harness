@@ -7,6 +7,12 @@
 (import "coil.result" :use *)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
+(import "harness-tool" :use *)
+
+; Preserve the harness transport contract as its own exported constants instead
+; of depending on coil.http.client constants leaking globally across modules.
+(const BODY-CONTINUE 0)
+(const BODY-STOP 1)
 
 ;; Providers reach HTTP only through StreamingHttpTransport; this module adapts
 ;; that boundary to coil.http.client. There is no longer any libcurl surface here
@@ -21,6 +27,7 @@
    (headers (ptr (ArrayList (slice u8))))
    (body (slice u8))
    (timeout-ms i64)
+   (cancellation (ptr CancellationToken))
    (chunks HttpChunkSink)])
 
 (defstruct HttpResponse
@@ -69,11 +76,12 @@
     (when (> retained 0)
       (al-extend! [u8] (mut (field capture body)) data retained)
       0)
-    (let [accepted (cast i64
-                         (primitive/call-ptr (load (field sink consume))
-                                             data
-                                             (cast usize length)
-                                             (load (field sink context))))]
+    (let [accepted
+            (cast i64
+                  (primitive/call-ptr (load (field sink consume))
+                                      data
+                                      (cast usize length)
+                                      (load (field sink context))))]
       (if (< accepted length) BODY-STOP BODY-CONTINUE))))
 
 (defn header-colon [(line (slice u8))] (-> i64)
@@ -167,7 +175,13 @@
     (store! (field native-request connect-timeout-ms) (load (field request timeout-ms)))
     (store! (field native-request timeout-ms) (load (field request timeout-ms)))
     (store! (field native-request follow-redirects) false)
-    (match (client/request-stream allocator native-request (load sink))
+    (match (if (= (load (field request cancellation))
+                  (cast (ptr CancellationToken) 0))
+               (client/request-stream allocator native-request (load sink))
+               (client/request-stream-cancellable allocator
+                                                  native-request
+                                                  (load sink)
+                                                  (field (load (field request cancellation)) native)))
       (Ok [response]
           (do
             ;; A consumer stop is a successful transfer that ended early, not a

@@ -47,6 +47,23 @@
   (let [prefix (concat-or-empty allocator root "/")]
     (concat-or-empty allocator prefix path)))
 
+;; A NUL anywhere in the first bytes means this is not text. Scanning the whole
+;; buffer would be equally correct but this is enough: every binary format puts
+;; one near the front, and a text file never does.
+(defn file-tool-binary? [(bytes (slice u8))] (-> bool)
+  (let [n (slice-len [u8] bytes)
+        limit (if (> n 8192) 8192 n)
+        (mut i) 0
+        (mut binary) false]
+    (loop (if (or (load binary) (>= (load i) limit))
+              (break)
+              (do
+                (when (= (slice-get [u8] bytes (load i)) (cast u8 0))
+                  (store! binary true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load binary)))
+
 (defn bounded-read-file [(allocator (ptr Allocator))
                          (path (slice u8))] (-> BoundedReadResult)
   (let [c-path (str->cstr allocator path)
@@ -64,24 +81,24 @@
               (mut failed) false
               (mut truncated) false]
           (block :done
-                 (loop (let [current (al-len [u8] (load bytes))
-                             remaining (- (+ FILE_TOOL_MAX_BYTES 1) current)
-                             requested (if (< remaining 4096) remaining 4096)]
-                         (if (<= requested 0)
-                             (do (store! truncated true) (break))
-                             (let [count
-                                     (cast i64
-                                           (io/read fd
-                                                    (cast (ptr i8) (index buffer 0))
-                                                    (cast isize requested)))]
-                               (if (< count 0)
-                                   (do (store! failed true) (break))
-                                   (if (= count 0)
-                                       (break)
-                                       (al-extend! [u8]
-                                                   (mut bytes)
-                                                   (cast (ptr u8) (index buffer 0))
-                                                   count))))))))
+                   (loop (let [current (al-len [u8] (load bytes))
+                               remaining (- (+ FILE_TOOL_MAX_BYTES 1) current)
+                               requested (if (< remaining 4096) remaining 4096)]
+                           (if (<= requested 0)
+                               (do (store! truncated true) (break))
+                               (let [count
+                                       (cast i64
+                                             (io/read fd
+                                                      (cast (ptr i8) (index buffer 0))
+                                                      (cast isize requested)))]
+                                 (if (< count 0)
+                                     (do (store! failed true) (break))
+                                     (if (= count 0)
+                                         (break)
+                                         (al-extend! [u8]
+                                                     (mut bytes)
+                                                     (cast (ptr u8) (index buffer 0))
+                                                     count))))))))
           (os/close fd)
           (if (load failed)
               (BoundedReadFailed "could not read file")
@@ -130,18 +147,28 @@
                                                       relative))
               (BoundedReadFailed [message] (file-tool-error call message))
               (BoundedReadOk [bytes truncated]
-                             (let [(mut output) (json-object allocator)
-                                   (mut result)
-                                     (tool-result-empty (load (field call id))
-                                                        (ToolSucceeded))]
-                               (json-put-string! (mut output) "content" bytes)
-                               (json-put-bool! (mut output) "truncated" truncated)
-                               (json-object-put! (mut output)
-                                                 "bytes"
-                                                 (json-integer allocator
-                                                               (slice-len [u8] bytes)))
-                               (store! (field result output) (load output))
-                               (load result))))))))
+                             ;; `read_text_file` means text. A NUL byte is the
+                             ;; cheap, reliable signal that it is not -- and
+                             ;; without this guard a compiled binary reads back
+                             ;; as up to a MiB of junk that goes straight into
+                             ;; the conversation and never leaves it, blowing
+                             ;; the model's limit on this request and every
+                             ;; later one in the same conversation.
+                             (if (file-tool-binary? bytes)
+                                 (file-tool-error call
+                                                  "file is not text (contains NUL bytes); read_text_file only handles text")
+                                 (let [(mut output) (json-object allocator)
+                                       (mut result)
+                                         (tool-result-empty (load (field call id))
+                                                            (ToolSucceeded))]
+                                   (json-put-string! (mut output) "content" bytes)
+                                   (json-put-bool! (mut output) "truncated" truncated)
+                                   (json-object-put! (mut output)
+                                                     "bytes"
+                                                     (json-integer allocator
+                                                                   (slice-len [u8] bytes)))
+                                   (store! (field result output) (load output))
+                                   (load result)))))))))
 
 (defn execute-write-text-file [(self (ptr WriteTextFileTool))
                                (call (ptr ToolCall))

@@ -37,8 +37,9 @@
                           (match (socket/tcp-accept-for listener accepted duration)
                             (Err [_] false)
                             (Ok [_]
-                                (do (tcp-transport-adopt! server (load accepted))
-                                    true))))))))))))
+                                (do
+                                  (tcp-transport-adopt! server (load accepted))
+                                  true))))))))))))
 
 (deftest an-envelope-crosses-a-real-socket
          (let [allocator (malloc-allocator)

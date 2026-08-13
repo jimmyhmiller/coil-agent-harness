@@ -13,9 +13,9 @@ committed transcript       append-only terminal output
 live region                a small redrawable block at the bottom
 ```
 
-Only unfinished work belongs in the live region. Once a message, tool call, approval,
-or run reaches a stable presentation, it is committed to the transcript and is no
-longer mutated.
+Only unfinished work belongs in the live region. Once a message, tool call, or run
+reaches a stable presentation, it is committed to the transcript and is no longer
+mutated.
 
 The architecture must nevertheless leave room for a later retained viewport that can
 revise completed-looking blocks above the bottom line while they remain on screen.
@@ -54,8 +54,8 @@ service journal / runtime events
    semantic presentation model
        /              \
  transcript policy   interaction controller
-       |              /        \
-     layout       input editor  approvals
+       |                    |
+     layout            input editor
        |
  virtual terminal frame
        |
@@ -70,7 +70,7 @@ Dependencies point downward. In particular:
 
 - Domain events never contain colors, indentation, terminal rows, or animation frames.
 - Presentation state never writes to file descriptors.
-- Layout never performs service calls or authorization decisions.
+- Layout never performs service calls.
 - The renderer receives complete desired frames and does not interpret event payloads.
 - The terminal driver is the only layer that emits control sequences or changes
   terminal modes.
@@ -81,8 +81,8 @@ Dependencies point downward. In particular:
 
 The adapter consumes durable public events and translates them into semantic UI
 actions. Each event family must be self-describing: a tool proposal carries the
-authoritative tool name and structured arguments, an authorization event carries the
-authorization decision data, and a completion carries the structured outcome. The
+authoritative tool name and structured arguments, and a completion carries the
+structured outcome. The
 adapter may reduce successive lifecycle events for the same entity by stable identity;
 it must never recover missing facts from another event family, event adjacency, or
 previously formatted text.
@@ -93,7 +93,6 @@ Example actions include:
 AssistantTextAppended(run, text)
 ToolStarted(operation, tool, arguments)
 ToolFinished(operation, outcome)
-ApprovalRequested(authorization, effect)
 AgentStateChanged(agent, state)
 RunFinished(run, outcome)
 ```
@@ -118,7 +117,6 @@ Session
     AssistantMessage
     ToolGroup
       ToolCall
-    Approval
     Delegation
     Error
 ```
@@ -142,7 +140,6 @@ Initial rules:
 - A submitted user message commits immediately.
 - Assistant text remains live while streaming and commits at a stable boundary.
 - A running tool remains live; its final compact summary commits on completion.
-- An approval remains live until decided, then commits as a one-line result.
 - Multiple parallel tools may form one live group and commit in deterministic visual
   order even when execution completes out of order.
 - Errors commit immediately and use explicit text in addition to color.
@@ -170,14 +167,11 @@ Layout is deterministic and pure enough for snapshot tests. It must not emit ANS
 
 ### 5. Interaction controller
 
-The controller coordinates input focus, submission, interruption, approvals,
-expansion, command completion, and resize notifications. It turns key events into
-intent; it does not mutate service state directly. Service-facing commands pass
-through a narrow application boundary so interactions can be tested without a real
-terminal or provider.
-
-Approval views expose explicit actions such as allow once, allow by rule, and reject.
-The controller chooses no authorization policy on the user's behalf.
+The controller coordinates input focus, submission, interruption, expansion, command
+completion, and resize notifications. It turns key events into intent; it does not
+mutate service state directly. Service-facing commands pass through a narrow
+application boundary so interactions can be tested without a real terminal or
+provider.
 
 ### 6. Input editor
 
@@ -342,7 +336,7 @@ restarted sessions, and cache reuse is both observable and scoped by tested keys
 Deliverables:
 
 - Capture representative event streams for plain answers, streamed answers, one tool,
-  parallel tools, approvals, delegation, cancellation, failure, and replay.
+  parallel tools, delegation, cancellation, failure, and replay.
 - Define expected human transcripts and live frames as golden fixtures.
 - Add a fake terminal that records typed terminal operations and configurable width.
 - Document the supported baseline terminals and fallback behavior.
@@ -393,19 +387,21 @@ Deliverables:
 Exit criterion: streaming produces a calm interface, completed history never moves,
 and interruption or abnormal exit restores the shell.
 
-### Phase 4: input editor and inline approvals
+### Phase 4: input editor
 
 Deliverables:
 
 - Replace line-only reads with the independent input editor.
 - Add bracketed paste, multiline editing, history, and slash completion.
 - Define whether submitted steering is queued or sent during active runs.
-- Present approvals in the live region with keyboard and textual choices.
-- Collapse decided approvals into concise transcript records.
-- Make Escape semantics consistent for menus, approval rejection, and run interruption.
+- Make Escape semantics consistent for menus and run interruption.
 
-Exit criterion: input and approval interactions never race with output redraws, pasted
-content is safe, and every action has a plain-mode equivalent.
+Exit criterion: input never races with output redraws, pasted content is safe, and
+every action has a plain-mode equivalent.
+
+The harness has no permission layer, so there are no approval views to present. If a
+policy plugin is ever added, its prompt is a live-region block like any other and does
+not change the renderer contract.
 
 ### Phase 5: information architecture and orchestration views
 
@@ -466,7 +462,6 @@ src/tui/layout.coil              wrapping and block layout
 src/tui/cells.coil               display-cell width and sanitization
 src/tui/style.coil               semantic roles and theme resolution
 src/tui/input.coil               editable prompt model
-src/tui/approval.coil            approval interaction presentation
 src/tui/tool_presenter.coil      generic presenter contract
 src/tui/tools/bash.coil          Bash-specific summaries
 src/tui/frame.coil               virtual lines, spans, and stable identities
@@ -478,8 +473,7 @@ src/tui/lifecycle.coil           mode and signal restoration
 ```
 
 `src/main.coil` should assemble these pieces and select a renderer, not contain event
-formatting, terminal escape construction, approval policy, and the conversation loop
-in one module.
+formatting, terminal escape construction, and the conversation loop in one module.
 
 ## Testing strategy
 
@@ -520,4 +514,4 @@ Still open after version one:
   and compatibility complexity after the footer renderer is proven.
 
 These are presentation and interaction decisions. None should require changing the
-durable journal, provider contracts, tool executor, or authorization policy.
+durable journal, provider contracts, or tool executor.

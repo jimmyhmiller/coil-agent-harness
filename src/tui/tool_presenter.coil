@@ -2,53 +2,251 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
+(import "coil.arraylist" :use *)
 (import "harness-json" :use *)
 (import "provider-common" :use *)
 
 (defstruct ToolPresentation
   [(label (slice u8))
    (subject (slice u8))
-   (summary (slice u8))])
+   (summary (slice u8))
+   ;; A bounded, already-line-broken preview of what the call produced. Empty
+   ;; when there is nothing worth showing, which is the common case for a call
+   ;; that succeeded and returned only a path.
+   (preview (slice u8))])
 
 (defn tool-json-string [(value Json) (key (slice u8))] (-> (slice u8))
   (match (json-string-at value key)
     (Some [text] text)
     (None [] "")))
 
-(defn tool-presentation-new [(label (slice u8))
-                             (subject (slice u8))
-                             (summary (slice u8))] (-> ToolPresentation)
+(defn tool-presentation-full [(label (slice u8))
+                              (subject (slice u8))
+                              (summary (slice u8))
+                              (preview (slice u8))] (-> ToolPresentation)
   (let [presentation (alloc/stack ToolPresentation)]
     (store! (field presentation label) label)
     (store! (field presentation subject) subject)
     (store! (field presentation summary) summary)
+    (store! (field presentation preview) preview)
     (load presentation)))
 
+(defn tool-presentation-new [(label (slice u8))
+                             (subject (slice u8))
+                             (summary (slice u8))] (-> ToolPresentation)
+  (tool-presentation-full label subject summary ""))
+
+;; A tool subject is one heading line. Arguments are arbitrary text: a bash command
+;; can carry embedded newlines and tabs, and the flow layout turns a raw newline into
+;; a hard row break with the continuation indent applied mid-argument.
+;;
+;; Escaping rather than collapsing is deliberate. Replacing a newline with a space
+;; would render `a\nb` and `a b` identically, and those are different shell commands
+;; -- the heading would be compact and wrong. A visible two-character escape keeps
+;; the record on one row and still says exactly what was run.
+(defn tool-inline-text [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] text)
+        (mut out) (sb-new allocator)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [byte (slice-get [u8] text (load i))]
+                (cond (= byte (cast u8 10)) (sb-push-str! (mut out) "\\n")
+                      (= byte (cast u8 13)) (sb-push-str! (mut out) "\\r")
+                      (= byte (cast u8 9)) (sb-push-str! (mut out) "\\t")
+                      :else (sb-push-byte! (mut out) byte))
+                (store! i (+ (load i) 1)))))
+    (sb-finish! (mut out))))
+
+(const TOOL_PREVIEW_MAX_ROWS 4)
+(const TOOL_PREVIEW_MAX_CELLS 160)
+
+(defn tool-decimal [(allocator (ptr Allocator)) (value i64)] (-> (slice u8))
+  (if (<= value 0)
+      "0"
+      (let [(mut buffer) (sb-new allocator)
+            (mut digits) (al-new [i64] allocator)
+            (mut remaining) value]
+        (loop (if (<= (load remaining) 0)
+                  (break)
+                  (do
+                    (al-push! [i64] (mut digits) (% (load remaining) 10))
+                    (store! remaining (/ (load remaining) 10)))))
+        (let [n (al-len [i64] (load digits))
+              (mut i) 0]
+          (loop (if (>= (load i) n)
+                    (break)
+                    (do
+                      (sb-push-byte! (mut buffer)
+                                     (cast u8
+                                           (+ 48
+                                              (al-get [i64]
+                                                      (load digits)
+                                                      (- (- n 1) (load i))))))
+                      (store! i (+ (load i) 1))))))
+        (sb-finish! (mut buffer)))))
+
+(defn tool-count-lines [(text (slice u8))] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut i) 0
+        (mut lines) 0
+        (mut saw) false]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (store! saw true)
+                (when (= (slice-get [u8] text (load i)) (cast u8 10))
+                  (store! lines (+ (load lines) 1))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (if (and (load saw) (!= (slice-get [u8] text (- n 1)) (cast u8 10)))
+        (+ (load lines) 1)
+        (load lines))))
+
+;; The first few lines of an output, each clipped to a sane width, with a count
+;; of what was left out. Newlines are KEPT here -- unlike the heading, a preview
+;; is allowed to be several rows, and the flow layout turns each newline into a
+;; row with the continuation indent, which is exactly the shape wanted.
+(defn tool-preview-lines [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] text)]
+    (if (= n 0)
+        ""
+        (let [(mut out) (sb-new allocator)
+              (mut i) 0
+              (mut rows) 0
+              (mut column) 0
+              (mut clipped) false
+              (mut stop) false]
+          (loop (if (or (load stop) (>= (load i) n))
+                    (break)
+                    (let [byte (slice-get [u8] text (load i))]
+                      (cond (= byte (cast u8 10))
+                              (do
+                                (store! rows (+ (load rows) 1))
+                                (store! column 0)
+                                (if (>= (load rows) TOOL_PREVIEW_MAX_ROWS)
+                                    (store! stop true)
+                                    (sb-push-byte! (mut out) byte)))
+                            (= byte (cast u8 13)) 0
+                            (>= (load column) TOOL_PREVIEW_MAX_CELLS) (do (store! clipped true) 0)
+                            :else
+                              (do
+                                (sb-push-byte! (mut out) byte)
+                                (store! column (+ (load column) 1))))
+                      (store! i (+ (load i) 1)))))
+          (let [total (tool-count-lines text)
+                shown (if (> total TOOL_PREVIEW_MAX_ROWS) TOOL_PREVIEW_MAX_ROWS total)
+                remaining (- total shown)]
+            (when (or (> remaining 0) (load clipped))
+              (sb-push-str! (mut out) "\n… ")
+              (when (> remaining 0)
+                (sb-push-str! (mut out) (tool-decimal allocator remaining))
+                (sb-push-str! (mut out) " more lines")
+                0)
+              (when (and (load clipped) (= remaining 0))
+                (sb-push-str! (mut out) "truncated")
+                0)
+              0)
+            (sb-finish! (mut out)))))))
+
+(defn tool-json-int [(value Json) (key (slice u8))] (-> i64)
+  (json-number-i64 (json-get value key)))
+
+;; Bash shows what it printed. On failure stderr wins, because a non-zero exit
+;; with empty stdout is the case where the interesting text is the one nobody
+;; would otherwise see.
+(defn tool-bash-presentation [(allocator (ptr Allocator))
+                              (arguments Json)
+                              (result Json)] (-> ToolPresentation)
+  (let [exit-code (tool-json-int result "exit_code")
+        stdout (tool-json-string result "stdout")
+        stderr (tool-json-string result "stderr")
+        failed (!= exit-code 0)
+        source
+          (if (and failed (> (slice-len [u8] stderr) 0))
+              stderr
+              (if (> (slice-len [u8] stdout) 0) stdout stderr))
+        ;; A running call has no result yet, so `exit_code` is absent and reads
+        ;; back as 0. Only report an exit status once the result is a real object.
+        settled
+          (match-else result
+                      (JsonObject [keys values] true)
+                      (_ false))
+        summary
+          (if (and settled failed)
+              (concat-or-empty allocator "exit " (tool-decimal allocator exit-code))
+              "")]
+    (tool-presentation-full "Bash"
+                            (tool-inline-text allocator
+                                              (tool-json-string arguments "command"))
+                            summary
+                            (tool-preview-lines allocator source))))
+
+(defn tool-file-presentation [(allocator (ptr Allocator))
+                              (label (slice u8))
+                              (arguments Json)
+                              (result Json)
+                              (detail (slice u8))] (-> ToolPresentation)
+  (tool-presentation-full label
+                          (tool-inline-text allocator
+                                            (tool-json-string arguments "path"))
+                          detail
+                          ""))
+
 ;; Tool-specific extraction stays outside both the event adapter and layout engine.
-(defn present-tool [(name (slice u8))
+(defn present-tool [(allocator (ptr Allocator))
+                    (name (slice u8))
                     (arguments Json)
                     (result Json)] (-> ToolPresentation)
-  (cond (str-eq name "bash")
-          (tool-presentation-new "Bash"
-                                 (tool-json-string arguments "command")
-                                 (if (= (json-number-i64 (json-get result "exit_code")) 0)
-                                     "completed"
-                                     "failed"))
-        (str-eq name "spawn_subagent")
-          (tool-presentation-new "Subagent"
-                                 (tool-json-string arguments "prompt")
-                                 "delegated")
+  (cond (str-eq name "bash") (tool-bash-presentation allocator arguments result)
+        (str-eq name "read_text_file")
+          (tool-file-presentation allocator
+                                  "Read"
+                                  arguments
+                                  result
+                                  (let [bytes (tool-json-int result "bytes")]
+                                    (if (> bytes 0)
+                                        (concat-or-empty allocator
+                                                         (tool-decimal allocator bytes)
+                                                         " bytes")
+                                        "")))
+        (str-eq name "write_text_file")
+          (tool-file-presentation allocator
+                                  "Write"
+                                  arguments
+                                  result
+                                  (let [bytes (tool-json-int result "bytes_written")]
+                                    (if (> bytes 0)
+                                        (concat-or-empty allocator
+                                                         (tool-decimal allocator bytes)
+                                                         " bytes written")
+                                        "")))
+        (str-eq name "create_directory") (tool-file-presentation allocator "Mkdir" arguments result "")
+        (str-eq name "delete_file") (tool-file-presentation allocator "Delete" arguments result "")
+        (str-eq name "remove_directory") (tool-file-presentation allocator "Rmdir" arguments result "")
+        (str-eq name "spawn_subagents")
+          (tool-presentation-full "Subagents"
+                                  "batch"
+                                  "delegated"
+                                  "")
         (str-eq name "create_workflow_node")
-          (tool-presentation-new "Workflow"
-                                 (tool-json-string arguments "node_id")
-                                 "node created")
+          (tool-presentation-full "Workflow"
+                                  (tool-inline-text allocator
+                                                    (tool-json-string arguments "node_id"))
+                                  "node created"
+                                  "")
         (str-eq name "query_run")
-          (tool-presentation-new "Status"
-                                 (tool-json-string arguments "run_id")
-                                 "queried")
+          (tool-presentation-full "Status"
+                                  (tool-inline-text allocator
+                                                    (tool-json-string arguments "run_id"))
+                                  "queried"
+                                  "")
         (str-eq name "query_workflow")
-          (tool-presentation-new "Workflow"
-                                 (tool-json-string arguments "workflow_id")
-                                 "queried")
-        :else (tool-presentation-new name "" "completed")))
+          (tool-presentation-full "Workflow"
+                                  (tool-inline-text allocator
+                                                    (tool-json-string arguments "workflow_id"))
+                                  "queried"
+                                  "")
+        :else (tool-presentation-full name "" "" "")))

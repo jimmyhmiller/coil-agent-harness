@@ -57,11 +57,11 @@
 
 (defn operation-index [(operation TerminalOperation)] (-> i64)
   (match-else operation
-    (TerminalWrite [_] OP_WRITE)
-    (TerminalEraseLine [] OP_ERASE)
-    (TerminalCursorUp [_] OP_UP)
-    (TerminalCursorDown [_] OP_DOWN)
-    (_ OP_OTHER)))
+              (TerminalWrite [_] OP_WRITE)
+              (TerminalEraseLine [] OP_ERASE)
+              (TerminalCursorUp [_] OP_UP)
+              (TerminalCursorDown [_] OP_DOWN)
+              (_ OP_OTHER)))
 
 ;; Net vertical movement must be zero: the planner is documented to leave the
 ;; cursor where it found it, on the last live row. If that drifts, the next
@@ -74,9 +74,9 @@
               (break)
               (do
                 (match-else (al-get [TerminalOperation] operations (load i))
-                  (TerminalCursorUp [rows] (store! net (- (load net) rows)))
-                  (TerminalCursorDown [rows] (store! net (+ (load net) rows)))
-                  (_ 0))
+                            (TerminalCursorUp [rows] (store! net (- (load net) rows)))
+                            (TerminalCursorDown [rows] (store! net (+ (load net) rows)))
+                            (_ 0))
                 (store! i (+ (load i) 1)))))
     (load net)))
 
@@ -130,8 +130,9 @@
            (let [(mut i) 0]
              (loop (if (>= (load i) 5)
                        (break)
-                       (do (push-row! next "all different" (RolePrimary))
-                           (store! i (+ (load i) 1))))))
+                       (do
+                         (push-row! next "all different" (RolePrimary))
+                         (store! i (+ (load i) 1))))))
            (assert (= (plan-live-diff! (mut operations) previous next) 5))
            (assert (= (count-kind (load operations) OP_ERASE) 5))
            (assert (= (net-vertical (load operations)) 0))))

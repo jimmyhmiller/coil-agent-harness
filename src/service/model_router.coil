@@ -27,7 +27,7 @@
     (> (load (field capabilities cost-tier)) 0)))
 
 (defn route-default-model [(provider (slice u8))] (-> (slice u8))
-  (cond (str-eq provider "openai") "gpt-5.6"
+  (cond (str-eq provider "openai") "gpt-5.6-terra"
         (str-eq provider "deepseek-openai") "deepseek-v4-flash"
         (str-eq provider "deepseek-anthropic") "deepseek-v4-flash"
         (str-eq provider "codex") "gpt-5.6-terra"

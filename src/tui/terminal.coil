@@ -351,7 +351,11 @@
     (RoleMuted [] (terminal-control-sequence allocator "[2m"))
     (RoleSuccess [] (terminal-control-sequence allocator "[32m"))
     (RoleWarning [] (terminal-control-sequence allocator "[33m"))
-    (RoleFailure [] (terminal-control-sequence allocator "[31m"))))
+    (RoleFailure [] (terminal-control-sequence allocator "[31m"))
+    (RoleCodeKeyword [] (terminal-control-sequence allocator "[35m"))
+    (RoleCodeString [] (terminal-control-sequence allocator "[32m"))
+    (RoleCodeComment [] (terminal-control-sequence allocator "[2m"))
+    (RoleCodeNumber [] (terminal-control-sequence allocator "[36m"))))
 
 (defn terminal-execute! [(allocator (ptr Allocator))
                          (fd i64)

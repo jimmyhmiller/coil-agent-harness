@@ -1,10 +1,13 @@
 (module harness.nesting-depth)
 
 (import "coil.primitive" :as primitive)
+(import "coil.str" :use [str-parse-int])
 
-;; Expression-depth report for authored Coil code. This checker runs before macro
-;; expansion, so it measures the surface forms exactly as written. Every list or
-;; vector in a function body contributes one level; signatures are excluded.
+;; Opt-in expression-tree depth advisory for authored Coil code. This checker runs
+;; before macro expansion, so it measures nested surface s-expressions exactly as
+;; written. Ordinary nested calls contribute to the metric; it does not detect
+;; nested function definitions or imply a correctness/runtime problem. Signatures
+;; are excluded, and only unusually deep bodies produce a diagnostic.
 
 (defn nd-list-depth [(form Code) (depth i64)] (-> i64)
   (if (primitive/code-list? form)
@@ -63,36 +66,21 @@
           depth))
       0))
 
-;; Checker diagnostics are the visible output channel for before-expand programs.
-;; Keep messages literal so their source locations point at the measured function.
+;; This deliberately uses a high threshold. Expression-tree depth is at most a
+;; weak maintainability signal, and normal composition should not produce lint.
 (defn nd-warn-depth [(form Code) (depth i64)] (-> i64)
-  (cond (= depth 0) (primitive/warn form "expression nesting depth 0")
-        (= depth 1) (primitive/warn form "expression nesting depth 1")
-        (= depth 2) (primitive/warn form "expression nesting depth 2")
-        (= depth 3) (primitive/warn form "expression nesting depth 3")
-        (= depth 4) (primitive/warn form "expression nesting depth 4")
-        (= depth 5) (primitive/warn form "expression nesting depth 5")
-        (= depth 6) (primitive/warn form "expression nesting depth 6")
-        (= depth 7) (primitive/warn form "expression nesting depth 7")
-        (= depth 8) (primitive/warn form "expression nesting depth 8")
-        (= depth 9) (primitive/warn form "expression nesting depth 9")
-        (= depth 10) (primitive/warn form "expression nesting depth 10")
-        (= depth 11) (primitive/warn form "expression nesting depth 11")
-        (= depth 12) (primitive/warn form "expression nesting depth 12")
-        (= depth 13) (primitive/warn form "expression nesting depth 13")
-        (= depth 14) (primitive/warn form "expression nesting depth 14")
-        (= depth 15) (primitive/warn form "expression nesting depth 15")
-        (= depth 16) (primitive/warn form "expression nesting depth 16")
-        (= depth 17) (primitive/warn form "expression nesting depth 17")
-        (= depth 18) (primitive/warn form "expression nesting depth 18")
-        (= depth 19) (primitive/warn form "expression nesting depth 19")
-        (= depth 20) (primitive/warn form "expression nesting depth 20")
-        (= depth 21) (primitive/warn form "expression nesting depth 21")
-        (= depth 22) (primitive/warn form "expression nesting depth 22")
-        (= depth 23) (primitive/warn form "expression nesting depth 23")
-        (= depth 24) (primitive/warn form "expression nesting depth 24")
-        :else (primitive/warn form "expression nesting depth exceeds 24"))
+  (if (> depth (nd-maximum))
+      (do
+        (primitive/warn form
+                        "function body exceeds the configured maximum nested surface expressions; this is a maintainability advisory, not a correctness error—consider extracting a helper or simplifying the expression tree")
+        0)
+      0)
   0)
+
+(defn nd-maximum [] (-> i64)
+  (match (str-parse-int (primitive/lint-param "harness.nesting-depth.maximum" "24"))
+    (Some [value] value)
+    (None [] 24)))
 
 (defn nd-module-forms [(module-form Code)
                        (module-name (slice u8))

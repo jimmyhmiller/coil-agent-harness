@@ -132,9 +132,7 @@
   (if (or (< status 200) (>= status 300))
       (service-view-error allocator body)
       (let [run-id (service-json-string body "run_id")
-            decision (service-json-string body "decision")
             text
-              (cond (> (slice-len [u8] decision) 0) (concat-or-empty allocator "Authorization: " decision)
-                    (> (slice-len [u8] run-id) 0) (concat-or-empty allocator "Run accepted: " run-id)
+              (cond (> (slice-len [u8] run-id) 0) (concat-or-empty allocator "Run accepted: " run-id)
                     :else "Done")]
         (view-flow (RoleSuccess) (if unicode "✓ " "ok: ") "  " text))))

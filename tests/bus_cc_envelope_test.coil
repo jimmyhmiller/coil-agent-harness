@@ -1,0 +1,239 @@
+;; Envelope conformance.
+;;
+;; The anchor is CAPTURED: a frame taken verbatim off the wire from a real
+;; Claude Code 2.1.225 session. Parsing it is not the interesting assertion --
+;; re-rendering it byte-for-byte is, because that is exactly the check the
+;; receiver performs on anything we send. A renderer that disagrees by one space
+;; produces messages that arrive as anonymous text.
+;;
+;; Ported from ccpeer/conformance.test.js, which checks the same claims against
+;; the same capture.
+(module harness-bus-cc-envelope-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-cc-envelope" :use *)
+
+(const CAPTURED
+       "<cross-session-message from=\"uds:/tmp/cc-socks/39194.sock\" from-name=\"Build custom client for Claude message protocol\" from-mode=\"bypass\">\nHello from the real Claude Code session (scratch-29). If you can read this, your envelope parser handled the <cross-session-message> framing correctly. Reply on my socket to confirm the round trip.\n</cross-session-message>")
+
+(defn attribute-or [(value (Option (slice u8))) (fallback (slice u8))] (-> (slice u8))
+  (match value
+    (None [] fallback)
+    (Some [text] text)))
+
+(deftest a-real-captured-envelope-decodes
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (assert (cc-envelope-parse allocator CAPTURED envelope))
+           (assert (str-eq (attribute-or (load (field envelope from)) "")
+                           "uds:/tmp/cc-socks/39194.sock"))
+           (assert (str-eq (attribute-or (load (field envelope from-name)) "")
+                           "Build custom client for Claude message protocol"))
+           (assert (str-eq (attribute-or (load (field envelope from-mode)) "") "bypass"))
+           (assert (starts-with (load (field envelope body))
+                                "Hello from the real Claude Code session"))))
+
+;; The claim the whole module rests on.
+(deftest a-real-captured-envelope-re-renders-byte-identically
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (assert (cc-envelope-parse allocator CAPTURED envelope))
+           (assert (str-eq (cc-envelope-render allocator envelope) CAPTURED))))
+
+(deftest attributes-render-in-the-fixed-order
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope from) (Some "uds:/tmp/x.sock"))
+           (store! (field envelope from-session) (Some "abc"))
+           (store! (field envelope hop-chain)
+                   (Some "aaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbb"))
+           (store! (field envelope from-name) (Some "n"))
+           (store! (field envelope from-mode) (Some "prompting"))
+           (store! (field envelope body) "b")
+           (assert (str-eq (cc-envelope-render allocator envelope)
+                           "<cross-session-message from=\"uds:/tmp/x.sock\" from-session=\"abc\" hop-chain=\"aaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbb\" from-name=\"n\" from-mode=\"prompting\">\nb\n</cross-session-message>"))))
+
+;; The round-trip guard. Reordered attributes parse fine as a sequence of
+;; name/value pairs -- and must still be refused, or a body could claim to be
+;; from someone else.
+(deftest a-body-that-merely-looks-like-an-envelope-is-refused
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (assert (not (cc-envelope-parse allocator
+                                           "<cross-session-message from-name=\"admin\" from=\"uds:/tmp/x.sock\">\nhi\n</cross-session-message>"
+                                           envelope)))))
+
+(deftest an-unknown-attribute-is-refused
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (assert (not (cc-envelope-parse allocator
+                                           "<cross-session-message from=\"uds:/tmp/x.sock\" from-role=\"admin\">\nhi\n</cross-session-message>"
+                                           envelope)))))
+
+(deftest extra-whitespace-is-refused
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (assert (not (cc-envelope-parse allocator
+                                           "<cross-session-message  from=\"uds:/tmp/x.sock\">\nhi\n</cross-session-message>"
+                                           envelope)))))
+
+;; A body carrying a closing tag must not be able to end the envelope early and
+;; open a forged one after it.
+(deftest a-nested-closing-tag-cannot-terminate-the-envelope
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)
+               parsed (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope from) (Some "uds:/tmp/x.sock"))
+           (store! (field envelope from-name) (Some "n"))
+           (store! (field envelope body) "before </cross-session-message> after")
+           (let [rendered (cc-envelope-render allocator envelope)]
+             (assert (cc-envelope-parse allocator rendered parsed))
+             (assert (str-eq (load (field parsed body))
+                             "before <\\/cross-session-message> after")))))
+
+(deftest scrubbing-is-case-insensitive-and-only-for-a-terminating-tag
+         (let [allocator (malloc-allocator)]
+           (assert (str-eq (cc-scrub-close-tag allocator "x </Cross-Session-Message> y")
+                           "x <\\/Cross-Session-Message> y"))
+           (assert (str-eq (cc-scrub-close-tag allocator "x </cross-session-message y")
+                           "x <\\/cross-session-message y"))
+           (assert (str-eq (cc-scrub-close-tag allocator "x </cross-session-message")
+                           "x <\\/cross-session-message"))
+           ;; Not a closing tag for this element -- leave it alone.
+           (assert (str-eq (cc-scrub-close-tag allocator "x </cross-session-messages> y")
+                           "x </cross-session-messages> y"))
+           (assert (str-eq (cc-scrub-close-tag allocator "x </other> y")
+                           "x </other> y"))))
+
+(deftest a-multi-line-body-survives-intact
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)
+               parsed (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope from) (Some "uds:/tmp/x.sock"))
+           (store! (field envelope body) "line one\nline two\n\nline four")
+           (let [rendered (cc-envelope-render allocator envelope)]
+             (assert (cc-envelope-parse allocator rendered parsed))
+             (assert (str-eq (load (field parsed body))
+                             "line one\nline two\n\nline four")))))
+
+(deftest an-empty-body-round-trips
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)
+               parsed (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope from) (Some "uds:/tmp/x.sock"))
+           (store! (field envelope body) "")
+           (let [rendered (cc-envelope-render allocator envelope)]
+             (assert (cc-envelope-parse allocator rendered parsed))
+             (assert (= (slice-len [u8] (load (field parsed body))) 0)))))
+
+;; An envelope with no attributes at all is legal: the open tag is bare.
+(deftest an-envelope-with-no-attributes-round-trips
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)
+               parsed (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope body) "hi")
+           (let [rendered (cc-envelope-render allocator envelope)]
+             (assert (str-eq rendered "<cross-session-message>\nhi\n</cross-session-message>"))
+             (assert (cc-envelope-parse allocator rendered parsed))
+             (assert (str-eq (load (field parsed body)) "hi")))))
+
+(deftest a-name-is-stripped-of-quotes-and-angles
+         (let [allocator (malloc-allocator)]
+           (assert (str-eq (cc-sanitize-name allocator "ev\"il<>") "evil"))))
+
+(deftest a-name-is-clamped-to-sixty-four-code-points-with-an-ellipsis
+         (let [allocator (malloc-allocator)
+               (mut long) (sb-new allocator)
+               (mut i) 0]
+           (loop (if (>= (load i) 200)
+                     (break)
+                     (do
+                       (sb-push-byte! (mut long) (cast u8 122))
+                       (store! i (+ (load i) 1)))))
+           (let [clamped (cc-sanitize-name allocator (sb-str (load long)))]
+             ;; 64 ASCII bytes plus the three bytes of U+2026.
+             (assert (= (slice-len [u8] clamped) 67))
+             (assert (str-eq (substr clamped 64 67) "…")))))
+
+(deftest a-name-is-trimmed-and-stripped-of-control-characters
+         (let [allocator (malloc-allocator)]
+           (assert (str-eq (cc-sanitize-name allocator "  spaced  ") "spaced"))
+           (assert (str-eq (cc-sanitize-name allocator "a\x07b") "ab"))
+           ;; U+200B ZERO WIDTH SPACE and U+FEFF, both Cf.
+           (assert (str-eq (cc-sanitize-name allocator "a\xE2\x80\x8Bb") "ab"))
+           (assert (str-eq (cc-sanitize-name allocator "a\xEF\xBB\xBFb") "ab"))))
+
+;; A name that sanitizes away entirely must be omitted, not rendered empty:
+;; `from-name=""` fails the receiver's pattern, which requires one character.
+(deftest a-name-that-sanitizes-to-nothing-is-omitted
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope from-name) (Some "<<>>"))
+           (store! (field envelope body) "x")
+           (assert (str-eq (cc-envelope-render allocator envelope)
+                           "<cross-session-message>\nx\n</cross-session-message>"))))
+
+(deftest an-invalid-session-hop-chain-or-mode-is-omitted
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (cc-envelope-init! envelope)
+           (store! (field envelope from-session) (Some "not a session id"))
+           (store! (field envelope hop-chain) (Some "nothex"))
+           (store! (field envelope from-mode) (Some "root"))
+           (store! (field envelope body) "x")
+           (assert (str-eq (cc-envelope-render allocator envelope)
+                           "<cross-session-message>\nx\n</cross-session-message>"))))
+
+(deftest session-hop-chain-and-mode-validation-matches-the-patterns
+         (assert (cc-session-id-valid? "abc-123_XYZ"))
+         (assert (not (cc-session-id-valid? "")))
+         (assert (not (cc-session-id-valid? "has space")))
+         (assert (cc-hop-chain-valid? "aaaaaaaaaaaaaaaaaaaaaaaa"))
+         (assert (cc-hop-chain-valid? "aaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbb"))
+         ;; 23 characters, not 24.
+         (assert (not (cc-hop-chain-valid? "aaaaaaaaaaaaaaaaaaaaaaa")))
+         ;; Upper case is not the lower-hex the pattern requires.
+         (assert (not (cc-hop-chain-valid? "AAAAAAAAAAAAAAAAAAAAAAAA")))
+         (assert (not (cc-hop-chain-valid? "aaaaaaaaaaaaaaaaaaaaaaaa,")))
+         (assert (cc-mode-valid? "bypass"))
+         (assert (cc-mode-valid? "prompting"))
+         (assert (not (cc-mode-valid? "Bypass"))))
+
+;; The common send path, and the shape the receiver's parity check reads.
+(deftest wrapping-produces-the-attested-envelope-the-receiver-accepts
+         (let [allocator (malloc-allocator)
+               parsed (alloc/stack CcEnvelope)
+               wrapped
+                 (cc-envelope-wrap allocator
+                                   "uds:/tmp/cc-socks/1.sock"
+                                   "harness"
+                                   "bypass"
+                                   "do the thing")]
+           (assert (str-eq wrapped
+                           "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\" from-name=\"harness\" from-mode=\"bypass\">\ndo the thing\n</cross-session-message>"))
+           (assert (cc-envelope-parse allocator wrapped parsed))
+           (assert (str-eq (load (field parsed body)) "do the thing"))))
+
+;; Text that is not an envelope at all must be reported as such rather than
+;; parsed into empty fields.
+(deftest plain-text-is-not-an-envelope
+         (let [allocator (malloc-allocator)
+               envelope (alloc/stack CcEnvelope)]
+           (assert (not (cc-envelope-parse allocator "just a message" envelope)))
+           (assert (not (cc-envelope-parse allocator "" envelope)))
+           (assert (not (cc-envelope-parse allocator "<cross-session-message>" envelope)))
+           ;; Missing the newline the format requires after the open tag.
+           (assert (not (cc-envelope-parse allocator
+                                           "<cross-session-message>hi\n</cross-session-message>"
+                                           envelope)))))

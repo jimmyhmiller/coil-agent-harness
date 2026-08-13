@@ -10,8 +10,9 @@
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 
-;; Effect classification informs authorization and retry policy. It is deliberately
-;; independent of provider tool formats.
+;; Effect classification is descriptive metadata for presentation and retry policy.
+;; It is deliberately independent of provider tool formats. The harness does not
+;; gate execution on it; an out-of-tree policy plugin is free to.
 (defsum ToolEffect
   (ReadOnly [])
   (Reversible [])
@@ -97,34 +98,13 @@
                 (-> ToolResult)))
 
 ;; A registered tool combines serializable metadata with an erased implementation.
-;; Implementations return data; they do not decide authorization.
+;; Implementations return data; registration is the only gate on execution.
 (defstruct ToolDefinition
   [(spec ToolSpec)
    (implementation (dyn ToolImplementation))])
 
 (defstruct ToolRegistry
   [(definitions (ArrayList ToolDefinition))])
-
-(defsum AuthorizationDecision
-  (Authorize [])
-  (Reject [(reason (slice u8))]))
-
-;; Authorization is a separate capability so a CLI, server policy, or interactive
-;; client can make the decision without changing tool implementations.
-(deftrait ToolAuthorizer [Self]
-  (authorize-tool [(self (ptr Self))
-                   (spec (ptr ToolSpec))
-                   (call (ptr ToolCall))]
-                  (-> AuthorizationDecision)))
-
-(defstruct AllowAllAuthorizer [(reserved u8)])
-
-(impl ToolAuthorizer AllowAllAuthorizer
-  (authorize-tool [(self (ptr AllowAllAuthorizer))
-                   (spec (ptr ToolSpec))
-                   (call (ptr ToolCall))]
-                  (-> AuthorizationDecision)
-                  (Authorize)))
 
 (defn tool-registry-new [(allocator (ptr Allocator))] (-> ToolRegistry)
   (let [registry (alloc/stack ToolRegistry)]

@@ -300,6 +300,7 @@
           (store! (field http-request body)
                   (json-stringify allocator (openai-request-json allocator request)))
           (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+          (store! (field http-request cancellation) (load (field request cancellation)))
           (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
           (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
           (openai-event emitter request (ModelRequestStarted) (JsonNull))
@@ -350,6 +351,7 @@
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)
             (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+            (store! (field http-request cancellation) (load (field request cancellation)))
             (store! (field (field http-request chunks) context) (cast (ptr i8) 0))
             (store! (field (field http-request chunks) consume) (fnptr-of discard-http-chunk))
             (openai-event emitter request (ModelRequestStarted) (JsonNull))
@@ -394,7 +396,7 @@
   (provider-capabilities [(self (ptr OpenAIResponsesContext))]
                          (-> ProviderCapabilities)
                          (provider-capabilities-for "openai-responses"))
-  
+
   (execute-model [(self (ptr OpenAIResponsesContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))

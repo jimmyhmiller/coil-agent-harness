@@ -9,9 +9,15 @@
   (BusyInputClose [])
   (BusyInputIgnore []))
 
+;; Escape means "get me out of whatever this is", and what that is depends on who
+;; is reading. At the composer it dismisses the completion menu and otherwise does
+;; nothing. During a run there is nothing to dismiss and the composer is closed, so
+;; it cancels -- the same thing Ctrl-C does. The decoder stays neutral and each
+;; reader decides, rather than the decoder guessing which mode it is in.
 (defn busy-input-intent [(key InputKey)] (-> BusyInputIntent)
   (match-else key
               (InputInterrupt [] (BusyInputCancel))
+              (InputDismiss [] (BusyInputCancel))
               (InputSuspend [] (BusyInputSuspend))
               (InputEndOfFile [] (BusyInputClose))
               (_ (BusyInputIgnore))))

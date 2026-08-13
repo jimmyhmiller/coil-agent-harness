@@ -93,8 +93,8 @@
 ;; turns. The mutex serializes the current fixed-ID JSON-RPC client over its single
 ;; stdio stream.
 (defn codex-context-init-persistent! [(context (ptr CodexAppServerContext))
-                                     (owner (ptr Allocator))
-                                     (cwd (slice u8))] (-> i64)
+                                      (owner (ptr Allocator))
+                                      (cwd (slice u8))] (-> i64)
   (store! context (codex-context cwd))
   (store! (field context owner) owner)
   (match (sync/mutex-init-with-allocator (field context mutex) owner)
@@ -474,7 +474,6 @@
     (store! (field execution provider) "codex-app-server")
     (store! (field execution model) (load (field request model)))
     (store! (field execution registry) (load (field request tools)))
-    (store! (field execution authorizer) (load (field request tool-authorizer)))
     (store! (field execution calls) calls)
     (store! (field execution emitter) emitter)
     (store! (field execution cancellation) (load (field request cancellation)))
@@ -793,30 +792,30 @@
                       (store! (field context initialized) true)
                       (Ok connection)))))
             (let [spawn-result (codex-spawn (load (field context owner)))]
-          (if (!= (load (field spawn-result code)) 0)
-              (Err (load (field spawn-result error)))
-              (let [process
-                      (box (load (field context owner))
-                           subprocess/Child
-                           (load (field spawn-result process)))
-                    connection
-                      (box (load (field context owner))
-                           CodexConnection
-                           (zeroed CodexConnection))]
-                (store! (field connection transport) process)
-                (match (codex-initialize-connection request emitter allocator connection)
-                  (Err [message]
-                       (do
-                         (codex-close connection)
-                         (Err message)))
-                  (Ok [value]
-                      (do
-                        (store! (field context connection) (cast (ptr i8) connection))
-                        (store! (field context initialized) true)
-                        (Ok connection)))))))))))
+              (if (!= (load (field spawn-result code)) 0)
+                  (Err (load (field spawn-result error)))
+                  (let [process
+                          (box (load (field context owner))
+                               subprocess/Child
+                               (load (field spawn-result process)))
+                        connection
+                          (box (load (field context owner))
+                               CodexConnection
+                               (zeroed CodexConnection))]
+                    (store! (field connection transport) process)
+                    (match (codex-initialize-connection request emitter allocator connection)
+                      (Err [message]
+                           (do
+                             (codex-close connection)
+                             (Err message)))
+                      (Ok [value]
+                          (do
+                            (store! (field context connection) (cast (ptr i8) connection))
+                            (store! (field context initialized) true)
+                            (Ok connection)))))))))))
 
 (defn codex-context-prepare-persistent! [(context (ptr CodexAppServerContext))
-                                        (allocator (ptr Allocator))] (-> i64)
+                                         (allocator (ptr Allocator))] (-> i64)
   (match (sync/mutex-lock! (field context mutex))
     (Err [failure] -1)
     (Ok [locked]
@@ -898,7 +897,7 @@
   (provider-capabilities [(self (ptr CodexAppServerContext))]
                          (-> ProviderCapabilities)
                          (provider-capabilities-for "codex-app-server"))
-  
+
   (execute-model [(self (ptr CodexAppServerContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))

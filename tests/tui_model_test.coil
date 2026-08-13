@@ -51,21 +51,17 @@
                                                          "model-1"
                                                          (JsonString "Hello"))))
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
-           (let [streaming (al-get [PresentationBlock]
-                                   (load (field model blocks))
-                                   0)]
+           (let [streaming
+                   (al-get [PresentationBlock]
+                           (load (field model blocks))
+                           0)]
              (assert (str-eq (load (field streaming body)) "Hello")))))
 
-(deftest correlates-streaming-tool-and-approval-events-without-terminal-concerns
+(deftest correlates-streaming-and-tool-events-without-terminal-concerns
          (let [allocator (malloc-allocator)
                (mut model) (presentation-model-new allocator)
-               (mut approval) (json-object allocator)
                (mut arguments) (json-object allocator)]
            (json-put-string! (mut arguments) "command" "ls")
-           (json-put-string! (mut approval) "authorization_id" "tool-1")
-           (json-put-string! (mut approval) "tool" "bash")
-           (json-put-string! (mut approval) "effect" "destructive")
-           (json-object-put! (mut approval) "arguments" (load arguments))
            (assert (presentation-apply-event! (mut model)
                                               (tui-event allocator
                                                          1
@@ -93,31 +89,21 @@
            (assert (presentation-apply-event! (mut model)
                                               (tui-event allocator
                                                          4
-                                                         "authorization.requested"
-                                                         "run-1"
-                                                         "tool-1"
-                                                         (load approval))))
-           (assert (presentation-apply-event! (mut model)
-                                              (tui-event allocator
-                                                         5
                                                          "tool.call.started"
                                                          "run-1"
                                                          "tool-1"
                                                          (JsonString "bash"))))
            (assert (presentation-apply-event! (mut model)
                                               (tui-event allocator
-                                                         6
+                                                         5
                                                          "tool.call.completed"
                                                          "run-1"
                                                          "tool-1"
                                                          (JsonString "done"))))
-           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 3))
+           (assert (= (al-len [PresentationBlock] (load (field model blocks))) 2))
            (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)
-                 tool-block (al-get [PresentationBlock] (load (field model blocks)) 1)
-                 approval-block (al-get [PresentationBlock] (load (field model blocks)) 2)]
+                 tool-block (al-get [PresentationBlock] (load (field model blocks)) 1)]
              (assert (str-eq (load (field assistant body)) "Hello there"))
-             (assert (str-eq (load (field approval-block title)) "bash"))
-             (assert (str-eq (load (field approval-block body)) "destructive"))
              (assert (match-else (load (field tool-block result))
                                  (JsonString [text] (str-eq text "done"))
                                  (_ false)))
@@ -276,7 +262,7 @@
                                  (PresentationSucceeded [] true)
                                  (_ false))))))
 
-(deftest renders-a-tool-from-its-proposal-without-an-authorization-event
+(deftest renders-a-tool-from-its-own-proposal-payload
          (let [allocator (malloc-allocator)
                (mut model) (presentation-model-new allocator)
                (mut arguments) (json-object allocator)

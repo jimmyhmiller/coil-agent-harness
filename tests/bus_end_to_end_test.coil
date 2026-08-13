@@ -58,8 +58,9 @@
                     (match (socket/unix-accept-for listener accepted duration)
                       (Err [_] false)
                       (Ok [_]
-                          (do (unix-transport-adopt! server (load accepted))
-                              true))))))))))
+                          (do
+                            (unix-transport-adopt! server (load accepted))
+                            true))))))))))
 
 ;; Move everything the observer queued onto the subscriber's transport. This is
 ;; the loop a real server runs; keeping it in the test until it earns a module
@@ -87,9 +88,10 @@
                                 (match (codec-encode codec allocator envelope)
                                   (Err [_] 0)
                                   (Ok [bytes]
-                                      (do (frame-write! transport bytes)
-                                          (store! sent (+ (load sent) 1))
-                                          0))))
+                                      (do
+                                        (frame-write! transport bytes)
+                                        (store! sent (+ (load sent) 1))
+                                        0))))
                               (store! r (+ (load r) 1)))))
                   (store! i (+ (load i) 1))))))
     (bus-observer-clear! sink)
@@ -151,8 +153,12 @@
              (assert (> (emit-sample emitter (RunCompleted)) 0))
 
              (assert (= (bus-observer-pending observer) 3))
-             (assert (= (drain-to-subscriber! observer router codec allocator
-                                              server subscriber)
+             (assert (= (drain-to-subscriber! observer
+                                              router
+                                              codec
+                                              allocator
+                                              server
+                                              subscriber)
                         3))
 
              ;; The subscriber sees real events, in emission order.

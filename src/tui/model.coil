@@ -16,7 +16,6 @@
   (UserBlock [])
   (AssistantBlock [])
   (ToolBlock [])
-  (ApprovalBlock [])
   (AgentBlock [])
   (WorkflowBlock [])
   (ErrorBlock []))
@@ -59,11 +58,6 @@
   (FinishTool [(id (slice u8)) (result Json)])
   (FailTool [(id (slice u8)) (detail (slice u8))])
   (RejectTool [(id (slice u8)) (detail (slice u8))])
-  (RequestApproval [(id (slice u8))
-                    (tool (slice u8))
-                    (effect (slice u8))
-                    (arguments Json)])
-  (DecideApproval [(id (slice u8)) (allowed bool) (detail (slice u8))])
   (DelegateAgent [(id (slice u8))])
   (FinishAgent [(id (slice u8))])
   (FailAgent [(id (slice u8)) (detail (slice u8))])
@@ -106,10 +100,6 @@
                                         (match-else (load (field block kind))
                                                     (ToolBlock [] true)
                                                     (_ false)))
-                             (ApprovalBlock []
-                                            (match-else (load (field block kind))
-                                                        (ApprovalBlock [] true)
-                                                        (_ false)))
                              (AgentBlock []
                                          (match-else (load (field block kind))
                                                      (AgentBlock [] true)
@@ -398,38 +388,6 @@
                   (store! (field block detail)
                           (json-copy-string (load (field model allocator)) detail))
                   0))
-    (RequestApproval [id tool effect arguments]
-                     (let [found (presentation-block-index model id (ApprovalBlock))
-                           at
-                             (if (< found 0)
-                                 (presentation-push! model
-                                                     id
-                                                     (ApprovalBlock)
-                                                     (PresentationPending)
-                                                     tool
-                                                     effect
-                                                     arguments
-                                                     (JsonNull)
-                                                     "")
-                                 found)
-                           block (presentation-block-slot model at)]
-                       (store! (field block title)
-                               (json-copy-string (load (field model allocator)) tool))
-                       (store! (field block body)
-                               (json-copy-string (load (field model allocator)) effect))
-                       (store! (field block arguments)
-                               (json-clone (load (field model allocator)) arguments))
-                       0))
-    (DecideApproval [id allowed detail]
-                    (let [found (presentation-block-index model id (ApprovalBlock))]
-                      (when (>= found 0)
-                        (let [block (presentation-block-slot model found)]
-                          (store! (field block state)
-                                  (if allowed (PresentationSucceeded) (PresentationRejected)))
-                          (store! (field block detail)
-                                  (json-copy-string (load (field model allocator)) detail))
-                          0))
-                      0))
     (DelegateAgent [id]
                    (presentation-push! model
                                        id

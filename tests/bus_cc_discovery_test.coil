@@ -1,0 +1,392 @@
+;; Discovery tests, against sockets this test actually binds.
+;;
+;; A mocked probe would prove nothing here: the whole claim of this layer is
+;; that liveness comes from connecting rather than from a file saying so, and
+;; the interesting cases are precisely the ones where the file and the socket
+;; disagree. So these bind real listeners, leave real stale socket files behind,
+;; and let the probe decide.
+;;
+;; The environment is redirected rather than mocked for the same reason -- the
+;; directory lookup is part of the protocol (every participant must agree on the
+;; same path), so exercising the real lookup is exercising the contract. It is
+;; also what makes the realm isolation tests meaningful: they resolve their
+;; directories the way a real process would, rather than being handed them.
+(module harness-bus-cc-discovery-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.assert" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-bus-cc-address" :use *)
+(import "harness-bus-cc-discovery" :use *)
+(import "harness-bus-cc-realm" :use *)
+
+(const SCRATCH "/tmp/harness-cc-discovery-test")
+
+;; Point every directory lookup at scratch space. XDG_RUNTIME_DIR is cleared
+;; because it wins over both CLAUDE_CODE_TMPDIR and TMPDIR, so leaving it set on
+;; a Linux box would silently test the wrong directories.
+(defn redirect-environment! [(allocator (ptr Allocator))] (-> i64)
+  (os/env-unset allocator "XDG_RUNTIME_DIR")
+  (os/env-unset allocator "CLAUDE_CODE_MESSAGING_SOCKET")
+  (os/env-unset allocator "HARNESS_BUS_SOCKET")
+  (os/env-unset allocator "HARNESS_BUS_REALM")
+  (os/env-set allocator "CLAUDE_CODE_TMPDIR" SCRATCH true)
+  (os/env-set allocator "CLAUDE_CONFIG_DIR" SCRATCH true)
+  (os/env-set allocator "TMPDIR" SCRATCH true)
+  (os/env-set allocator "HARNESS_CONFIG_DIR" SCRATCH true)
+  0)
+
+(defn realm-for [(realm (ptr CcRealm))
+                 (allocator (ptr Allocator))
+                 (name (slice u8))] (-> i64)
+  (cc-realm-init! realm allocator name)
+  (cc-realm-ensure-directories! realm allocator)
+  0)
+
+(defn clear-directory! [(allocator (ptr Allocator)) (path (slice u8))] (-> i64)
+  (let [names (directory-entries allocator path)
+        (mut i) 0]
+    (loop (if (>= (load i) (al-len [(slice u8)] names))
+              (break)
+              (do
+                (path-remove allocator
+                             (path-join allocator
+                                        path
+                                        (al-get [(slice u8)] names (load i))))
+                (store! i (+ (load i) 1)))))
+    0))
+
+;; Leftovers from an earlier run look exactly like stale peers, which is a state
+;; some of these tests assert the absence of.
+(defn reset-realm! [(realm (ptr CcRealm)) (allocator (ptr Allocator))] (-> i64)
+  (clear-directory! allocator (load (field realm socket-dir)))
+  (clear-directory! allocator (load (field realm sessions-dir)))
+  0)
+
+(defn realm-socket-path [(realm (ptr CcRealm))
+                         (allocator (ptr Allocator))
+                         (name (slice u8))] (-> (slice u8))
+  (path-join allocator (load (field realm socket-dir)) name))
+
+(defn realm-session-path [(realm (ptr CcRealm))
+                          (allocator (ptr Allocator))
+                          (name (slice u8))] (-> (slice u8))
+  (path-join allocator (load (field realm sessions-dir)) name))
+
+;; Bind and keep listening. The caller owns the listener for the rest of the
+;; test, which is what makes the probe see it as alive.
+(defn listen-at! [(listener (ptr socket/UnixListener)) (path (slice u8))] (-> bool)
+  (match (socket/unix-listen listener path 4)
+    (Err [failure] false)
+    (Ok [_] true)))
+
+;; Bind then close, leaving the socket file behind with nothing serving it --
+;; exactly what a SIGKILLed session leaves in the directory.
+(defn leave-stale-socket! [(path (slice u8))] (-> bool)
+  (let [listener (alloc/stack socket/UnixListener)]
+    (if (not (listen-at! listener path))
+        false
+        (do (socket/unix-listener-close! listener) true))))
+
+(defn write-file! [(allocator (ptr Allocator))
+                   (path (slice u8))
+                   (contents (slice u8))] (-> bool)
+  (match (fs/write-file allocator path contents)
+    (Err [failure] false)
+    (Ok [_] true)))
+
+(defn find-peer [(peers (ptr (ArrayList CcPeer)))
+                 (pid i64)
+                 (out (ptr CcPeer))] (-> bool)
+  (let [n (al-len [CcPeer] (load peers))
+        (mut found) false
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (load found))
+              (break)
+              (let [peer (al-elem [CcPeer] peers (load i))]
+                (when (= (load (field peer pid)) pid)
+                  (store! out (load peer))
+                  (store! found true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+;; ---------------------------------------------------------------------------
+;; Probing and the registry overlay
+;; ---------------------------------------------------------------------------
+
+;; A live socket with a session file: the fully ordinary case.
+;; A live socket with no session file: reachable and addressable, just unnamed.
+;; A dead socket file with a session file: the stale entry a probe must reject.
+(deftest discovery-reports-live-sockets-and-rejects-a-stale-one
+         (let [allocator (malloc-allocator)
+               realm (alloc/stack CcRealm)
+               named (alloc/stack socket/UnixListener)
+               anonymous (alloc/stack socket/UnixListener)
+               peer (alloc/stack CcPeer)]
+           (redirect-environment! allocator)
+           (realm-for realm allocator "claude-code")
+           (reset-realm! realm allocator)
+           (assert (listen-at! named (realm-socket-path realm allocator "1001.sock")))
+           (assert (listen-at! anonymous (realm-socket-path realm allocator "1002.sock")))
+           (assert (leave-stale-socket! (realm-socket-path realm allocator "1003.sock")))
+           (assert (write-file! allocator
+                                (realm-session-path realm allocator "1001.json")
+                                "{\"pid\":1001,\"sessionId\":\"sess-alpha\",\"cwd\":\"/tmp/alpha\",\"name\":\"alpha\",\"status\":\"idle\",\"kind\":\"interactive\",\"version\":\"2.1.225\"}"))
+           ;; A session file for a socket nothing is serving. The registry says
+           ;; it is there; the probe says otherwise, and the probe wins.
+           (assert (write-file! allocator
+                                (realm-session-path realm allocator "1003.json")
+                                "{\"pid\":1003,\"name\":\"ghost\"}"))
+
+           (let [(mut peers) (cc-discover realm allocator false)]
+             (assert (= (al-len [CcPeer] peers) 2))
+
+             (assert (find-peer (mut peers) 1001 peer))
+             (assert (load (field peer alive)))
+             (assert (load (field peer registered)))
+             (assert (str-eq (load (field peer name)) "alpha"))
+             (assert (str-eq (load (field peer session-id)) "sess-alpha"))
+             (assert (str-eq (load (field peer cwd)) "/tmp/alpha"))
+             (assert (str-eq (load (field peer status)) "idle"))
+             (assert (str-eq (load (field peer address))
+                             (cc-uds-address allocator
+                                             (realm-socket-path realm allocator "1001.sock"))))
+
+             ;; Unregistered, and still a first-class peer.
+             (assert (find-peer (mut peers) 1002 peer))
+             (assert (load (field peer alive)))
+             (assert (not (load (field peer registered))))
+             (assert (= (slice-len [u8] (load (field peer name))) 0))
+
+             (assert (not (find-peer (mut peers) 1003 peer))))
+
+           ;; The stale one is still visible to a caller that asks for it,
+           ;; which is what a reaper or a diagnostic listing needs.
+           (let [(mut all) (cc-discover realm allocator true)]
+             (assert (= (al-len [CcPeer] all) 3))
+             (assert (find-peer (mut all) 1003 peer))
+             (assert (not (load (field peer alive))))
+             (assert (str-eq (load (field peer name)) "ghost")))
+
+           (socket/unix-listener-close! named)
+           (socket/unix-listener-close! anonymous)))
+
+(deftest a-peer-resolves-by-name-pid-session-id-and-prefix
+         (let [allocator (malloc-allocator)
+               realm (alloc/stack CcRealm)
+               listener (alloc/stack socket/UnixListener)]
+           (redirect-environment! allocator)
+           (realm-for realm allocator "claude-code")
+           (reset-realm! realm allocator)
+           (let [wanted (realm-socket-path realm allocator "1010.sock")]
+             (assert (listen-at! listener wanted))
+             (assert (write-file! allocator
+                                  (realm-session-path realm allocator "1010.json")
+                                  "{\"pid\":1010,\"sessionId\":\"sess-beta\",\"name\":\"beta-worker\"}"))
+             (assert (str-eq (cc-resolve realm allocator "beta-worker") wanted))
+             (assert (str-eq (cc-resolve realm allocator "1010") wanted))
+             (assert (str-eq (cc-resolve realm allocator "sess-beta") wanted))
+             (assert (str-eq (cc-resolve realm allocator "beta") wanted))
+             (assert (= (slice-len [u8] (cc-resolve realm allocator "nobody")) 0))
+             (socket/unix-listener-close! listener))))
+
+;; Reachability never depended on registration, so addressing must not either.
+;; A raw address has to work without consulting the roster at all -- including
+;; for a peer that has no entry in it, and in any realm.
+(deftest a-raw-address-resolves-without-the-roster
+         (let [allocator (malloc-allocator)
+               realm (alloc/stack CcRealm)]
+           (redirect-environment! allocator)
+           (realm-for realm allocator "claude-code")
+           (reset-realm! realm allocator)
+           (assert (str-eq (cc-resolve realm allocator "uds:/tmp/anywhere/9.sock")
+                           "/tmp/anywhere/9.sock"))
+           (assert (str-eq (cc-resolve realm allocator "/tmp/anywhere/9.sock")
+                           "/tmp/anywhere/9.sock"))
+           ;; Percent-escaped addresses must come back as the real path, or we
+           ;; would connect to a file that does not exist.
+           (assert (str-eq (cc-resolve realm allocator "uds:/tmp/a%20b/9.sock")
+                           "/tmp/a b/9.sock"))))
+
+;; A file in the socket directory that is not `<pid>.sock` belongs to something
+;; else. Guessing at it would invent peers.
+(deftest a-foreign-file-in-the-socket-directory-is-ignored
+         (assert (= (cc-pid-from-socket-name "1234.sock") 1234))
+         (assert (= (cc-pid-from-socket-name "notapid.sock") -1))
+         (assert (= (cc-pid-from-socket-name "1234.txt") -1))
+         (assert (= (cc-pid-from-socket-name ".sock") -1))
+         (assert (= (cc-pid-from-socket-name "12x4.sock") -1)))
+
+;; Reaping requires BOTH a dead socket and a dead process. A live process that
+;; has not yet bound its socket is starting up, and unlinking its entry would
+;; erase a session that is about to become reachable.
+(deftest reaping-spares-an-entry-whose-process-is-still-alive
+         (let [allocator (malloc-allocator)
+               realm (alloc/stack CcRealm)
+               self (os/getpid)
+               (mut buffer) (sb-new allocator)]
+           (redirect-environment! allocator)
+           (realm-for realm allocator "claude-code")
+           (reset-realm! realm allocator)
+           ;; An entry for this very process, with no socket bound for it.
+           (cc-push-decimal! (mut buffer) (cast i64 self))
+           (sb-push-str! (mut buffer) ".json")
+           (let [own (sb-str (load buffer))]
+             (assert (write-file! allocator
+                                  (realm-session-path realm allocator own)
+                                  "{\"name\":\"self\"}"))
+             ;; A dead process with a dead socket: reapable.
+             (assert (write-file! allocator
+                                  (realm-session-path realm allocator "999999.json")
+                                  "{\"name\":\"long-gone\"}"))
+
+             (assert (= (cc-reap-stale! realm allocator) 1))
+             (assert (path-exists? allocator (realm-session-path realm allocator own)))
+             (assert (not (path-exists? allocator
+                                        (realm-session-path realm allocator "999999.json")))))))
+
+(deftest an-empty-socket-directory-discovers-nothing
+         (let [allocator (malloc-allocator)
+               realm (alloc/stack CcRealm)]
+           (redirect-environment! allocator)
+           (realm-for realm allocator "claude-code")
+           (reset-realm! realm allocator)
+           (assert (= (al-len [CcPeer] (cc-discover realm allocator true)) 0))))
+
+;; ---------------------------------------------------------------------------
+;; Realms
+;; ---------------------------------------------------------------------------
+
+;; The load-bearing claim of realm.coil: the same protocol, run in a private
+;; namespace, has no contact with Claude Code in either direction.
+;;
+;; Both peers below are live, both are registered, and both are found by their
+;; own realm. Neither appears in the other's listing, and neither resolves by
+;; name from the other side. This is the test that would fail if a directory
+;; were shared or a lookup fell back to a default.
+(deftest a-private-realm-and-claude-code-cannot-see-each-other
+         (let [allocator (malloc-allocator)
+               shared (alloc/stack CcRealm)
+               private (alloc/stack CcRealm)
+               shared-listener (alloc/stack socket/UnixListener)
+               private-listener (alloc/stack socket/UnixListener)
+               peer (alloc/stack CcPeer)]
+           (redirect-environment! allocator)
+           (realm-for shared allocator "claude-code")
+           (realm-for private allocator "lab")
+           (reset-realm! shared allocator)
+           (reset-realm! private allocator)
+
+           ;; Same pid on purpose: if isolation came from anything other than
+           ;; the directory, a colliding pid is where it would show.
+           (assert (listen-at! shared-listener
+                               (realm-socket-path shared allocator "2001.sock")))
+           (assert (listen-at! private-listener
+                               (realm-socket-path private allocator "2001.sock")))
+           (assert (write-file! allocator
+                                (realm-session-path shared allocator "2001.json")
+                                "{\"pid\":2001,\"name\":\"in-claude-code\"}"))
+           (assert (write-file! allocator
+                                (realm-session-path private allocator "2001.json")
+                                "{\"pid\":2001,\"name\":\"in-lab\"}"))
+
+           (let [(mut shared-peers) (cc-discover shared allocator true)
+                 (mut private-peers) (cc-discover private allocator true)]
+             (assert (= (al-len [CcPeer] shared-peers) 1))
+             (assert (= (al-len [CcPeer] private-peers) 1))
+             (assert (find-peer (mut shared-peers) 2001 peer))
+             (assert (str-eq (load (field peer name)) "in-claude-code"))
+             (assert (find-peer (mut private-peers) 2001 peer))
+             (assert (str-eq (load (field peer name)) "in-lab")))
+
+           ;; Names do not cross either.
+           (assert (> (slice-len [u8] (cc-resolve shared allocator "in-claude-code")) 0))
+           (assert (= (slice-len [u8] (cc-resolve shared allocator "in-lab")) 0))
+           (assert (> (slice-len [u8] (cc-resolve private allocator "in-lab")) 0))
+           (assert (= (slice-len [u8] (cc-resolve private allocator "in-claude-code")) 0))
+
+           (socket/unix-listener-close! shared-listener)
+           (socket/unix-listener-close! private-listener)))
+
+(deftest two-private-realms-cannot-see-each-other
+         (let [allocator (malloc-allocator)
+               left (alloc/stack CcRealm)
+               right (alloc/stack CcRealm)
+               left-listener (alloc/stack socket/UnixListener)]
+           (redirect-environment! allocator)
+           (realm-for left allocator "left")
+           (realm-for right allocator "right")
+           (reset-realm! left allocator)
+           (reset-realm! right allocator)
+           (assert (listen-at! left-listener
+                               (realm-socket-path left allocator "3001.sock")))
+           (assert (= (al-len [CcPeer] (cc-discover left allocator true)) 1))
+           (assert (= (al-len [CcPeer] (cc-discover right allocator true)) 0))
+           (socket/unix-listener-close! left-listener)))
+
+;; The private socket directory is never named `cc-socks`, so pointing a private
+;; realm at the same base directory as Claude Code still keeps them apart. There
+;; must be no configuration that silently merges the two.
+(deftest a-realm-name-decides-its-directories
+         (let [allocator (malloc-allocator)
+               shared (alloc/stack CcRealm)
+               private (alloc/stack CcRealm)]
+           (redirect-environment! allocator)
+           (cc-realm-init! shared allocator "claude-code")
+           (cc-realm-init! private allocator "lab")
+           (assert (load (field shared interop)))
+           (assert (not (load (field private interop))))
+           (assert (not (str-eq (load (field shared socket-dir))
+                                (load (field private socket-dir)))))
+           (assert (not (str-eq (load (field shared sessions-dir))
+                                (load (field private sessions-dir)))))
+           (assert (str-eq (load (field shared socket-dir))
+                           (path-join allocator SCRATCH "cc-socks")))
+           (assert (str-eq (load (field private socket-dir))
+                           (path-join allocator SCRATCH "harness-socks-lab")))))
+
+;; An empty name means "whatever the environment says", so a caller with no
+;; opinion and a caller given an explicit --realm go through one path.
+(deftest an-unnamed-realm-follows-the-environment
+         (let [allocator (malloc-allocator)
+               realm (alloc/stack CcRealm)]
+           (redirect-environment! allocator)
+           (cc-realm-init! realm allocator "")
+           (assert (str-eq (load (field realm name)) "claude-code"))
+           (assert (load (field realm interop)))
+
+           (os/env-set allocator "HARNESS_BUS_REALM" "lab" true)
+           (cc-realm-init! realm allocator "")
+           (assert (str-eq (load (field realm name)) "lab"))
+           (assert (not (load (field realm interop))))
+
+           ;; An explicit name still wins over the environment.
+           (cc-realm-init! realm allocator "claude-code")
+           (assert (load (field realm interop)))
+           (os/env-unset allocator "HARNESS_BUS_REALM")))
+
+;; Claude Code exports its socket to child processes; a private realm has no
+;; ambient parent to inherit, so it must not pick one up by accident.
+(deftest self-identification-does-not-leak-across-realms
+         (let [allocator (malloc-allocator)
+               shared (alloc/stack CcRealm)
+               private (alloc/stack CcRealm)]
+           (redirect-environment! allocator)
+           (os/env-set allocator
+                       "CLAUDE_CODE_MESSAGING_SOCKET"
+                       "/tmp/harness-cc-discovery-test/cc-socks/4001.sock"
+                       true)
+           (cc-realm-init! shared allocator "claude-code")
+           (cc-realm-init! private allocator "lab")
+           (assert (> (slice-len [u8] (load (field shared self-socket))) 0))
+           (assert (= (slice-len [u8] (load (field private self-socket))) 0))
+           (os/env-unset allocator "CLAUDE_CODE_MESSAGING_SOCKET")))

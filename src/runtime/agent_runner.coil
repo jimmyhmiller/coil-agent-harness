@@ -30,7 +30,6 @@
   [(allocator (ptr Allocator))
    (provider (ptr (dyn ModelProvider)))
    (request (ptr ModelRequest))
-   (authorizer (dyn ToolAuthorizer))
    (emitter (ptr EventEmitter))
    (policy AgentRunPolicy)
    (result ModelResult)
@@ -43,25 +42,23 @@
                              (kind EventKind)
                              (payload Json)] (-> i64)
   (block :terminal
-         (loop (let [state (atomic-load lifecycle)]
-                 (cond (= state RUN_LIFECYCLE_CANCEL_RESERVED) 0
-                       (= state RUN_LIFECYCLE_RUNNING)
-                         (when (= (atomic-cas lifecycle
-                                              RUN_LIFECYCLE_RUNNING
-                                              RUN_LIFECYCLE_TERMINAL)
-                                  RUN_LIFECYCLE_RUNNING)
-                           (return-from :terminal
-                                        (runner-event emitter request kind payload))
-                           0)
-                       (= state RUN_LIFECYCLE_CANCELLING)
-                         (when (= (atomic-cas lifecycle
-                                              RUN_LIFECYCLE_CANCELLING
-                                              RUN_LIFECYCLE_TERMINAL)
-                                  RUN_LIFECYCLE_CANCELLING)
-                           (return-from :terminal
-                                        (runner-event emitter request (RunCancelled) (JsonNull)))
-                           0)
-                       :else (return-from :terminal 0))))))
+           (loop (let [state (atomic-load lifecycle)]
+                   (cond (= state RUN_LIFECYCLE_CANCEL_RESERVED) 0
+                         (= state RUN_LIFECYCLE_RUNNING)
+                           (when (= (atomic-cas lifecycle
+                                                RUN_LIFECYCLE_RUNNING
+                                                RUN_LIFECYCLE_TERMINAL)
+                                    RUN_LIFECYCLE_RUNNING)
+                             (return-from :terminal (runner-event emitter request kind payload))
+                             0)
+                         (= state RUN_LIFECYCLE_CANCELLING)
+                           (when (= (atomic-cas lifecycle
+                                                RUN_LIFECYCLE_CANCELLING
+                                                RUN_LIFECYCLE_TERMINAL)
+                                    RUN_LIFECYCLE_CANCELLING)
+                             (return-from :terminal (runner-event emitter request (RunCancelled) (JsonNull)))
+                             0)
+                         :else (return-from :terminal 0))))))
 
 (defstruct AgentRunHandle
   [(thread Thread)
@@ -93,6 +90,33 @@
                   (json-stringify allocator (json-integer allocator turn)))
     (sb-finish! (mut value))))
 
+;; Notification registration is the terminal action of an asynchronous setup
+;; turn. Starts must continue through the model once so it can compose their
+;; returned handles into notify_async; after that registration, another provider
+;; round trip merely to say "registered" would keep the TUI busy unnecessarily.
+(defn async-delegation-batch? [(calls (ptr (ArrayList ToolCall)))
+                               (results (ptr (ArrayList ToolResult)))] (-> bool)
+  (let [count (al-len [ToolCall] (load calls))
+        (mut valid) (> count 0)
+        (mut i) 0]
+    (when (!= count (al-len [ToolResult] (load results)))
+      (store! valid false)
+      0)
+    (loop (if (or (not (load valid)) (>= (load i) count))
+              (break)
+              (let [call (al-get [ToolCall] (load calls) (load i))
+                    result (al-get [ToolResult] (load results) (load i))
+                    succeeded
+                      (match (load (field result status))
+                        (ToolSucceeded [] true)
+                        (_ false))]
+                (when (or (not (str-eq (load (field call name)) "notify_async"))
+                          (not succeeded))
+                  (store! valid false)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load valid)))
+
 (defn runner-budget-failure [] (-> ModelResult)
   (let [failure (alloc/stack ModelFailure)]
     (store! (field failure kind) (ConfigurationFailure))
@@ -112,6 +136,11 @@
     (store! (field failure retryable) false)
     (ModelErr (load failure))))
 
+;; A run deadline is opt-in: zero means the run has none, and that is the normal
+;; case. The runner deliberately does NOT synthesise one from `timeout-ms` --
+;; that field bounds a single HTTP request, and borrowing it as a run budget is
+;; what used to fail long tasks. When there is no deadline this predicate is
+;; false forever and the run ends only by finishing, failing, or cancellation.
 (defn request-deadline-expired? [(request (ptr ModelRequest))] (-> bool)
   (let [deadline (load (field request deadline-monotonic-ms))]
     (and (> deadline 0) (= (deadline-remaining-ms deadline 0) 0))))
@@ -120,12 +149,13 @@
   (cancellation-requested? (load (field request cancellation))))
 
 ;; Run the model/tool loop until the model produces no function calls, a provider
-;; fails, or the explicit turn budget is exhausted. Provider continuations retain
+;; fails, or an explicitly configured positive turn limit is reached. Zero means
+;; unlimited, which is the normal policy: an internal loop counter must not turn
+;; unfinished work into a user-visible failure. Provider continuations retain
 ;; opaque prior output so reasoning/signature fields are never lost.
 (defn run-agent [(allocator (ptr Allocator))
                  (provider (dyn ModelProvider))
                  (request (ptr ModelRequest))
-                 (authorizer (dyn ToolAuthorizer))
                  (emitter (ptr EventEmitter))
                  (policy AgentRunPolicy)] (-> ModelResult)
   (let [current (box allocator ModelRequest (load request))
@@ -144,15 +174,11 @@
       (store! (field current cancellation) (cancellation-token-new allocator))
       0)
     (store! (field current run-lifecycle) lifecycle)
-    (store! (field current tool-authorizer) authorizer)
-    (when (= (load (field current deadline-monotonic-ms)) 0)
-      (store! (field current deadline-monotonic-ms)
-              (deadline-from-timeout (load (field current timeout-ms))))
-      0)
     (atomic-cas lifecycle RUN_LIFECYCLE_QUEUED RUN_LIFECYCLE_RUNNING)
     (runner-event emitter request (RunStarted) (JsonNull))
     (loop (if (or (load finished)
-                  (>= (load turn) (load (field policy max-model-turns))))
+                  (and (> (load (field policy max-model-turns)) 0)
+                       (>= (load turn) (load (field policy max-model-turns)))))
               (break)
               (if (request-cancelled? current)
                   (do
@@ -252,7 +278,6 @@
                                                        (store! (field execution provider) (provider-name provider))
                                                        (store! (field execution model) (load (field current model)))
                                                        (store! (field execution registry) (load (field current tools)))
-                                                       (store! (field execution authorizer) authorizer)
                                                        (store! (field execution calls) calls)
                                                        (store! (field execution emitter) emitter)
                                                        (store! (field execution cancellation)
@@ -266,18 +291,31 @@
                                                                (box allocator
                                                                     (ArrayList ToolResult)
                                                                     (load (field batch results)))]
-                                                         (store! (field (field current continuation) present) true)
-                                                         (store! (field (field current continuation)
-                                                                        previous-response-id)
-                                                                 (load (field response-value response-id)))
-                                                         (store! (field (field current continuation) previous-output)
-                                                                 (load (field response-value raw-output)))
-                                                         (store! (field (field current continuation) tool-results)
-                                                                 results)
-                                                         ; Required/forced selection is an initial-turn constraint.
-                                                         ; Continuing with it would force an endless tool loop after
-                                                         ; the requested result has already been supplied.
-                                                         (store! (field current tool-choice) (ToolsAuto)))))))))))))))))
+                                                         (if (async-delegation-batch? calls results)
+                                                             (do
+                                                               (store! final (ModelOk response))
+                                                               (store! finished true)
+                                                               (runner-terminal-event emitter
+                                                                                      request
+                                                                                      lifecycle
+                                                                                      (RunCompleted)
+                                                                                      (JsonString (load (field response-value
+                                                                                                               response-id)))))
+                                                             (do
+                                                               (store! (field (field current continuation) present)
+                                                                       true)
+                                                               (store! (field (field current continuation)
+                                                                              previous-response-id)
+                                                                       (load (field response-value response-id)))
+                                                               (store! (field (field current continuation)
+                                                                              previous-output)
+                                                                       (load (field response-value raw-output)))
+                                                               (store! (field (field current continuation) tool-results)
+                                                                       results)
+                                                               ; Required/forced selection is an initial-turn constraint.
+                                                               ; Continuing with it would force an endless tool loop after
+                                                               ; the requested result has already been supplied.
+                                                               (store! (field current tool-choice) (ToolsAuto)))))))))))))))))))
     (when (not (load finished))
       (runner-terminal-event emitter
                              request
@@ -296,7 +334,6 @@
           (run-agent (load (field job allocator))
                      (load (load (field job provider)))
                      (load (field job request))
-                     (load (field job authorizer))
                      (load (field job emitter))
                      (load (field job policy)))]
     (store! (field job result) result)
@@ -309,7 +346,6 @@
 (defn run-agent-background [(allocator (ptr Allocator))
                             (provider (dyn ModelProvider))
                             (request (ptr ModelRequest))
-                            (authorizer (dyn ToolAuthorizer))
                             (emitter (ptr EventEmitter))
                             (policy AgentRunPolicy)] (-> AgentRunHandle)
   (let [job (box allocator AgentRunJob (zeroed AgentRunJob))
@@ -323,7 +359,6 @@
     (store! (field job allocator) allocator)
     (store! (field job provider) provider-cell)
     (store! (field job request) request)
-    (store! (field job authorizer) authorizer)
     (store! (field job emitter) emitter)
     (store! (field job policy) policy)
     (store! (field job result) (runner-budget-failure))
@@ -357,18 +392,18 @@
 (defn agent-run-reserve-cancellation! [(handle (ptr AgentRunHandle))] (-> i64)
   (let [lifecycle (load (field (load (field handle job)) lifecycle))]
     (block :reserve
-           (loop (let [state (atomic-load lifecycle)]
-                   (cond (= state RUN_LIFECYCLE_QUEUED) 0
-                         (= state RUN_LIFECYCLE_RUNNING)
-                           (when (= (atomic-cas lifecycle
-                                                RUN_LIFECYCLE_RUNNING
-                                                RUN_LIFECYCLE_CANCEL_RESERVED)
-                                    RUN_LIFECYCLE_RUNNING)
-                             (return-from :reserve 0)
-                             0)
-                         (= state RUN_LIFECYCLE_CANCEL_RESERVED) (return-from :reserve 1)
-                         (= state RUN_LIFECYCLE_CANCELLING) (return-from :reserve 1)
-                         :else (return-from :reserve -1)))))))
+             (loop (let [state (atomic-load lifecycle)]
+                     (cond (= state RUN_LIFECYCLE_QUEUED) 0
+                           (= state RUN_LIFECYCLE_RUNNING)
+                             (when (= (atomic-cas lifecycle
+                                                  RUN_LIFECYCLE_RUNNING
+                                                  RUN_LIFECYCLE_CANCEL_RESERVED)
+                                      RUN_LIFECYCLE_RUNNING)
+                               (return-from :reserve 0)
+                               0)
+                           (= state RUN_LIFECYCLE_CANCEL_RESERVED) (return-from :reserve 1)
+                           (= state RUN_LIFECYCLE_CANCELLING) (return-from :reserve 1)
+                           :else (return-from :reserve -1)))))))
 
 (defn agent-run-confirm-cancellation! [(handle (ptr AgentRunHandle))] (-> i64)
   (let [job (load (field handle job))

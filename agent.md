@@ -41,7 +41,7 @@ At minimum, the system must be able to represent:
 
 - run creation, start, pause, resume, cancellation, completion, and failure;
 - model request construction, dispatch, streaming progress, response, usage, and error;
-- tool proposal, authorization, start, progress, result, timeout, cancellation, and error;
+- tool proposal, start, progress, result, timeout, cancellation, and error;
 - agent creation, status, messages, delegation, escalation, and termination;
 - workflow/node transitions and the reason each transition occurred;
 - human input and steering;
@@ -114,9 +114,11 @@ Each provider adapter owns authentication, transport, wire formats, provider str
 
 ### Tools
 
-A tool has an identity, description, input contract, output contract, execution policy, and implementation. Tool proposal is distinct from tool authorization, and authorization is distinct from execution.
+A tool has an identity, description, input contract, output contract, execution policy, and implementation. Tool proposal is distinct from execution.
 
-Tools must support clear lifecycle states and cancellation where the underlying operation permits it. Side-effecting tools require special care around authorization, retries, and idempotency.
+Tools must support clear lifecycle states and cancellation where the underlying operation permits it. Side-effecting tools require special care around retries and idempotency.
+
+This harness deliberately has no permission layer. Registering a tool is what grants it: a schema-valid call to a registered tool executes, including shell and file mutation. Permissions, if they return, arrive as an out-of-tree plugin and must not be reintroduced into the runtime, provider, or event contracts.
 
 ### Persistence
 
@@ -158,7 +160,6 @@ task
   -> model request
   -> streamed model output
   -> optional tool proposal
-  -> authorization
   -> asynchronous tool execution
   -> tool result
   -> model continuation
@@ -225,9 +226,8 @@ Cancellation is a normal outcome, not an exceptional afterthought. Cancellation 
 Tool execution is a security and correctness boundary.
 
 - Validate tool inputs against a declared contract before execution.
-- Record the exact authorized invocation.
-- Separate read-only, reversible, and destructive effects.
-- Make authorization policies composable and inspectable.
+- Record the exact invocation that ran.
+- Separate read-only, reversible, and destructive effects so they can be told apart, even though nothing currently gates on the distinction.
 - Use idempotency keys where repeated requests could duplicate effects.
 - Never retry a side effect blindly.
 - Bound execution with timeouts, cancellation, and output limits.
@@ -336,12 +336,12 @@ Assume prompts, model outputs, tool outputs, remote messages, and persisted arti
 - Authenticate remote clients and authorize commands by capability and resource.
 - Use least privilege for agents, tools, providers, and supervisors.
 - Treat model output as data, never authority.
-- Make approval requirements explicit for consequential effects.
 - Redact secrets before persistence and transmission.
 - Define retention and deletion behavior before storing sensitive histories broadly.
 - Audit security-relevant actions with actor and causation.
 - Bound resource consumption: tokens, money, time, storage, processes, network, agents, and retries.
-- Fail closed when an authorization decision cannot be made safely.
+
+Tool execution itself is intentionally outside this boundary: there is no permission check before a registered tool runs, so a run has whatever authority the process it was launched in has.
 
 Do not market monitoring, sandboxing, isolation, or durability guarantees that the implementation and tests do not yet provide.
 
@@ -364,7 +364,7 @@ Budget consumption and estimates must be visible. When a provider does not repor
 
 ## Development Workflow
 
-Build the system through thin, working vertical slices. The first target is one task that can call a model, stream output, execute an authorized asynchronous tool, continue the model turn, and expose the entire lifecycle as structured events.
+Build the system through thin, working vertical slices. The first target is one task that can call a model, stream output, execute an asynchronous tool, continue the model turn, and expose the entire lifecycle as structured events.
 
 For each change:
 
@@ -391,7 +391,7 @@ Record architectural decisions that are costly to reverse or easy to misundersta
 - current status;
 - conditions that would justify revisiting it.
 
-Decisions we expect to record early include the event model, persistence strategy, workflow representation, provider protocol, remote transport, tool authorization, identity model, and recovery semantics.
+Decisions we expect to record early include the event model, persistence strategy, workflow representation, provider protocol, remote transport, identity model, and recovery semantics.
 
 ## Definition of Done
 

@@ -1,0 +1,224 @@
+;; Syntax highlighting for fenced code blocks.
+;;
+;; This is a lexer, not a parser. It classifies comments, strings, numbers, and
+;; keywords and calls everything else plain. That is the honest ceiling for a
+;; streaming transcript: assistant text arrives a token at a time, so the code
+;; block being highlighted is frequently incomplete, and anything that needed a
+;; balanced tree would spend most of its life looking at a syntax error.
+;;
+;; The failure mode is therefore deliberately chosen. An unterminated string
+;; colours to end of line and stops; an unknown language falls back to a shared
+;; keyword set. Nothing here can fail to produce output, because a highlighter
+;; that can fail is a renderer that can lose a message.
+(module harness-tui-syntax)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-cells" :use *)
+(import "harness-tui-frame" :use *)
+
+;; How a language spells its line comment, and whether it uses lisp-style quoting.
+;; Block comments are deliberately absent: they span lines, and a streaming block
+;; can be cut anywhere, so a `/*` with no `*/` yet would swallow the rest of the
+;; visible answer.
+(defsum CommentStyle
+  (CommentHash [])
+  (CommentSlash [])
+  (CommentDash [])
+  (CommentSemicolon []))
+
+(defstruct SyntaxLanguage
+  [(name (slice u8))
+   (comment CommentStyle)
+   (keywords (slice u8))])
+
+;; Keyword sets are space-delimited strings rather than arrays so a language is
+;; one line to add and impossible to get half-initialised.
+(const SYNTAX_KEYWORDS_C
+       " if else for while do return break continue switch case default struct enum union typedef const static void int char long short float double unsigned signed sizeof goto extern inline ")
+(const SYNTAX_KEYWORDS_JS
+       " const let var function return if else for while do break continue class extends new this typeof instanceof async await yield import export from default try catch finally throw switch case null undefined true false ")
+(const SYNTAX_KEYWORDS_PYTHON
+       " def class return if elif else for while break continue import from as pass raise try except finally with lambda yield global nonlocal assert del not and or in is None True False async await match case ")
+(const SYNTAX_KEYWORDS_RUST
+       " fn let mut const static struct enum impl trait for while loop if else match return break continue use mod pub crate self super where type as in ref move unsafe async await dyn Some None Ok Err true false ")
+(const SYNTAX_KEYWORDS_COIL
+       " defn defstruct defsum deftrait impl import module const let mut loop if else cond match match-else when unless do break return store! load field slice ptr true false ")
+(const SYNTAX_KEYWORDS_SHELL
+       " if then else elif fi for while do done case esac function return export local readonly set unset echo cd exit test ")
+(const SYNTAX_KEYWORDS_SQL
+       " select from where insert into values update set delete create table drop alter add index join left right inner outer on group by order having limit offset union distinct as and or not null ")
+
+;; Unknown languages get a union of the most common control-flow words. This is a
+;; guess and is meant to look like one: it highlights less than a real set would,
+;; rather than mislabelling identifiers as keywords.
+(const SYNTAX_KEYWORDS_GENERIC
+       " if else for while do return break continue function class import export const let var def fn true false null nil None ")
+
+(defn syntax-language-new [(name (slice u8))
+                           (comment CommentStyle)
+                           (keywords (slice u8))] (-> SyntaxLanguage)
+  (let [language (alloc/stack SyntaxLanguage)]
+    (store! (field language name) name)
+    (store! (field language comment) comment)
+    (store! (field language keywords) keywords)
+    (load language)))
+
+;; Resolve a fence info string. Only the first word matters, so ```python title=x
+;; still resolves to python.
+(defn syntax-language [(info (slice u8))] (-> SyntaxLanguage)
+  (cond (or (str-eq info "c") (or (str-eq info "cpp") (or (str-eq info "c++") (str-eq info "h"))))
+          (syntax-language-new "c" (CommentSlash) SYNTAX_KEYWORDS_C)
+        (or (str-eq info "js")
+            (or (str-eq info "javascript")
+                (or (str-eq info "ts") (or (str-eq info "typescript") (str-eq info "json")))))
+          (syntax-language-new "js" (CommentSlash) SYNTAX_KEYWORDS_JS)
+        (or (str-eq info "py") (str-eq info "python"))
+          (syntax-language-new "python" (CommentHash) SYNTAX_KEYWORDS_PYTHON)
+        (or (str-eq info "rs") (str-eq info "rust")) (syntax-language-new "rust" (CommentSlash) SYNTAX_KEYWORDS_RUST)
+        (or (str-eq info "coil") (or (str-eq info "lisp") (or (str-eq info "clojure") (str-eq info "scheme"))))
+          (syntax-language-new "coil" (CommentSemicolon) SYNTAX_KEYWORDS_COIL)
+        (or (str-eq info "sh")
+            (or (str-eq info "bash") (or (str-eq info "shell") (str-eq info "zsh"))))
+          (syntax-language-new "shell" (CommentHash) SYNTAX_KEYWORDS_SHELL)
+        (str-eq info "sql") (syntax-language-new "sql" (CommentDash) SYNTAX_KEYWORDS_SQL)
+        :else (syntax-language-new "" (CommentHash) SYNTAX_KEYWORDS_GENERIC)))
+
+(defn syntax-alpha? [(byte u8)] (-> bool)
+  (or (and (>= byte (cast u8 97)) (<= byte (cast u8 122)))
+      (or (and (>= byte (cast u8 65)) (<= byte (cast u8 90)))
+          (or (= byte (cast u8 95)) (= byte (cast u8 45))))))
+
+(defn syntax-digit? [(byte u8)] (-> bool)
+  (and (>= byte (cast u8 48)) (<= byte (cast u8 57))))
+
+(defn syntax-word? [(byte u8)] (-> bool)
+  (or (syntax-alpha? byte) (syntax-digit? byte)))
+
+;; Membership test against the space-delimited keyword string. Both sides are
+;; wrapped in spaces so `in` cannot match inside `int`.
+(defn syntax-keyword? [(allocator (ptr Allocator))
+                       (language (ref SyntaxLanguage))
+                       (word (slice u8))] (-> bool)
+  (let [(mut padded) (sb-new allocator)]
+    (sb-push-byte! (mut padded) (cast u8 32))
+    (sb-push-str! (mut padded) word)
+    (sb-push-byte! (mut padded) (cast u8 32))
+    (match (str-find (load (field language keywords)) (sb-finish! (mut padded)))
+      (Some [position] true)
+      (None [] false))))
+
+(defn syntax-comment-at? [(language (ref SyntaxLanguage))
+                          (text (slice u8))
+                          (at i64)] (-> bool)
+  (let [n (slice-len [u8] text)
+        byte (slice-get [u8] text at)
+        next (if (< (+ at 1) n) (slice-get [u8] text (+ at 1)) (cast u8 0))]
+    (match (load (field language comment))
+      (CommentHash [] (= byte (cast u8 35)))
+      (CommentSemicolon [] (= byte (cast u8 59)))
+      (CommentSlash [] (and (= byte (cast u8 47)) (= next (cast u8 47))))
+      (CommentDash [] (and (= byte (cast u8 45)) (= next (cast u8 45)))))))
+
+(defn syntax-quote? [(byte u8)] (-> bool)
+  (or (= byte (cast u8 34)) (or (= byte (cast u8 39)) (= byte (cast u8 96)))))
+
+(defn syntax-push-span! [(spans (ptr (ArrayList FrameSpan)))
+                         (text (slice u8))
+                         (role StyleRole)] (-> i64)
+  (when (> (slice-len [u8] text) 0)
+    (let [width (text-cell-width text)]
+      (al-push! [FrameSpan]
+                spans
+                (frame-span text
+                            (if (< width 0) (slice-len [u8] text) width)
+                            role)))
+    0)
+  0)
+
+;; Classify one line into styled spans. Lines are independent: no state carries
+;; across them, which is what makes a partially streamed block safe to render and
+;; re-render as it grows.
+(defn syntax-highlight-line [(allocator (ptr Allocator))
+                             (language (ref SyntaxLanguage))
+                             (line (slice u8))] (-> (ArrayList FrameSpan))
+  (let [(mut spans) (al-new [FrameSpan] allocator)
+        n (slice-len [u8] line)
+        (mut at) 0]
+    (loop (if (>= (load at) n)
+              (break)
+              (let [byte (slice-get [u8] line (load at))]
+                (cond ;; A comment runs to end of line and ends the scan.
+                      (syntax-comment-at? language line (load at))
+                        (do
+                          (syntax-push-span! (mut spans)
+                                             (subslice [u8] line (load at) n)
+                                             (RoleCodeComment))
+                          (store! at n))
+                      (syntax-quote? byte)
+                        (let [quote byte
+                              start (load at)
+                              (mut i) (+ (load at) 1)
+                              (mut closed) false]
+                          (loop (if (or (load closed) (>= (load i) n))
+                                    (break)
+                                    (let [current (slice-get [u8] line (load i))]
+                                      (cond (= current (cast u8 92)) (store! i (+ (load i) 2))
+                                            (= current quote) (do (store! i (+ (load i) 1)) (store! closed true))
+                                            :else (store! i (+ (load i) 1))))))
+                          (let [end (if (> (load i) n) n (load i))]
+                            (syntax-push-span! (mut spans)
+                                               (subslice [u8] line start end)
+                                               (RoleCodeString))
+                            (store! at end)))
+                      (syntax-digit? byte)
+                        (let [start (load at)
+                              (mut i) (load at)]
+                          (loop (if (or (>= (load i) n)
+                                        (not (or (syntax-word? (slice-get [u8] line (load i)))
+                                                 (= (slice-get [u8] line (load i)) (cast u8 46)))))
+                                    (break)
+                                    (store! i (+ (load i) 1))))
+                          (syntax-push-span! (mut spans)
+                                             (subslice [u8] line start (load i))
+                                             (RoleCodeNumber))
+                          (store! at (load i)))
+                      (syntax-alpha? byte)
+                        (let [start (load at)
+                              (mut i) (load at)]
+                          (loop (if (or (>= (load i) n)
+                                        (not (syntax-word? (slice-get [u8] line (load i)))))
+                                    (break)
+                                    (store! i (+ (load i) 1))))
+                          (let [word (subslice [u8] line start (load i))]
+                            (syntax-push-span! (mut spans)
+                                               word
+                                               (if (syntax-keyword? allocator language word)
+                                                   (RoleCodeKeyword)
+                                                   (RolePrimary)))
+                            (store! at (load i))))
+                      :else
+                      ;; Everything else -- punctuation, whitespace, and any
+                      ;; multi-byte scalar -- is plain. The whole run is taken as
+                      ;; ONE span rather than one span per byte: every span costs a
+                      ;; select-graphic-rendition sequence on every redraw, and a
+                      ;; streaming code block redraws on each delta.
+                      (let [start (load at)
+                            (mut i) (load at)]
+                        (loop (if (>= (load i) n)
+                                  (break)
+                                  (let [current (slice-get [u8] line (load i))]
+                                    (if (or (syntax-comment-at? language line (load i))
+                                            (or (syntax-quote? current)
+                                                (or (syntax-digit? current)
+                                                    (syntax-alpha? current))))
+                                        (break)
+                                        (store! i (+ (load i) 1))))))
+                        (syntax-push-span! (mut spans)
+                                           (subslice [u8] line start (load i))
+                                           (RolePrimary))
+                        (store! at (load i)))))))
+    (load spans)))

@@ -2,7 +2,15 @@
 
 ## Status
 
-Accepted.
+Superseded. The `flock` lease this record describes was removed from
+`src/persistence/event_journal.coil` in commit `81f4e62`, and the project has since
+decided against process locks of any kind: the journal should be correct by
+construction, not by exclusion.
+
+The problem the lease named is still real — see the sequence-collision note in
+`docs/architecture.md`. The replacement is to derive a record's sequence from the
+file rather than from process memory, which removes the collision instead of
+forbidding the second writer. Nothing below is implemented.
 
 ## Context
 

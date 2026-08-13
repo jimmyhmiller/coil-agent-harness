@@ -63,11 +63,15 @@
                 (store! at (+ (load at) 1)))))
     0))
 
+;; A repaint walks the cursor across every row it rewrites. Hiding it for the
+;; duration means the terminal never draws that walk, which is what stops the
+;; block cursor skittering around during a stream.
 (defn tui-output-inline-update! [(renderer (ptr InlineRenderer))
                                  (allocator (ptr Allocator))
                                  (profile (ref TerminalProfile))
                                  (committed (ptr Frame))
                                  (live (ptr Frame))] (-> i64)
+  (terminal-execute! allocator 1 profile (TerminalHideCursor))
   (let [(mut operations) (inline-renderer-plan-with! renderer allocator committed live)]
     (tui-output-execute-plan! allocator profile (mut operations))))
 

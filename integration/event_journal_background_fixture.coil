@@ -53,7 +53,6 @@
                              messages (box allocator (ArrayList Message) (al-new [Message] allocator))
                              request (box allocator ModelRequest (zeroed ModelRequest))
                              provider (box allocator JournalFixtureProvider (zeroed JournalFixtureProvider))
-                             authorizer (alloc/stack AllowAllAuthorizer)
                              sequence (box service-allocator i64 1)
                              emitter (box service-allocator EventEmitter (zeroed EventEmitter))
                              policy (alloc/stack AgentRunPolicy)]
@@ -69,7 +68,7 @@
                          (store! (field policy max-model-turns) 1)
                          (store! (field policy max-parallel-tools) 1)
                          (let [(mut handle)
-                                 (run-agent-background allocator provider request authorizer emitter (load policy))
+                                 (run-agent-background allocator provider request emitter (load policy))
                                result (agent-run-join (mut handle))]
                            (event-journal-close! (load journal))
                            (allocation-domain-close! service-allocator run-domain)

@@ -1,0 +1,139 @@
+(module async-tool-provider)
+
+;; A local provider that turns one durable agent run into one ordinary harness
+;; tool call. This lets every registered tool use the same asynchronous run ID,
+;; cancellation, event journal, and dependency machinery as subagents without
+;; teaching each tool how to manage background threads.
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct AsyncToolProvider [(reserved u8)])
+
+(defn async-tool-failure [(message (slice u8))] (-> ModelResult)
+  (let [failure (alloc/stack ModelFailure)]
+    (store! (field failure kind) (ConfigurationFailure))
+    (store! (field failure provider) "async-tool")
+    (store! (field failure status-code) 0)
+    (store! (field failure message) message)
+    (store! (field failure retryable) false)
+    (ModelErr (load failure))))
+
+(defn async-tool-event [(emitter (ptr EventEmitter))
+                        (request (ptr ModelRequest))
+                        (kind EventKind)
+                        (payload Json)] (-> i64)
+  (emit-event emitter
+              (now-ms)
+              kind
+              (load (field request run-id))
+              (load (field request operation-id))
+              ""
+              "async-tool"
+              "async-tool"
+              payload))
+
+(defn async-tool-prompt [(request (ptr ModelRequest))] (-> (slice u8))
+  (let [messages (load (field request messages))]
+    (if (or (= messages (cast (ptr (ArrayList Message)) 0))
+            (= (al-len [Message] (load messages)) 0))
+        ""
+        (let [message (al-get [Message] (load messages) 0)]
+          (load (field message content))))))
+
+(defn async-tool-first-response [(request (ptr ModelRequest))
+                                 (allocator (ptr Allocator))] (-> ModelResult)
+  (let [parsed (json-parse allocator (async-tool-prompt request))]
+    (if (not (load (field parsed ok)))
+        (async-tool-failure "invalid asynchronous tool request")
+        (let [spec (load (field parsed value))
+              name
+                (match (json-string-at spec "tool_name")
+                  (Some [value] value)
+                  (None [] ""))]
+          (if (= (str-len name) 0)
+              (async-tool-failure "asynchronous tool name is missing")
+              (let [(mut response) (response-empty allocator)
+                    (mut call) (zeroed ToolCall)]
+                (store! (field response provider) "async-tool")
+                (store! (field response model) "async-tool")
+                (store! (field response response-id)
+                        (concat-or-empty allocator
+                                         "async-tool:"
+                                         (load (field request run-id))))
+                (store! (field call id)
+                        (concat-or-empty allocator
+                                         "async-call:"
+                                         (load (field request run-id))))
+                (store! (field call name) name)
+                (store! (field call arguments)
+                        (json-clone allocator (json-get spec "arguments")))
+                (store! (field call raw-arguments)
+                        (json-stringify allocator (json-get spec "arguments")))
+                (al-push! [ToolCall]
+                          (mut (field response tool-calls))
+                          (load call))
+                (ModelOk (load response))))))))
+
+(defn async-tool-terminal-response [(request (ptr ModelRequest))
+                                    (emitter (ptr EventEmitter))
+                                    (allocator (ptr Allocator))] (-> ModelResult)
+  (let [results (load (field (field request continuation) tool-results))
+        result
+          (if (or (= results (cast (ptr (ArrayList ToolResult)) 0))
+                  (= (al-len [ToolResult] (load results)) 0))
+              (tool-result-empty "async-tool" (ToolErrored))
+              (al-get [ToolResult] (load results) 0))
+        (mut payload) (json-object allocator)
+        (mut response) (response-empty allocator)]
+    (json-put-string! (mut payload)
+                      "status"
+                      (match (load (field result status))
+                        (ToolSucceeded [] "completed")
+                        (ToolErrored [] "failed")
+                        (ToolDenied [] "denied")
+                        (ToolUnknown [] "unknown")))
+    (json-object-put! (mut payload)
+                      "output"
+                      (json-clone allocator (load (field result output))))
+    (json-put-string! (mut payload) "error" (load (field result error)))
+    (let [text (json-stringify allocator (load payload))]
+      (async-tool-event emitter request (ModelResponseDelta) (JsonString text))
+      (store! (field response provider) "async-tool")
+      (store! (field response model) "async-tool")
+      (store! (field response response-id)
+              (concat-or-empty allocator "async-tool:" (load (field request run-id))))
+      (store! (field response output-text) text)
+      (store! (field response raw-output) (load payload))
+      (ModelOk (load response)))))
+
+(impl ModelProvider AsyncToolProvider
+  (provider-name [(self (ptr AsyncToolProvider))] (-> (slice u8)) "async-tool")
+  (provider-capabilities [(self (ptr AsyncToolProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "async-tool"))
+  (execute-model [(self (ptr AsyncToolProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (async-tool-event emitter request (ModelRequestStarted) (JsonNull))
+                 (let [result
+                         (if (load (field (field request continuation) present))
+                             (async-tool-terminal-response request emitter allocator)
+                             (async-tool-first-response request allocator))]
+                   (async-tool-event emitter
+                                     request
+                                     (ModelRequestCompleted)
+                                     (JsonString (concat-or-empty allocator
+                                                                  "async-tool:"
+                                                                  (load (field request run-id)))))
+                   result)))

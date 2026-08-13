@@ -71,36 +71,36 @@
   (let [(mut bytes) (al-new [u8] allocator)
         buffer (alloc/stack (array u8 16384))]
     (block :done
-           (loop (match (time/duration-millis 1000)
-                   (Err [failure] (return-from :done (HttpRequestRejected 400)))
-                   (Ok [duration]
-                       (match (selectors/wait-fd-for (cast i32 client-fd)
-                                                     (selectors/interest-readable)
-                                                     duration)
-                         (Err [failure] (return-from :done (HttpRequestRejected 400)))
-                         (Ok [ready] 0))))
-             (let [read-count
-                     (cast i64
-                           (io/read (cast i32 client-fd)
-                                    (cast (ptr i8) (index buffer 0))
-                                    (cast isize 16384)))]
-               (if (<= read-count 0)
-                   (return-from :done (HttpRequestRejected 400))
-                   (do
-                     (al-extend! [u8]
-                                 (mut bytes)
-                                 (cast (ptr u8) (index buffer 0))
-                                 read-count)
-                     (if (> (al-len [u8] (load bytes)) 8388608)
-                         (return-from :done (HttpRequestRejected 413))
-                         (match (server/parse-request allocator
-                                                      (al-slice [u8] (load bytes)))
-                           (Ok [request]
-                               (return-from :done (HttpRequestAccepted request)))
-                           (Err [failure]
-                                (when (!= (server/error-code failure) 14)
-                                  (return-from :done (HttpRequestRejected 400))
-                                  0)))))))))))
+             (loop (match (time/duration-millis 1000)
+                     (Err [failure] (return-from :done (HttpRequestRejected 400)))
+                     (Ok [duration]
+                         (match (selectors/wait-fd-for (cast i32 client-fd)
+                                                       (selectors/interest-readable)
+                                                       duration)
+                           (Err [failure] (return-from :done (HttpRequestRejected 400)))
+                           (Ok [ready] 0))))
+               (let [read-count
+                       (cast i64
+                             (io/read (cast i32 client-fd)
+                                      (cast (ptr i8) (index buffer 0))
+                                      (cast isize 16384)))]
+                 (if (<= read-count 0)
+                     (return-from :done (HttpRequestRejected 400))
+                     (do
+                       (al-extend! [u8]
+                                   (mut bytes)
+                                   (cast (ptr u8) (index buffer 0))
+                                   read-count)
+                       (if (> (al-len [u8] (load bytes)) 8388608)
+                           (return-from :done (HttpRequestRejected 413))
+                           (match (server/parse-request allocator
+                                                        (al-slice [u8] (load bytes)))
+                             (Ok [request]
+                                 (return-from :done (HttpRequestAccepted request)))
+                             (Err [failure]
+                                  (when (!= (server/error-code failure) 14)
+                                    (return-from :done (HttpRequestRejected 400))
+                                    0)))))))))))
 
 (defn write-http-response [(allocator (ptr Allocator))
                            (client-fd i64)

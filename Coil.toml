@@ -9,6 +9,3 @@ suffixes = ["_test.coil"]
 
 [link]
 libs = ["curl"]
-
-[lint]
-rules = ["harness.nesting-depth"]

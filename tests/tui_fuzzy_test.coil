@@ -1,0 +1,68 @@
+(module harness-tui-fuzzy-test)
+
+(import "coil.alloc" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-fuzzy" :use *)
+
+(deftest an-empty-query-matches-everything-at-a-neutral-score
+         ;; Score 0 for every candidate is what keeps an unfiltered menu in
+         ;; registration order instead of ranking it.
+         (assert-eq (fuzzy-score "" "Claude Opus 5") 0)
+         (assert-eq (fuzzy-score "" "") 0))
+
+(deftest matching-is-subsequence-not-substring
+         (assert (fuzzy-matches? "op5" "Claude Opus 5"))
+         (assert (fuzzy-matches? "cs5" "Claude Sonnet 5"))
+         ;; Order still has to hold — the same letters backwards are not a match.
+         (assert (not (fuzzy-matches? "5po" "Claude Opus 5"))))
+
+(deftest matching-ignores-ascii-case
+         (assert (fuzzy-matches? "OPUS" "Claude Opus 5"))
+         (assert (fuzzy-matches? "opus" "CLAUDE OPUS 5"))
+         (assert-eq (fuzzy-score "opus" "Claude Opus 5")
+                    (fuzzy-score "OPUS" "Claude Opus 5")))
+
+(deftest a-query-longer-than-the-candidate-cannot-match
+         (assert (not (fuzzy-matches? "claude opus 5" "opus")))
+         (assert-eq (fuzzy-score "abc" "ab") FUZZY_NO_MATCH))
+
+(deftest a-missing-character-fails-the-whole-query
+         (assert (not (fuzzy-matches? "opusz" "Claude Opus 5")))
+         (assert (not (fuzzy-matches? "xyz" "Claude Opus 5"))))
+
+;; The ranking rules, stated as comparisons rather than absolute scores so the
+;; weights can be retuned without rewriting the tests.
+(deftest a-contiguous-run-outranks-a-scattered-one
+         (assert (> (fuzzy-score "sol" "GPT-5.6 sol")
+                    (fuzzy-score "sol" "subscription, balanced"))))
+
+(deftest a-word-boundary-outranks-a-mid-word-match
+         ;; "terra" starts a word in the first and is buried in the second.
+         (assert (> (fuzzy-score "ter" "Codex · terra")
+                    (fuzzy-score "ter" "clustered materials"))))
+
+(deftest an-earlier-match-outranks-a-later-one
+         (assert (> (fuzzy-score "opus" "Opus 5 by Anthropic")
+                    (fuzzy-score "opus" "a very long label naming Opus"))))
+
+;; A long label must not be scored below a short accidental match purely because
+;; its match starts late — the lateness penalty is capped for exactly this.
+(deftest the-lateness-penalty-is-bounded
+         (let [late
+                 (fuzzy-score "sol"
+                              "an extremely long menu label that finally says sol")]
+           (assert (!= late FUZZY_NO_MATCH))
+           (assert (> late 0))))
+
+(deftest separators-include-the-middle-dot-used-in-labels
+         ;; "Codex · sol" — the label separator must count as a word boundary or
+         ;; provider-prefixed rows rank below unprefixed ones for no good reason.
+         (assert (fuzzy-separator? (cast u8 183)))
+         (assert (fuzzy-separator? (cast u8 32)))
+         (assert (fuzzy-separator? (cast u8 45)))
+         (assert (not (fuzzy-separator? (cast u8 97)))))
+
+(deftest an-exact-label-scores-above-any-partial
+         (assert (> (fuzzy-score "terra" "terra")
+                    (fuzzy-score "terra" "Codex · terra and other words"))))

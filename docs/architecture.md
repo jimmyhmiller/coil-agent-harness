@@ -15,9 +15,9 @@ provider capability   tool executor
 ```
 
 The runtime does not know URLs, headers, provider response shapes, or Codex
-protocol method names. Providers do not authorize or execute harness tools. Tool
-implementations do not choose policy. Monitoring observes semantic events and is
-not coupled to terminal output.
+protocol method names. Providers do not execute harness tools. Tool implementations
+do not choose policy. Monitoring observes semantic events and is not coupled to
+terminal output.
 
 Every provider advertises streaming, native-tool, parallel-tool, reasoning,
 subscription-authentication, and relative-cost capabilities through the model
@@ -72,11 +72,14 @@ Execution follows this order:
 1. emit `tool.call.proposed`;
 2. resolve the tool name;
 3. validate arguments against the common JSON Schema subset;
-4. ask the independent authorizer;
-5. emit authorization or rejection;
-6. run authorized calls in bounded waves of worker threads;
-7. place results in original call order while emitting completion events in
+4. emit `tool.call.rejected` when the name or the arguments do not resolve;
+5. run the remaining calls in bounded waves of worker threads;
+6. place results in original call order while emitting completion events in
    actual completion order.
+
+There is no permission step. Registering a tool is what grants it, so a schema-valid
+call to a registered tool always executes. A policy layer, if one is ever wanted,
+belongs outside this loop and outside the runtime contract.
 
 No provider adapter owns this loop. Adding another provider means implementing the
 `ModelProvider` trait, not copying orchestration logic. Runtime selection erases the
@@ -94,12 +97,19 @@ Credentials are resolved only inside provider adapters. Request-start events do
 not contain headers or API keys. Raw provider payloads are retained in model
 responses for correct continuation, but are not emitted automatically.
 
-Each durable journal has exactly one live writer process. `event-journal-open`
-acquires a non-blocking kernel file lease and retains it for the journal lifetime.
-A competing harness fails before recovery, scheduling, or listening, preventing
-duplicate restart decisions, event sequence collisions, and repeated side effects.
-The lease is released by close or process exit, so a replacement process can recover
-the durable queue after a crash.
+The journal takes no locks across processes. It is opened `O_APPEND`, and each
+record is written by a single `write`, so the kernel places whole records at the end
+of the file and two writers cannot interleave one record inside another. A crashed
+process leaves nothing to release and a replacement recovers immediately.
+
+What that buys is record integrity, not a total order. Sequence numbers are assigned
+from an in-memory counter seeded at recovery, so two harness processes writing one
+journal concurrently will assign the same sequence to different events. Recovery
+reads the file in file order and is unharmed, but any consumer treating `sequence`
+as unique across the file would be wrong to. Making that correct means deriving the
+sequence from the file rather than from process memory — which is a correctness fix,
+not a lock, and is the shape any future work here should take. Running two harnesses
+on one journal is not a supported configuration in the meantime.
 
 Foreground and background entry points call the same runner. A background handle
 owns only thread/job state and exposes completion polling plus an idempotent join;
@@ -125,14 +135,13 @@ temporary never crosses a function or thread boundary. The complete rules are in
 Terminal presentation follows one pipeline: semantic state produces a declarative
 layout tree, the pure layout engine resolves it into a frame and semantic anchors,
 the renderer plans a frame transition, and the terminal driver executes typed
-operations. Input, approvals, conversation blocks, and service responses do not own
+operations. Input, conversation blocks, and service responses do not own
 separate formatting/cursor protocols. Application code does not emit presentation
 bytes. See `docs/decisions/0009-declarative-terminal-layout.md`.
 
 ## Deliberate next boundaries
 
-- Approval round-trips for interactive Codex App Server requests.
-
-This requires an explicit authorization capability at the provider/runtime boundary;
-the current provider contract cannot ask the durable service mailbox for a decision.
-It must not introduce an alternate model/tool loop or provider-owned approval policy.
+The Codex App Server can initiate approval RPCs while a turn is running. The harness
+has no permission model to answer them with, so the adapter runs with
+`approvalPolicy: "never"` and declines unexpected server requests rather than letting
+a provider define its own policy.

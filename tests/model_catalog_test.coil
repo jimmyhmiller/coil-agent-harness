@@ -1,0 +1,118 @@
+(module harness-model-catalog-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-model" :use *)
+(import "harness-model-catalog" :use *)
+(import "harness-model-router" :use *)
+
+;; The picker cannot offer a pair the router would reject — a menu row that
+;; fails on submission is worse than no row.
+(deftest every-catalogued-model-is-routable
+         (let [allocator (malloc-allocator)
+               (mut catalog) (model-catalog-default allocator)
+               n (model-catalog-count (mut catalog))
+               (mut i) 0]
+           (assert (> n 0))
+           (loop (if (>= (load i) n)
+                     (break)
+                     (let [choice (model-catalog-at (mut catalog) (load i))
+                           provider (load (field choice provider))
+                           model (load (field choice model))]
+                       (if (str-eq provider "auto")
+                           ;; Automatic selection requires the model to be auto too;
+                           ;; the catalog's own auto row must satisfy that rule.
+                           (assert (str-eq model "auto"))
+                           (do
+                             (assert (route-known-provider? provider))
+                             ;; A pinned provider needs a real model, never "auto".
+                             (assert (> (slice-len [u8] model) 0))
+                             (assert (not (str-eq model "auto")))))
+                       (store! i (+ (load i) 1)))))))
+
+(deftest catalogued-names-are-unique
+         (let [allocator (malloc-allocator)
+               (mut catalog) (model-catalog-default allocator)
+               n (model-catalog-count (mut catalog))
+               (mut i) 0]
+           (loop (if (>= (load i) n)
+                     (break)
+                     (let [choice (model-catalog-at (mut catalog) (load i))]
+                       ;; find returns the FIRST match, so a duplicate pair shows up
+                       ;; as an index that does not point back at itself.
+                       (assert-eq (model-catalog-find (mut catalog)
+                                                      (load (field choice provider))
+                                                      (load (field choice model)))
+                                  (load i))
+                       (store! i (+ (load i) 1)))))))
+
+(deftest an-uncatalogued-pair-is-not-found
+         (let [allocator (malloc-allocator)
+               (mut catalog) (model-catalog-default allocator)]
+           ;; -1, not 0 — the picker opens at the top for a typed-in model rather
+           ;; than claiming the first row is already selected.
+           (assert-eq (model-catalog-find (mut catalog) "claude" "claude-not-real") -1)))
+
+;; A model flagged as taking no effort must not carry a level, or the picker
+;; would send a parameter the provider rejects.
+(deftest models-without-effort-default-to-none
+         (let [allocator (malloc-allocator)
+               (mut catalog) (model-catalog-default allocator)
+               n (model-catalog-count (mut catalog))
+               (mut i) 0
+               (mut checked) 0]
+           (loop (if (>= (load i) n)
+                     (break)
+                     (let [choice (model-catalog-at (mut catalog) (load i))]
+                       (when (not (load (field choice effort)))
+                         (assert (match-else (load (field choice default-effort))
+                                             (ReasoningNone [] true)
+                                             (_ false)))
+                         (store! checked (+ (load checked) 1))
+                         0)
+                       (store! i (+ (load i) 1)))))
+           ;; Guard against the assertion silently covering nothing.
+           (assert (> (load checked) 0))))
+
+(deftest effort-names-round-trip-through-their-index
+         (let [(mut i) 0]
+           (loop (if (>= (load i) EFFORT_CHOICE_COUNT)
+                     (break)
+                     (let [choice (alloc/stack EffortChoice)]
+                       (store! choice (effort-choice-at (load i)))
+                       (assert-eq (effort-index (load (field choice effort))) (load i))
+                       (assert (str-eq (reasoning-effort-name (load (field choice effort)))
+                                       (load (field choice label))))
+                       (store! i (+ (load i) 1)))))))
+
+;; An absent or unrecognised effort has to land somewhere safe: a command from a
+;; client that never picked one must behave exactly as it did before the field
+;; existed.
+(deftest an-unknown-effort-name-falls-back-to-medium
+         (assert (match-else (effort-from-name "") (ReasoningMedium [] true) (_ false)))
+         (assert (match-else (effort-from-name "enormous")
+                             (ReasoningMedium [] true)
+                             (_ false)))
+         (assert (match-else (effort-from-name "xhigh") (ReasoningXHigh [] true) (_ false)))
+         (assert (match-else (effort-from-name "max") (ReasoningMax [] true) (_ false))))
+
+;; The picker's default for each model must be a level the picker can show.
+(deftest default-efforts-are-selectable-levels
+         (let [allocator (malloc-allocator)
+               (mut catalog) (model-catalog-default allocator)
+               n (model-catalog-count (mut catalog))
+               (mut i) 0]
+           (loop (if (>= (load i) n)
+                     (break)
+                     (let [choice (model-catalog-at (mut catalog) (load i))]
+                       (when (load (field choice effort))
+                         (let [at (effort-index (load (field choice default-effort)))
+                               shown (alloc/stack EffortChoice)]
+                           (assert (and (>= at 0) (< at EFFORT_CHOICE_COUNT)))
+                           (store! shown (effort-choice-at at))
+                           (assert (str-eq (reasoning-effort-name (load (field shown effort)))
+                                           (reasoning-effort-name (load (field choice default-effort))))))
+                         0)
+                       (store! i (+ (load i) 1)))))))

@@ -14,11 +14,13 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-model-catalog" :use *)
+(import "harness-model-router" :use *)
 (import "harness-run-service" :use *)
 (import "harness-system" :use *)
-(import "harness-tui-approval" :use *)
-(import "harness-tui-approval-input" :use *)
 (import "harness-tui-busy-input" :use *)
+(import "harness-tui-command" :use *)
 (import "harness-tui-event-adapter" :use *)
 (import "harness-tui-frame" :use *)
 (import "harness-tui-input-decoder" :use *)
@@ -32,6 +34,7 @@
 (import "harness-tui-run-watch" :use *)
 (import "harness-tui-service-presenter" :use *)
 (import "harness-tui-terminal" :use *)
+(import "harness-tui-terminal-operation" :use *)
 (import "harness-tui-tool-presenter" :use *)
 (import "harness-tui-transcript" :use *)
 (import "harness-tui-view" :use *)
@@ -40,6 +43,60 @@
 
 (const TUI_COMMIT_BLOCK_BATCH 128)
 (defstruct TuiConversation [(conversation-id (slice u8))])
+
+(defstruct TuiNotificationSource
+  [(service (ptr RunService))
+   (allocator (ptr Allocator))
+   (conversation-id (slice u8))
+   (cursor i64)
+   (pending (ArrayList (slice u8)))
+   (pending-next i64)])
+
+(impl InputIdleObserver TuiNotificationSource
+  (input-idle-notification? [(self (ptr TuiNotificationSource))]
+                            (-> bool)
+                            (if (< (load (field self pending-next))
+                                   (al-len [(slice u8)] (load (field self pending))))
+                                true
+                                (let [recovery
+                                        (service-recover-into (load (field self service))
+                                                              (load (field self allocator)))]
+                                  (if (not (load (field recovery ok)))
+                                      false
+                                      (let [events (field recovery events)
+                                            (mut i) 0
+                                            n (al-len [Json] (load events))]
+                                        (loop (if (>= (load i) n)
+                                                  (break)
+                                                  (let [event (al-get [Json] (load events) (load i))
+                                                        sequence (json-number-i64 (json-get event "sequence"))
+                                                        payload (json-get event "payload")]
+                                                    (when (and (> sequence (load (field self cursor)))
+                                                               (and (str-eq (command-string event "event")
+                                                                            "run.created")
+                                                                    (and (str-eq (command-string payload "actor")
+                                                                                 "agent-notification")
+                                                                         (str-eq (command-string payload
+                                                                                                 "conversation_id")
+                                                                                 (load (field self conversation-id))))))
+                                                      (al-push! [(slice u8)]
+                                                                (mut (field self pending))
+                                                                (json-copy-string (load (field self allocator))
+                                                                                  (command-string event "run_id")))
+                                                      0)
+                                                    (store! i (+ (load i) 1)))))
+                                        (store! (field self cursor) (load (field recovery last-sequence)))
+                                        (< (load (field self pending-next))
+                                           (al-len [(slice u8)] (load (field self pending))))))))))
+
+(defn tui-notification-current [(source (ptr TuiNotificationSource))] (-> (slice u8))
+  (al-get [(slice u8)]
+          (load (field source pending))
+          (load (field source pending-next))))
+
+(defn tui-notification-consume! [(source (ptr TuiNotificationSource))] (-> i64)
+  (store! (field source pending-next) (+ (load (field source pending-next)) 1))
+  0)
 
 (defn tui-read [(allocator (ptr Allocator))
                 (prompt (slice u8))] (-> (slice u8))
@@ -53,6 +110,7 @@
                    (run-id (slice u8))
                    (provider (slice u8))
                    (model (slice u8))
+                   (effort (slice u8))
                    (prompt (slice u8))] (-> Json)
   (let [(mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
@@ -66,6 +124,11 @@
     (json-put-string! (mut command)
                       "model"
                       (if (= (slice-len [u8] model) 0) "auto" model))
+    ;; Omitted when empty so a command from a client that does not pick an
+    ;; effort is byte-identical to the ones this harness used to send.
+    (when (> (slice-len [u8] effort) 0)
+      (json-put-string! (mut command) "effort" effort)
+      0)
     (json-put-string! (mut command) "prompt" prompt)
     (load command)))
 
@@ -136,12 +199,96 @@
       (let [(mut editor) (input-editor-new allocator)]
         (match (input-read-interactive allocator (mut editor) profile prompt)
           (InputReadSubmitted [text] text)
+          (InputReadNotification [] "")
           (InputReadInterrupted [] "")
+          (InputReadQuit [] "")
           (InputReadClosed [] "")
           (InputReadFailed [] "")))
       (let [text (tui-read allocator prompt)]
         (tui-output-write-line allocator 1 text)
         text)))
+
+;; The provider names `/model` accepts. `auto` defers to the routing profile; every
+;; other name must be one the runtime factory can actually resolve, which is exactly
+;; what the router already knows. Validating here means a typo is rejected while the
+;; old selection still works, instead of being stored and failing on the next turn
+;; with an error that never names the bad value.
+(defn tui-selectable-provider? [(provider (slice u8))] (-> bool)
+  (or (str-eq provider "auto") (route-known-provider? provider)))
+
+(defn tui-provider-choices [] (-> (slice u8))
+  "auto, openai, deepseek-openai, deepseek-anthropic, codex, claude")
+
+;; Empty input means "keep what is already selected", so pressing Enter through the
+;; prompts is a no-op rather than a silent reset to auto.
+(defn tui-entered-or [(entered (slice u8)) (current (slice u8))] (-> (slice u8))
+  (if (= (slice-len [u8] entered) 0) current entered))
+
+(defn tui-model-prompt [(allocator (ptr Allocator))
+                        (default-model (slice u8))] (-> (slice u8))
+  (concat-or-empty allocator
+                   "  model ["
+                   (concat-or-empty allocator default-model "]: ")))
+
+(defn tui-report-selection [(allocator (ptr Allocator))
+                            (profile (ref TerminalProfile))
+                            (provider (slice u8))
+                            (model (slice u8))
+                            (effort (slice u8))] (-> i64)
+  (tui-render-view allocator
+                   profile
+                   (view-flow (RoleMuted)
+                              "  using "
+                              "    "
+                              (concat-or-empty allocator
+                                               provider
+                                               (concat-or-empty allocator
+                                                                "/"
+                                                                (concat-or-empty allocator
+                                                                                 model
+                                                                                 (if (> (slice-len [u8] effort) 0)
+                                                                                     (concat-or-empty allocator
+                                                                                                      "  effort "
+                                                                                                      effort)
+                                                                                     "")))))))
+
+;; ---------------------------------------------------------------------------
+;; Model selection
+;;
+;; Two pickers rather than one flat list: a combined model-times-effort menu
+;; would be five rows per model and would make you re-choose the model to change
+;; the effort. The second picker is skipped entirely for models that reject an
+;; effort parameter, so the menu never offers a control that does nothing.
+;; ---------------------------------------------------------------------------
+
+(defn tui-model-entries [(allocator (ptr Allocator))
+                         (catalog (ptr ModelCatalog))] (-> (ptr (ArrayList ChoiceEntry)))
+  (let [entries (box allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+        n (model-catalog-count catalog)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [choice (model-catalog-at catalog (load i))]
+                (al-push! [ChoiceEntry]
+                          entries
+                          (choice-entry (load (field choice label))
+                                        (load (field choice summary))))
+                (store! i (+ (load i) 1)))))
+    entries))
+
+(defn tui-effort-entries [(allocator (ptr Allocator))] (-> (ptr (ArrayList ChoiceEntry)))
+  (let [entries (box allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+        (mut i) 0]
+    (loop (if (>= (load i) EFFORT_CHOICE_COUNT)
+              (break)
+              (let [choice (alloc/stack EffortChoice)]
+                (store! choice (effort-choice-at (load i)))
+                (al-push! [ChoiceEntry]
+                          entries
+                          (choice-entry (load (field choice label))
+                                        (load (field choice summary))))
+                (store! i (+ (load i) 1)))))
+    entries))
 
 (defn tui-create [(service (ptr RunService))
                   (allocator (ptr Allocator))
@@ -151,7 +298,7 @@
         provider (tui-read-secondary allocator profile "Provider [auto]: ")
         model (tui-read-secondary allocator profile "Model [auto]: ")
         prompt (tui-read-secondary allocator profile "Prompt: ")
-        (mut command) (tui-command allocator run-id provider model prompt)]
+        (mut command) (tui-command allocator run-id provider model "" prompt)]
     (when (str-eq mode "agent")
       (json-put-string! (mut command)
                         "parent_run_id"
@@ -205,21 +352,40 @@
     (tui-render-view allocator profile (load root))))
 
 (defn tui-help [(allocator (ptr Allocator))
+                (registry (ptr CommandRegistry))
                 (profile (ref TerminalProfile))] (-> i64)
-  (let [(mut root) (view-stack allocator 0)]
+  (let [(mut root) (view-stack allocator 0)
+        n (command-count registry)
+        (mut widest) 0
+        (mut i) 0]
     (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "Commands"))
+    (loop (if (>= (load i) n)
+              (break)
+              (let [width (slice-len [u8] (load (field (command-at registry (load i)) name)))]
+                (when (> width (load widest)) (store! widest width) 0)
+                (store! i (+ (load i) 1)))))
+    (store! i 0)
+    (loop (if (>= (load i) n)
+              (break)
+              (let [spec (command-at registry (load i))
+                    (mut line) (sb-new allocator)]
+                (sb-push-str! (mut line) "  ")
+                (sb-push-str! (mut line) (load (field spec name)))
+                (let [(mut pad) (slice-len [u8] (load (field spec name)))]
+                  (loop (if (>= (load pad) (+ (load widest) 2))
+                            (break)
+                            (do
+                              (sb-push-byte! (mut line) (cast u8 32))
+                              (store! pad (+ (load pad) 1))))))
+                (sb-push-str! (mut line) (load (field spec summary)))
+                (view-stack-push! (mut root)
+                                  (view-flow (RolePrimary) "" "" (sb-finish! (mut line))))
+                (store! i (+ (load i) 1)))))
     (view-stack-push! (mut root)
-                      (view-flow (RolePrimary) "" "" "  /agent       delegate a subagent from the current run"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /workflow    add a node to a durable workflow DAG"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /status      inspect a run"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /graph       inspect a workflow"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /cancel      cancel a run"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /model       change provider and model"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /conversation show the durable conversation ID"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /new         start a new conversation"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /clear       clear the screen"))
-    (view-stack-push! (mut root) (view-flow (RolePrimary) "" "" "  /quit        exit"))
-    (view-stack-push! (mut root) (view-spacer 1))
+                      (view-flow (RoleMuted)
+                                 ""
+                                 ""
+                                 "  Tab completes · ↑↓ choose · Esc dismisses · Ctrl-R searches history"))
     (tui-render-view allocator profile (load root))))
 
 (defn tui-event-for-run-or-child? [(model (ptr PresentationModel))
@@ -228,49 +394,6 @@
   (let [event-run-id (command-string event "run_id")]
     (or (str-eq event-run-id run-id)
         (>= (presentation-block-index model event-run-id (AgentBlock)) 0))))
-
-(defn tui-decide-authorization [(service (ptr RunService))
-                                (allocator (ptr Allocator))
-                                (run-id (slice u8))
-                                (event Json)
-                                (profile (ref TerminalProfile))] (-> i64)
-  (let [payload (json-get event "payload")
-        authorization-id (command-string payload "authorization_id")
-        tool (command-string payload "tool")
-        effect (command-string payload "effect")
-        presented
-          (present-tool tool
-                        (json-get payload "arguments")
-                        (JsonNull))]
-    (when (not (load (field profile interactive)))
-      (let [(mut root) (view-stack allocator 0)]
-        (view-stack-push! (mut root)
-                          (view-flow (RoleWarning)
-                                     "  approval required  "
-                                     "    "
-                                     (concat-or-empty allocator
-                                                      tool
-                                                      (concat-or-empty allocator " · " effect))))
-        (view-stack-push! (mut root)
-                          (view-flow (RoleMuted)
-                                     "    "
-                                     "    "
-                                     (if (> (slice-len [u8] (load (field presented subject))) 0)
-                                         (load (field presented subject))
-                                         "Review the requested tool operation.")))
-        (tui-render-view allocator profile (load root)))
-      0)
-    (let [choice
-            (if (load (field profile interactive))
-                (approval-input-interactive allocator profile)
-                (approval-choice (tui-read allocator "  Allow once? [y/N] ")))
-          command
-            (approval-command allocator
-                              run-id
-                              authorization-id
-                              choice)]
-      (let [response (service-decide-authorization service command)]
-        (load (field response status))))))
 
 (defn tui-write-model-range [(allocator (ptr Allocator))
                              (model (ptr PresentationModel))
@@ -299,6 +422,7 @@
                                       (model (ptr PresentationModel))
                                       (policy (ptr TranscriptPolicy))
                                       (rendered-count (ptr i64))
+                                      (live-committed (ptr i64))
                                       (renderer (ptr InlineRenderer))
                                       (profile (ref TerminalProfile))
                                       (width i64)
@@ -321,50 +445,116 @@
                             (if (> after (+ (load committed-at) TUI_COMMIT_BLOCK_BATCH))
                                 (+ (load committed-at) TUI_COMMIT_BLOCK_BATCH)
                                 after)
-                          (mut committed)
+                          (mut laid)
                             (layout-model-range allocator
                                                 model
                                                 (load committed-at)
                                                 next
-                                                options)]
+                                                options)
+                          ;; Rows of this range that were already written while
+                          ;; it was live must not be written again. Only the
+                          ;; first batch can overlap: it is the one that starts
+                          ;; where the live region started.
+                          (mut committed)
+                            (if (and (= (load committed-at) before)
+                                     (> (load live-committed) 0))
+                                (frame-range allocator
+                                             (mut laid)
+                                             (load live-committed)
+                                             (al-len [FrameLine] (load (field laid lines))))
+                                (load laid))]
                       (tui-output-inline-update! renderer
                                                  allocator
                                                  profile
                                                  (mut committed)
                                                  (mut empty))
                       (store! committed-at next))))
-          (let [(mut live) (view-stack allocator 0)]
-            (view-stack-push! (mut live)
+          (let [(mut live-body) (view-stack allocator 0)]
+            (view-stack-push! (mut live-body)
                               (layout-model-range-view allocator
                                                        model
                                                        after
                                                        (al-len [PresentationBlock]
                                                                (load (field model blocks)))
                                                        options))
-            (when busy
-              (view-stack-push! (mut live)
-                                (view-flow (RoleMuted)
-                                           ""
-                                           ""
-                                           (if cancelling
-                                               "  cancelling…"
-                                               "  esc to interrupt")))
-              0)
+            ;; The live region is bounded by what the renderer can still
+            ;; address, which is the visible height -- not a fixed dozen rows.
+            ;; A long answer used to be squeezed into twelve rows with its
+            ;; beginning replaced by an ellipsis, which is why streaming looked
+            ;; truncated and refused to scroll.
             (let [available (- height 4)
-                  live-limit
-                    (if (< available 3)
-                        3
-                        (if (> available 12) 12 available))
-                  view (terminal-view (view-tail allocator live-limit (load live)))
-                  (mut laid-out) (view-layout allocator view width)]
-              (tui-output-inline-update! renderer
-                                         allocator
-                                         profile
-                                         (mut empty)
-                                         (mut (field laid-out frame))))))
+                  live-limit (if (< available 3) 3 available)
+                  status-rows (if busy 1 0)
+                  body-budget
+                    (if (> (- live-limit status-rows) 1)
+                        (- live-limit status-rows)
+                        1)
+                  (mut body)
+                    (view-layout allocator
+                                 (terminal-view (load live-body))
+                                 width)
+                  total (al-len [FrameLine] (load (field (field body frame) lines)))
+                  ;; Everything above the window has stopped changing, so it is
+                  ;; committed as ordinary output and scrolls away like any
+                  ;; other transcript instead of being elided.
+                  overflow (if (> total body-budget) (- total body-budget) 0)]
+              (when (> overflow (load live-committed))
+                (let [(mut spill)
+                        (frame-range allocator
+                                     (mut (field body frame))
+                                     (load live-committed)
+                                     overflow)]
+                  (tui-output-inline-update! renderer
+                                             allocator
+                                             profile
+                                             (mut spill)
+                                             (mut empty)))
+                (store! live-committed overflow)
+                0)
+              (let [(mut visible)
+                      (frame-range allocator
+                                   (mut (field body frame))
+                                   (load live-committed)
+                                   total)]
+                (when busy
+                  (let [(mut status)
+                          (view-layout allocator
+                                       (terminal-view (view-flow (RoleMuted)
+                                                                 ""
+                                                                 ""
+                                                                 (if cancelling
+                                                                     "  cancelling…"
+                                                                     "  esc to interrupt")))
+                                       width)
+                        rows (al-len [FrameLine] (load (field (field status frame) lines)))
+                        (mut at) 0]
+                    (loop (if (>= (load at) rows)
+                              (break)
+                              (do
+                                (al-push! [FrameLine]
+                                          (mut (field visible lines))
+                                          (al-get [FrameLine]
+                                                  (load (field (field status frame) lines))
+                                                  (load at)))
+                                (store! at (+ (load at) 1))))))
+                  0)
+                (tui-output-inline-update! renderer
+                                           allocator
+                                           profile
+                                           (mut empty)
+                                           (mut visible))
+                ;; The cursor has nowhere meaningful to sit while a run streams:
+                ;; the composer is closed and the last painted row moves on every
+                ;; delta. Leave it hidden until the composer takes it back.
+                (when (not busy)
+                  (terminal-execute! allocator 1 profile (TerminalShowCursor))
+                  0)))))
         (when (> after before)
           (tui-write-model-range allocator model before after profile)
           0))
+    (when (> after before)
+      (store! live-committed 0)
+      0)
     (store! rendered-count after)
     0))
 
@@ -372,6 +562,7 @@
                                 (model (ptr PresentationModel))
                                 (policy (ptr TranscriptPolicy))
                                 (rendered-count (ptr i64))
+                                (live-committed (ptr i64))
                                 (renderer (ptr InlineRenderer))
                                 (profile (ref TerminalProfile))
                                 (width i64)
@@ -385,6 +576,7 @@
                                             model
                                             policy
                                             rendered-count
+                                            live-committed
                                             renderer
                                             profile
                                             width
@@ -405,8 +597,7 @@
     (json-put-string! (mut command) "run_id" run-id)
     (json-put-string! (mut command) "provider" "service")
     (json-put-string! (mut command) "model" "service")
-    (let [response (service-cancel-run service (load command))]
-      (load (field response status)))))
+    (service-request-cancel-durable-run service (load command))))
 
 (defn tui-watch-run [(service (ptr RunService))
                      (allocator (ptr Allocator))
@@ -418,6 +609,9 @@
         (mut dirty) false
         (mut cancelling) false
         (mut rendered-count) 0
+        ;; How many rows of the current live block have already scrolled into
+        ;; the transcript. Reset whenever the block finishes committing.
+        (mut live-committed) 0
         (mut model) (presentation-model-new allocator)
         (mut policy) (transcript-policy-new)
         (mut inline-renderer) (inline-renderer-new-retaining allocator)
@@ -480,38 +674,6 @@
                                                   (load (field policy committed-count)))
                                           (store! dirty true))
                                       0)
-                                    (when (str-eq kind "authorization.requested")
-                                      (when (load dirty)
-                                        (tui-render-presentation! allocator
-                                                                  (mut model)
-                                                                  (mut policy)
-                                                                  (mut rendered-count)
-                                                                  (mut inline-renderer)
-                                                                  profile
-                                                                  (load width)
-                                                                  (load height)
-                                                                  true
-                                                                  (load cancelling))
-                                        (store! dirty false)
-                                        0)
-                                      (when (load input-open)
-                                        (input-reader-finish! allocator
-                                                              (mut run-input)
-                                                              profile)
-                                        (store! input-open false)
-                                        0)
-                                      (tui-decide-authorization service
-                                                                allocator
-                                                                (command-string event "run_id")
-                                                                event
-                                                                profile)
-                                      (when (load (field profile interactive))
-                                        (store! input-open
-                                                (input-reader-lifecycle-enter! allocator
-                                                                               (mut run-input)
-                                                                               profile))
-                                        0)
-                                      0)
                                     (when (run-watch-event-finishes-root? event run-id)
                                       (store! done true)
                                       0)
@@ -522,6 +684,7 @@
                                                   (mut model)
                                                   (mut policy)
                                                   (mut rendered-count)
+                                                  (mut live-committed)
                                                   (mut inline-renderer)
                                                   profile
                                                   (load width)
@@ -553,15 +716,45 @@
                                           (match (busy-input-intent key)
                                             (BusyInputCancel []
                                                              (when (not (load cancelling))
+                                                               ;; A keypress must have a synchronous visual
+                                                               ;; consequence. Render the acknowledgement before
+                                                               ;; journal recovery/cancellation coordination, both
+                                                               ;; of which may touch a large journal.
+                                                               (store! cancelling true)
+                                                               (tui-render-presentation! allocator
+                                                                                         (mut model)
+                                                                                         (mut policy)
+                                                                                         (mut rendered-count)
+                                                                                         (mut live-committed)
+                                                                                         (mut inline-renderer)
+                                                                                         profile
+                                                                                         (load width)
+                                                                                         (load height)
+                                                                                         true
+                                                                                         true)
                                                                (let [status
                                                                        (tui-request-cancel! service
                                                                                             allocator
                                                                                             run-id)]
-                                                                 (when (and (>= status 200)
-                                                                            (< status 300))
-                                                                   (store! cancelling true)
-                                                                   (store! dirty true)
-                                                                   0))
+                                                                 (if (= status 0)
+                                                                     ;; Interrupt means return control to the human;
+                                                                     ;; the durable worker can finish unwinding in the
+                                                                     ;; background and remains inspectable by run ID.
+                                                                     (do
+                                                                       ;; Cancellation is not an assistant message and
+                                                                       ;; is not an error. Erase the mutable run region;
+                                                                       ;; the already-committed user prompt remains.
+                                                                       (let [(mut empty) (frame-new allocator)]
+                                                                         (tui-output-inline-update! (mut inline-renderer)
+                                                                                                    allocator
+                                                                                                    profile
+                                                                                                    (mut empty)
+                                                                                                    (mut empty)))
+                                                                       (store! done true))
+                                                                     (do
+                                                                       (store! cancelling false)
+                                                                       (store! dirty true)))
+                                                                 0)
                                                                0))
                                             (BusyInputSuspend []
                                                               (do
@@ -638,11 +831,12 @@
                          (allocator (ptr Allocator))
                          (provider (slice u8))
                          (model (slice u8))
+                         (effort (slice u8))
                          (prompt (slice u8))
                          (history (ptr TuiConversation))
                          (profile (ref TerminalProfile))] (-> (slice u8))
   (let [run-id (tui-new-run-id allocator)
-        (mut command) (tui-command allocator run-id provider model prompt)]
+        (mut command) (tui-command allocator run-id provider model effort prompt)]
     (json-put-string! (mut command) "conversation_id" (load (field history conversation-id)))
     (let [response (service-submit-run service (mut command) "tui-user")]
       (if (and (>= (load (field response status)) 200)
@@ -653,14 +847,56 @@
               run-id))
           (do (tui-print-response allocator response profile) "")))))
 
+(defn tui-primary-prompt [(allocator (ptr Allocator))
+                          (provider (slice u8))
+                          (model (slice u8))
+                          (effort (slice u8))
+                          (unicode bool)] (-> (slice u8))
+  (let [(mut value) (sb-new allocator)]
+    ;; The composer is the bottom-owned live region, so this compact prefix is
+    ;; a persistent status bar without stealing a transcript row.
+    (sb-push-str! (mut value) "[")
+    (sb-push-str! (mut value) provider)
+    (sb-push-str! (mut value) "/")
+    (sb-push-str! (mut value) model)
+    (when (> (slice-len [u8] effort) 0)
+      (sb-push-str! (mut value) " · ")
+      (sb-push-str! (mut value) effort)
+      0)
+    (sb-push-str! (mut value) "]")
+    (sb-finish! (mut value))))
+
+(defn tui-status-provider [(provider (slice u8))] (-> (slice u8))
+  (if (or (= (slice-len [u8] provider) 0) (str-eq provider "auto"))
+      (route-profile-provider "balanced" false)
+      provider))
+
+(defn tui-status-model [(provider (slice u8))
+                        (model (slice u8))] (-> (slice u8))
+  (if (or (= (slice-len [u8] model) 0) (str-eq model "auto"))
+      (route-default-model (tui-status-provider provider))
+      model))
+
 (defn tui-read-primary [(allocator (ptr Allocator))
                         (editor (ptr InputEditor))
-                        (profile (ref TerminalProfile))] (-> InputReadResult)
+                        (profile (ref TerminalProfile))
+                        (provider (slice u8))
+                        (model (slice u8))
+                        (effort (slice u8))
+                        (observer (dyn InputIdleObserver))] (-> InputReadResult)
   (if (load (field profile interactive))
-      (input-read-interactive allocator
-                              editor
-                              profile
-                              (if (load (field profile unicode)) "❯ " "> "))
+      (do
+        (input-editor-set-status! editor
+                                  (tui-primary-prompt allocator
+                                                      (tui-status-provider provider)
+                                                      (tui-status-model provider model)
+                                                      effort
+                                                      (load (field profile unicode))))
+        (input-read-primary-observed allocator
+                                     editor
+                                     profile
+                                     (if (load (field profile unicode)) "❯ " "> ")
+                                     observer))
       (let [text
               (tui-read allocator
                         (if (load (field profile unicode)) "❯ " "> "))]
@@ -674,10 +910,25 @@
         (mut done) false
         (mut provider) (if fixture-provider "tui-fixture" "auto")
         (mut model) (if fixture-provider "fixture-model" "auto")
+        ;; Empty means "let the runtime decide" -- the same thing an older
+        ;; client sends. Only an explicit pick puts a level on the wire.
+        (mut effort) ""
+        (mut catalog) (model-catalog-default allocator)
         (mut current-run) ""
         (mut history) (zeroed TuiConversation)
-        (mut editor) (input-editor-new allocator)]
+        notifications (box allocator TuiNotificationSource (zeroed TuiNotificationSource))
+        (mut commands) (command-registry-builtin allocator)
+        (mut editor) (input-editor-new-with-commands allocator (mut commands))]
     (store! (field history conversation-id) (tui-conversation-id allocator))
+    (store! (field notifications service) service)
+    (store! (field notifications allocator) allocator)
+    (store! (field notifications conversation-id)
+            (load (field history conversation-id)))
+    (store! (field notifications pending) (al-new [(slice u8)] allocator))
+    (store! (field notifications pending-next) 0)
+    (let [initial (service-recover-into service allocator)]
+      (store! (field notifications cursor)
+              (if (load (field initial ok)) (load (field initial last-sequence)) 0)))
     (tui-header allocator profile)
     ;; The balanced TUI route currently selects Codex. Prepare its execution
     ;; strategy after rendering the header but before accepting the first prompt,
@@ -688,10 +939,16 @@
       0)
     (loop (if (load done)
               (break)
-              (match (tui-read-primary allocator (mut editor) profile)
+              (match (tui-read-primary allocator
+                                       (mut editor)
+                                       profile
+                                       (load provider)
+                                       (load model)
+                                       (load effort)
+                                       notifications)
                 (InputReadSubmitted [action]
                                     (cond (or (str-eq action "/quit") (str-eq action "/exit")) (store! done true)
-                                          (str-eq action "/help") (tui-help allocator profile)
+                                          (str-eq action "/help") (tui-help allocator (mut commands) profile)
                                           (str-eq action "/clear")
                                             (do
                                               (tui-output-clear-screen allocator profile)
@@ -699,46 +956,77 @@
                                           (str-eq action "/conversation")
                                             (tui-output-write-line allocator
                                                                    1
-                                                                   (concat-or-empty
-                                                                     allocator
-                                                                     "  conversation "
-                                                                     (load (field history conversation-id))))
+                                                                   (concat-or-empty allocator
+                                                                                    "  conversation "
+                                                                                    (load (field history
+                                                                                                 conversation-id))))
                                           (str-eq action "/new")
                                             (do
                                               (store! (field history conversation-id)
                                                       (tui-new-run-id allocator))
+                                              (store! (field notifications conversation-id)
+                                                      (load (field history conversation-id)))
                                               (tui-output-write-line allocator
                                                                      1
-                                                                     (concat-or-empty
-                                                                       allocator
-                                                                       "  new conversation "
-                                                                       (load (field history
-                                                                                    conversation-id)))))
+                                                                     (concat-or-empty allocator
+                                                                                      "  new conversation "
+                                                                                      (load (field history
+                                                                                                   conversation-id)))))
                                           (str-eq action "/model")
-                                            (do
-                                              (store! provider
-                                                      (tui-read-secondary allocator
-                                                                          profile
-                                                                          "  provider [auto]: "))
-                                              (store! model
-                                                      (tui-read-secondary allocator
-                                                                          profile
-                                                                          "  model [auto]: "))
-                                              (when (= (slice-len [u8] (load provider)) 0) (store! provider "auto") 0)
-                                              (when (= (slice-len [u8] (load model)) 0) (store! model "auto") 0)
-                                              (when (str-eq (load provider) "codex")
-                                                (service-prepare-provider! service "codex")
-                                                0)
-                                              (tui-render-view allocator
-                                                               profile
-                                                               (view-flow (RoleMuted)
-                                                                          "  using "
-                                                                          "    "
-                                                                          (concat-or-empty allocator
-                                                                                           (load provider)
-                                                                                           (concat-or-empty allocator
-                                                                                                            "/"
-                                                                                                            (load model))))))
+                                            (let [entries (tui-model-entries allocator (mut catalog))
+                                                  at
+                                                    (model-catalog-find (mut catalog)
+                                                                        (load provider)
+                                                                        (load model))]
+                                              (match (input-read-choice allocator
+                                                                        profile
+                                                                        "  model: "
+                                                                        entries
+                                                                        at)
+                                                (ChoiceSelected [index]
+                                                                (let [choice (model-catalog-at (mut catalog) index)]
+                                                                  (store! provider (load (field choice provider)))
+                                                                  (store! model (load (field choice model)))
+                                                                  ;; A model that takes no effort clears any
+                                                                  ;; level left over from the previous pick --
+                                                                  ;; carrying it forward would send a parameter
+                                                                  ;; the provider rejects.
+                                                                  (if (not (load (field choice effort)))
+                                                                      (store! effort "")
+                                                                      (match (input-read-choice allocator
+                                                                                                profile
+                                                                                                "  effort: "
+                                                                                                (tui-effort-entries allocator)
+                                                                                                (effort-index (load (field choice
+                                                                                                                           default-effort))))
+                                                                        (ChoiceSelected [level]
+                                                                                        (let [picked
+                                                                                                (alloc/stack EffortChoice)]
+                                                                                          (store! picked
+                                                                                                  (effort-choice-at level))
+                                                                                          (store! effort
+                                                                                                  (load (field picked
+                                                                                                               label)))))
+                                                                        (ChoiceCancelled []
+                                                                                         (store! effort
+                                                                                                 (reasoning-effort-name (load (field choice
+                                                                                                                                     default-effort)))))
+                                                                        (ChoiceClosed [] (store! done true))
+                                                                        (ChoiceFailed [] 0)))
+                                                                  (when (str-eq (load provider) "codex")
+                                                                    (service-prepare-provider! service "codex")
+                                                                    0)
+                                                                  (tui-report-selection allocator
+                                                                                        profile
+                                                                                        (load provider)
+                                                                                        (load model)
+                                                                                        (load effort))))
+                                                (ChoiceCancelled [] 0)
+                                                (ChoiceClosed [] (store! done true))
+                                                (ChoiceFailed []
+                                                              (tui-output-write-line allocator
+                                                                                     2
+                                                                                     "  could not open the model picker"))))
                                           (str-eq action "/agent")
                                             (do
                                               (if (= (slice-len [u8] (load current-run)) 0)
@@ -755,6 +1043,7 @@
                                                                        run-id
                                                                        (load provider)
                                                                        (load model)
+                                                                       (load effort)
                                                                        prompt)]
                                                     (json-put-string! (mut command)
                                                                       "parent_run_id"
@@ -802,6 +1091,22 @@
                                                                   (service-cancel-run service (load command))
                                                                   profile))
                                           (= (slice-len [u8] action) 0) 0
+                                          ;; Anything else beginning with a slash is a
+                                          ;; mistyped command, not a prompt. Sending it to
+                                          ;; the model hides the typo behind whatever the
+                                          ;; model decides to say about it.
+                                          (and (starts-with action "/")
+                                               (not (command-known? (mut commands) action)))
+                                            (do
+                                              (tui-output-write-line allocator
+                                                                     2
+                                                                     (concat-or-empty allocator
+                                                                                      "  unknown command "
+                                                                                      action))
+                                              (tui-output-write-line allocator
+                                                                     2
+                                                                     "  /help lists the commands")
+                                              0)
                                           :else
                                             (do
                                               (tui-output-write-line allocator 1 "")
@@ -810,14 +1115,39 @@
                                                                          allocator
                                                                          (load provider)
                                                                          (load model)
+                                                                         (load effort)
                                                                          action
                                                                          (mut history)
                                                                          profile)]
                                                 (when (> (slice-len [u8] run-id) 0)
                                                   (store! current-run run-id)
                                                   0)))))
-                (InputReadInterrupted []
-                                      (tui-output-write-line allocator 1 "^C"))
+                (InputReadInterrupted [] 0)
+                (InputReadNotification []
+                                       (let [run-id (tui-notification-current notifications)
+                                             (mut ignored) (sb-new allocator)]
+                                         (let [child
+                                                 (if (starts-with run-id "notification:")
+                                                     (subslice [u8]
+                                                               run-id
+                                                               13
+                                                               (slice-len [u8] run-id))
+                                                     run-id)]
+                                           (tui-render-view allocator
+                                                            profile
+                                                            (view-flow (RoleSuccess)
+                                                                       (if (load (field profile unicode))
+                                                                           "  ✓ "
+                                                                           "  done: ")
+                                                                       "    "
+                                                                       (concat-or-empty allocator
+                                                                                        "Async completion "
+                                                                                        (concat-or-empty allocator
+                                                                                                         child
+                                                                                                         " complete")))))
+                                         (tui-watch-run service allocator run-id (mut ignored) profile)
+                                         (tui-notification-consume! notifications)))
+                (InputReadQuit [] (store! done true))
                 (InputReadClosed [] (store! done true))
                 (InputReadFailed []
                                  (do

@@ -9,19 +9,43 @@
 (import "coil.signals" :as signals)
 (import "coil.slice" :use *)
 (import "coil.time" :as time)
+(import "coil.str" :use *)
+(import "harness-tui-command" :use *)
+(import "harness-system" :use *)
+(import "harness-tui-fuzzy" :use *)
 (import "harness-tui-input-decoder" :use *)
 (import "harness-tui-input-editor" :use *)
 (import "harness-tui-output" :use *)
 (import "harness-tui-render-input" :use *)
 (import "harness-tui-terminal" :use *)
+(import "harness-tui-terminal-operation" :use *)
 (import "harness-tui-view" :use *)
 (import "harness-tui-view-layout" :use *)
+(import "provider-common" :use *)
 
 (defsum InputReadResult
   (InputReadSubmitted [(text (slice u8))])
+  (InputReadNotification [])
   (InputReadInterrupted [])
+  ;; Two Ctrl-C presses in quick succession. Distinct from Closed (EOF) because
+  ;; a caller may want to confirm or save on a deliberate quit but not on a
+  ;; vanished terminal.
+  (InputReadQuit [])
   (InputReadClosed [])
   (InputReadFailed []))
+
+(deftrait InputIdleObserver [Self]
+  (input-idle-notification? [(self (ptr Self))] (-> bool)))
+
+(defstruct NoopInputIdleObserver [(reserved u8)])
+
+(impl InputIdleObserver NoopInputIdleObserver
+  (input-idle-notification? [(self (ptr NoopInputIdleObserver))] (-> bool) false))
+
+;; How long the "press again" offer stands. Long enough to be a deliberate
+;; double-press, short enough that a Ctrl-C you have forgotten about cannot quit
+;; the session minutes later.
+(const INPUT_QUIT_WINDOW_MS 2000)
 
 (defstruct InputReaderLifecycle
   [(terminal TerminalSession)
@@ -55,6 +79,135 @@
             0)
           false))))
 
+;; Only as many rows as the menu is allowed to occupy; the rest becomes a count.
+;; A menu that could grow without bound would eventually own more of the screen
+;; than the conversation does.
+(const INPUT_MENU_MAX_ROWS 8)
+
+(defn input-reader-menu [(allocator (ptr Allocator))
+                         (editor (ptr InputEditor))
+                         (overflow (ptr i64))] (-> (ptr (ArrayList ViewMenuEntry)))
+  (store! overflow 0)
+  (if (not (input-editor-menu-open? editor))
+      (cast (ptr (ArrayList ViewMenuEntry)) 0)
+      (let [registry (load (field editor commands))
+            (mut matches) (input-editor-menu-matches editor)
+            count (al-len [i64] (load matches))
+            selected (input-editor-menu-selected editor)
+            shown (if (> count INPUT_MENU_MAX_ROWS) INPUT_MENU_MAX_ROWS count)
+            ;; Keep the selection on screen when it walks past the window.
+            start
+              (if (>= selected shown)
+                  (- (+ selected 1) shown)
+                  0)
+            entries (box allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] allocator))
+            (mut at) 0]
+        (store! overflow (- count shown))
+        (loop (if (>= (load at) shown)
+                  (break)
+                  (let [index (+ start (load at))
+                        spec (command-at registry (al-get [i64] (load matches) index))
+                        detail
+                          (match (load (field spec argument))
+                            (CommandNoArgument [] (load (field spec summary)))
+                            (CommandPrompts [hint]
+                                            (concat-or-empty allocator
+                                                             (load (field spec summary))
+                                                             (concat-or-empty allocator
+                                                                              "  — asks for "
+                                                                              hint))))]
+                    (al-push! [ViewMenuEntry]
+                              entries
+                              (view-menu-entry (load (field spec name))
+                                               detail
+                                               (= index selected)))
+                    (store! at (+ (load at) 1)))))
+        entries)))
+
+;; While reverse search is active the composer shows the query and the matched
+;; line instead of the ordinary prompt, so the mode is never ambiguous.
+(defn input-reader-prompt [(allocator (ptr Allocator))
+                           (editor (ptr InputEditor))
+                           (prompt (slice u8))] (-> (slice u8))
+  (if (not (input-editor-search-active? editor))
+      prompt
+      (concat-or-empty allocator
+                       "(reverse-i-search)`"
+                       (concat-or-empty allocator
+                                        (input-editor-search-text editor)
+                                        "': "))))
+
+(defn input-reader-redraw-with! [(allocator (ptr Allocator))
+                                 (editor (ptr InputEditor))
+                                 (renderer (ptr InputRenderer))
+                                 (profile (ref TerminalProfile))
+                                 (width i64)
+                                 (height i64)
+                                 (prompt (slice u8))
+                                 (hint (slice u8))] (-> i64)
+  (let [cycle (alloc/stack region/Region)]
+    (region/region-init cycle allocator)
+    (let [cycle-allocator (region/region-allocator cycle)
+          overflow (box cycle-allocator i64 0)
+          menu (input-reader-menu cycle-allocator editor overflow)
+          ;; A hint replaces the completion menu rather than stacking with it:
+          ;; the menu is only open mid-command and Ctrl-C clears the line first,
+          ;; so the two can never be wanted at once.
+          rows
+            (if (= (slice-len [u8] hint) 0)
+                menu
+                (let [only
+                        (box cycle-allocator
+                             (ArrayList ViewMenuEntry)
+                             (al-new [ViewMenuEntry] cycle-allocator))]
+                  (al-push! [ViewMenuEntry] only (view-menu-entry hint "" false))
+                  only))
+          base-menu-rows
+            (if (> (slice-len [u8] hint) 0)
+                1
+                (if (= rows (cast (ptr (ArrayList ViewMenuEntry)) 0))
+                    0
+                    (+ (al-len [ViewMenuEntry] (load rows))
+                       (if (> (load overflow) 0) 1 0))))
+          status (load (field editor status))
+          visible-rows
+            (if (= (slice-len [u8] status) 0)
+                rows
+                (let [owned
+                        (if (= rows (cast (ptr (ArrayList ViewMenuEntry)) 0))
+                            (box cycle-allocator
+                                 (ArrayList ViewMenuEntry)
+                                 (al-new [ViewMenuEntry] cycle-allocator))
+                            rows)]
+                  (al-push! [ViewMenuEntry] owned (view-menu-entry status "" false))
+                  owned))
+          menu-rows (+ base-menu-rows (if (> (slice-len [u8] status) 0) 1 0))
+          node
+            (view-input-with-menu (input-reader-prompt cycle-allocator editor prompt)
+                                  (input-editor-text editor)
+                                  (load (field editor cursor))
+                                  height
+                                  visible-rows
+                                  (if (> (slice-len [u8] hint) 0) 0 (load overflow)))]
+      (match-else node
+                  (ViewInputNode [input]
+                                 (let [(mut declarative) (view-layout-input cycle-allocator input width)]
+                                   (let [(mut operations)
+                                           (input-renderer-plan-with! renderer
+                                                                      cycle-allocator
+                                                                      (mut declarative)
+                                                                      menu-rows)]
+                                     (tui-output-execute-plan! cycle-allocator
+                                                               profile
+                                                               (mut operations)))))
+                  (_ 0))
+      ;; Streaming hides the cursor (see the render cycle); the composer is the
+      ;; only thing with a meaningful place to put one, so it takes it back on
+      ;; every redraw rather than depending on who hid it.
+      (terminal-execute! cycle-allocator 1 profile (TerminalShowCursor))
+      (region/region-close! cycle)
+      0)))
+
 (defn input-reader-redraw! [(allocator (ptr Allocator))
                             (editor (ptr InputEditor))
                             (renderer (ptr InputRenderer))
@@ -62,27 +215,7 @@
                             (width i64)
                             (height i64)
                             (prompt (slice u8))] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
-    (region/region-init cycle allocator)
-    (let [cycle-allocator (region/region-allocator cycle)
-          node
-            (view-input prompt
-                        (input-editor-text editor)
-                        (load (field editor cursor))
-                        height)]
-      (match-else node
-                  (ViewInputNode [input]
-                                 (let [(mut declarative) (view-layout-input cycle-allocator input width)]
-                                   (let [(mut operations)
-                                           (input-renderer-plan-with! renderer
-                                                                      cycle-allocator
-                                                                      (mut declarative))]
-                                     (tui-output-execute-plan! cycle-allocator
-                                                               profile
-                                                               (mut operations)))))
-                  (_ 0))
-      (region/region-close! cycle)
-      0)))
+  (input-reader-redraw-with! allocator editor renderer profile width height prompt ""))
 
 (defn input-reader-clear! [(allocator (ptr Allocator))
                            (renderer (ptr InputRenderer))
@@ -135,9 +268,9 @@
                                     (cast (ptr i8) (index byte 0))
                                     (cast isize 1)))]
                (return-from :ready
-                            (if (= count 1)
-                                (cast i64 (load (index byte 0)))
-                                -1)))
+                              (if (= count 1)
+                                  (cast i64 (load (index byte 0)))
+                                  -1)))
              0)
            (when (load (field lifecycle signals-open))
              (when (input-reader-ready? signal-fd 0)
@@ -160,13 +293,320 @@
     0)
   0)
 
-(defn input-read-interactive [(allocator (ptr Allocator))
-                              (editor (ptr InputEditor))
-                              (profile (ref TerminalProfile))
-                              (prompt (slice u8))] (-> InputReadResult)
+;; ---------------------------------------------------------------------------
+;; List picker
+;;
+;; A choice between known options is not a text prompt with validation bolted
+;; on. `/model` used to read two free-text lines and check them afterwards,
+;; which is how a typo became a session whose every later turn failed. A picker
+;; cannot produce an invalid answer at all.
+;;
+;; It reuses the composer's whole apparatus -- lifecycle, decoder, renderer,
+;; menu rows -- with an empty text buffer, so the region it owns is erased on
+;; exit exactly like the composer's and nothing leaks into the transcript.
+;; ---------------------------------------------------------------------------
+
+(defsum ChoiceResult
+  (ChoiceSelected [(index i64)])
+  (ChoiceCancelled [])
+  (ChoiceClosed [])
+  (ChoiceFailed []))
+
+(defstruct ChoiceEntry [(label (slice u8)) (detail (slice u8))])
+
+(defn choice-entry [(label (slice u8)) (detail (slice u8))] (-> ChoiceEntry)
+  (let [entry (alloc/stack ChoiceEntry)]
+    (store! (field entry label) label)
+    (store! (field entry detail) detail)
+    (load entry)))
+
+(defn input-choice-redraw! [(allocator (ptr Allocator))
+                            (renderer (ptr InputRenderer))
+                            (profile (ref TerminalProfile))
+                            (width i64)
+                            (height i64)
+                            (prompt (slice u8))
+                            (entries (ptr (ArrayList ChoiceEntry)))
+                            (filtered (ptr (ArrayList i64)))
+                            (query (slice u8))
+                            (selected i64)] (-> i64)
+  (let [cycle (alloc/stack region/Region)]
+    (region/region-init cycle allocator)
+    (let [cycle-allocator (region/region-allocator cycle)
+          count (al-len [i64] (load filtered))
+          shown (if (> count INPUT_MENU_MAX_ROWS) INPUT_MENU_MAX_ROWS count)
+          start (if (>= selected shown) (- (+ selected 1) shown) 0)
+          overflow (- count shown)
+          rows (box cycle-allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] cycle-allocator))
+          (mut at) 0]
+      (loop (if (>= (load at) shown)
+                (break)
+                (let [index (+ start (load at))
+                      entry
+                        (al-elem [ChoiceEntry]
+                                 entries
+                                 (al-get [i64] (load filtered) index))]
+                  (al-push! [ViewMenuEntry]
+                            rows
+                            (view-menu-entry (load (field entry label))
+                                             (load (field entry detail))
+                                             (= index selected)))
+                  (store! at (+ (load at) 1)))))
+      (let [node
+              (view-input-with-menu prompt
+                                    query
+                                    (slice-len [u8] query)
+                                    height
+                                    rows
+                                    (if (> overflow 0) overflow 0))]
+        (match-else node
+                    (ViewInputNode [input]
+                                   (let [(mut declarative) (view-layout-input cycle-allocator input width)]
+                                     (let [(mut operations)
+                                             (input-renderer-plan-with! renderer
+                                                                        cycle-allocator
+                                                                        (mut declarative)
+                                                                        (+ shown
+                                                                           (if (> overflow 0) 1 0)))]
+                                       (tui-output-execute-plan! cycle-allocator
+                                                                 profile
+                                                                 (mut operations)))))
+                    (_ 0)))
+      (region/region-close! cycle)
+      0)))
+
+;; Rebuild the visible subset for a query, best match first.
+;;
+;; Both label and detail are matched, so "subscription" finds the Codex rows and
+;; "opus" finds the Claude ones. Ties keep registration order -- an insertion
+;; sort that only moves a row past a strictly lower score is stable, which is
+;; what stops the list from reshuffling under the cursor as you type.
+(defn input-choice-filter! [(entries (ptr (ArrayList ChoiceEntry)))
+                            (query (slice u8))
+                            (out (ptr (ArrayList i64)))
+                            (scores (ptr (ArrayList i64)))] (-> i64)
+  (al-clear! [i64] out)
+  (al-clear! [i64] scores)
+  (let [count (al-len [ChoiceEntry] (load entries))
+        (mut i) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [entry (al-elem [ChoiceEntry] entries (load i))
+                    label-score (fuzzy-score query (load (field entry label)))
+                    detail-score (fuzzy-score query (load (field entry detail)))
+                    ;; A detail match is real but weaker evidence than a name
+                    ;; match, so it never outranks one.
+                    best
+                      (if (>= label-score 0)
+                          label-score
+                          (if (>= detail-score 0) (- detail-score 40) FUZZY_NO_MATCH))]
+                (when (!= best FUZZY_NO_MATCH)
+                  (let [n (al-len [i64] (load out))
+                        (mut at) n]
+                    (al-push! [i64] out (load i))
+                    (al-push! [i64] scores best)
+                    (loop (if (<= (load at) 0)
+                              (break)
+                              (if (>= (al-get [i64] (load scores) (- (load at) 1)) best)
+                                  (break)
+                                  (do
+                                    (al-set! [i64]
+                                             out
+                                             (load at)
+                                             (al-get [i64] (load out) (- (load at) 1)))
+                                    (al-set! [i64]
+                                             scores
+                                             (load at)
+                                             (al-get [i64] (load scores) (- (load at) 1)))
+                                    (al-set! [i64] out (- (load at) 1) (load i))
+                                    (al-set! [i64] scores (- (load at) 1) best)
+                                    (store! at (- (load at) 1)))))))
+                  0)
+                (store! i (+ (load i) 1)))))
+    0))
+
+(defn input-choice-query [(query (ptr (ArrayList u8)))] (-> (slice u8))
+  (slice-new [u8] (load (field query data)) (al-len [u8] (load query))))
+
+;; Apply a key to the filter query. Returns whether the query changed.
+(defn input-choice-edit! [(query (ptr (ArrayList u8))) (key InputKey)] (-> bool)
+  (match-else key
+              (InputInsert [text]
+                           (let [n (slice-len [u8] text)
+                                 (mut at) 0]
+                             (loop (if (>= (load at) n)
+                                       (break)
+                                       (do
+                                         (al-push! [u8] query (slice-get [u8] text (load at)))
+                                         (store! at (+ (load at) 1)))))
+                             (> n 0)))
+              (InputBackspace []
+                              (if (<= (al-len [u8] (load query)) 0)
+                                  false
+                                  (do (al-pop! [u8] query) true)))
+              (InputKillToStart []
+                                (if (<= (al-len [u8] (load query)) 0)
+                                    false
+                                    (do (al-clear! [u8] query) true)))
+              (_ false)))
+
+;; What a key means to a picker. Collapsing the key to a small code keeps the
+;; read loop flat -- the alternative nests a return-from inside a match arm
+;; inside a loop for every key, which is where this function's first draft went
+;; wrong.
+;;
+;; Up/Down arrive as the history keys: the decoder stays neutral about what a
+;; reader does with an arrow, exactly as it does for Escape.
+(const CHOICE_ACTION_IGNORE 0)
+(const CHOICE_ACTION_UP 1)
+(const CHOICE_ACTION_DOWN 2)
+(const CHOICE_ACTION_ACCEPT 3)
+(const CHOICE_ACTION_CANCEL 4)
+(const CHOICE_ACTION_CLOSED 5)
+
+(defn input-choice-action [(key InputKey)] (-> i64)
+  (match-else key
+              (InputHistoryPrevious [] CHOICE_ACTION_UP)
+              (InputHistoryNext [] CHOICE_ACTION_DOWN)
+              (InputSubmit [] CHOICE_ACTION_ACCEPT)
+              (InputComplete [] CHOICE_ACTION_ACCEPT)
+              (InputDismiss [] CHOICE_ACTION_CANCEL)
+              (InputInterrupt [] CHOICE_ACTION_CANCEL)
+              (InputEndOfFile [] CHOICE_ACTION_CLOSED)
+              (_ CHOICE_ACTION_IGNORE)))
+
+;; Returns the chosen index into the ORIGINAL entry list. Cancellation is a
+;; distinct result rather than an index of -1, so a caller cannot mistake "the
+;; user backed out" for "the user chose the first row".
+;;
+;; Typing filters. That is the whole reason the picker is worth having over a
+;; numbered list: with a dozen models, `sol` gets you there in three keystrokes
+;; and no reading. A query that matches nothing leaves the previous list on
+;; screen rather than blanking it, so a typo is recoverable with one backspace.
+(defn input-read-choice [(allocator (ptr Allocator))
+                         (profile (ref TerminalProfile))
+                         (prompt (slice u8))
+                         (entries (ptr (ArrayList ChoiceEntry)))
+                         (initial i64)] (-> ChoiceResult)
+  (let [count (al-len [ChoiceEntry] (load entries))
+        (mut lifecycle) (input-reader-lifecycle-new)
+        (mut decoder) (input-decoder-new allocator)
+        (mut renderer) (input-renderer-new-retaining allocator)
+        (mut query) (al-new [u8] allocator)
+        (mut filtered) (al-new [i64] allocator)
+        (mut scores) (al-new [i64] allocator)
+        (mut selected) 0
+        (mut width)
+          (let [queried (terminal-query-width (cast i32 1))]
+            (if (>= queried 12) queried (load (field profile width))))
+        (mut height)
+          (let [queried (terminal-query-height (cast i32 1))]
+            (if (>= queried 6) queried (load (field profile height))))]
+    (input-choice-filter! entries "" (mut filtered) (mut scores))
+    (store! selected (if (or (< initial 0) (>= initial count)) 0 initial))
+    (if (<= count 0)
+        (ChoiceCancelled)
+        (if (not (input-reader-lifecycle-enter! allocator (mut lifecycle) profile))
+            (ChoiceFailed)
+            (block :choose
+                   (input-choice-redraw! allocator
+                                         (mut renderer)
+                                         profile
+                                         (load width)
+                                         (load height)
+                                         prompt
+                                         entries
+                                         (mut filtered)
+                                         (input-choice-query (mut query))
+                                         (load selected))
+                   (loop (let [byte (input-reader-byte allocator (mut decoder) (mut lifecycle) 250)
+                               decoded
+                                 (cond (= byte -4) (InputDecoded (InputEndOfFile))
+                                       (= byte -3) (InputDecoded (InputInterrupt))
+                                       (= byte -2) (input-decoder-timeout! (mut decoder))
+                                       (< byte 0) (InputDecoded (InputEndOfFile))
+                                       :else (input-decoder-feed! (mut decoder) (cast u8 byte)))
+                               action
+                                 (match-else decoded
+                                             (InputDecoded [key] (input-choice-action key))
+                                             (_ CHOICE_ACTION_IGNORE))
+                               edited
+                                 (if (!= action CHOICE_ACTION_IGNORE)
+                                     false
+                                     (match-else decoded
+                                                 (InputDecoded [key]
+                                                               (input-choice-edit! (mut query) key))
+                                                 (_ false)))
+                               visible (al-len [i64] (load filtered))]
+                           (when edited
+                             ;; A query that matches nothing keeps the last useful
+                             ;; list rather than emptying the menu.
+                             (let [(mut candidate) (al-new [i64] allocator)
+                                   (mut candidate-scores) (al-new [i64] allocator)]
+                               (input-choice-filter! entries
+                                                     (input-choice-query (mut query))
+                                                     (mut candidate)
+                                                     (mut candidate-scores))
+                               (when (> (al-len [i64] (load candidate)) 0)
+                                 (store! filtered (load candidate))
+                                 (store! scores (load candidate-scores))
+                                 (store! selected 0)
+                                 0))
+                             (input-choice-redraw! allocator
+                                                   (mut renderer)
+                                                   profile
+                                                   (load width)
+                                                   (load height)
+                                                   prompt
+                                                   entries
+                                                   (mut filtered)
+                                                   (input-choice-query (mut query))
+                                                   (load selected))
+                             0)
+                           (when (and (not edited)
+                                      (and (or (= action CHOICE_ACTION_UP)
+                                               (= action CHOICE_ACTION_DOWN))
+                                           (> visible 0)))
+                             (store! selected
+                                     (% (+ (+ (load selected)
+                                              (if (= action CHOICE_ACTION_UP) (- visible 1) 1))
+                                           visible)
+                                        visible))
+                             (input-choice-redraw! allocator
+                                                   (mut renderer)
+                                                   profile
+                                                   (load width)
+                                                   (load height)
+                                                   prompt
+                                                   entries
+                                                   (mut filtered)
+                                                   (input-choice-query (mut query))
+                                                   (load selected))
+                             0)
+                           (when (>= action CHOICE_ACTION_ACCEPT)
+                             (input-reader-clear! allocator (mut renderer) profile)
+                             (input-reader-finish! allocator (mut lifecycle) profile)
+                             (return-from :choose
+                                            (cond (and (= action CHOICE_ACTION_ACCEPT) (> visible 0))
+                                                    (ChoiceSelected (al-get [i64]
+                                                                            (load filtered)
+                                                                            (load selected)))
+                                                  (= action CHOICE_ACTION_ACCEPT) (ChoiceCancelled)
+                                                  (= action CHOICE_ACTION_CANCEL) (ChoiceCancelled)
+                                                  :else (ChoiceClosed))))
+                           0)))))))
+
+(defn input-read-interactive-with [(allocator (ptr Allocator))
+                                   (editor (ptr InputEditor))
+                                   (profile (ref TerminalProfile))
+                                   (prompt (slice u8))
+                                   (allow-quit bool)
+                                   (observer (dyn InputIdleObserver))] (-> InputReadResult)
   (let [(mut lifecycle) (input-reader-lifecycle-new)
         (mut decoder) (input-decoder-new allocator)
-        (mut renderer) (input-renderer-new)
+        (mut renderer) (input-renderer-new-retaining allocator)
+        ;; Monotonic deadline for the "press again" offer; 0 means not armed.
+        (mut quit-deadline) 0
         (mut width)
           (let [queried (terminal-query-width (cast i32 1))]
             (if (>= queried 12) queried (load (field profile width))))
@@ -185,11 +625,33 @@
                                      (load width)
                                      (load height)
                                      prompt)
-               (loop (let [byte
-                             (input-reader-byte allocator
-                                                (mut decoder)
-                                                (mut lifecycle)
-                                                250)
+               (loop (let [;; The offer lapses on its own, so a Ctrl-C you
+                           ;; walked away from cannot be completed minutes
+                           ;; later. Evaluated for effect before the read
+                           ;; blocks, which is what makes the hint disappear
+                           ;; on time rather than on the next keystroke.
+                           lapsed
+                             (and (> (load quit-deadline) 0)
+                                  (<= (deadline-remaining-ms (load quit-deadline) 0) 0))
+                           swept
+                             (if lapsed
+                                 (do
+                                   (store! quit-deadline 0)
+                                   (input-reader-redraw! allocator
+                                                         editor
+                                                         (mut renderer)
+                                                         profile
+                                                         (load width)
+                                                         (load height)
+                                                         prompt)
+                                   0)
+                                 0)
+                           byte
+                             (+ swept
+                                (input-reader-byte allocator
+                                                   (mut decoder)
+                                                   (mut lifecycle)
+                                                   250))
                            queried-width (terminal-query-width (cast i32 1))
                            queried-height (terminal-query-height (cast i32 1))
                            resized
@@ -214,7 +676,21 @@
                                                              (mut lifecycle)
                                                              profile)
                                        (return-from :read (InputReadInterrupted)))
-                                   (= byte -2) (input-decoder-timeout! (mut decoder))
+                                   (= byte -2)
+                                     (if (> (al-len [u8]
+                                                    (load (field decoder escape)))
+                                            0)
+                                         (input-decoder-timeout! (mut decoder))
+                                         (if (input-idle-notification? observer)
+                                             (do
+                                               (input-reader-clear! allocator
+                                                                    (mut renderer)
+                                                                    profile)
+                                               (input-reader-finish! allocator
+                                                                     (mut lifecycle)
+                                                                     profile)
+                                               (return-from :read (InputReadNotification)))
+                                             (InputIgnored)))
                                    (< byte 0) (InputDecoded (InputEndOfFile))
                                    :else
                                      (input-decoder-feed! (mut decoder)
@@ -272,19 +748,60 @@
                                                            (input-reader-finish! allocator
                                                                                  (mut lifecycle)
                                                                                  profile)
-                                                           (return-from :read
-                                                                        (InputReadSubmitted text))))
+                                                           (return-from :read (InputReadSubmitted text))))
+                                         ;; Ctrl-C follows the shell convention: with
+                                         ;; text on the line it discards the line and
+                                         ;; nothing more. On an empty line it offers to
+                                         ;; quit, and only a second press inside the
+                                         ;; window takes the offer -- so a stray Ctrl-C
+                                         ;; can never end the session by itself.
                                          (InputInterrupted []
-                                                           (do
-                                                             (input-reader-clear! allocator
-                                                                                  (mut renderer)
-                                                                                  profile)
-                                                             (input-editor-clear! editor)
-                                                             (input-reader-finish! allocator
-                                                                                   (mut lifecycle)
-                                                                                   profile)
-                                                             (return-from :read
-                                                                          (InputReadInterrupted))))
+                                                           (if (not allow-quit)
+                                                               (do
+                                                                 (input-reader-clear! allocator
+                                                                                      (mut renderer)
+                                                                                      profile)
+                                                                 (input-editor-clear! editor)
+                                                                 (input-reader-finish! allocator
+                                                                                       (mut lifecycle)
+                                                                                       profile)
+                                                                 (return-from :read (InputReadInterrupted)))
+                                                               (if (> (slice-len [u8]
+                                                                                 (input-editor-text editor))
+                                                                      0)
+                                                                   (do
+                                                                     (input-editor-clear! editor)
+                                                                     (store! quit-deadline 0)
+                                                                     (input-reader-redraw! allocator
+                                                                                           editor
+                                                                                           (mut renderer)
+                                                                                           profile
+                                                                                           (load width)
+                                                                                           (load height)
+                                                                                           prompt))
+                                                                   (if (and (> (load quit-deadline) 0)
+                                                                            (> (deadline-remaining-ms (load quit-deadline)
+                                                                                                      0)
+                                                                               0))
+                                                                       (do
+                                                                         (input-reader-clear! allocator
+                                                                                              (mut renderer)
+                                                                                              profile)
+                                                                         (input-reader-finish! allocator
+                                                                                               (mut lifecycle)
+                                                                                               profile)
+                                                                         (return-from :read (InputReadQuit)))
+                                                                       (do
+                                                                         (store! quit-deadline
+                                                                                 (deadline-from-timeout INPUT_QUIT_WINDOW_MS))
+                                                                         (input-reader-redraw-with! allocator
+                                                                                                    editor
+                                                                                                    (mut renderer)
+                                                                                                    profile
+                                                                                                    (load width)
+                                                                                                    (load height)
+                                                                                                    prompt
+                                                                                                    "press ctrl-c again to quit"))))))
                                          (InputSuspended []
                                                          (do
                                                            (input-reader-clear! allocator
@@ -304,8 +821,7 @@
                                                                                      (load width)
                                                                                      (load height)
                                                                                      prompt)
-                                                               (return-from :read
-                                                                            (InputReadFailed)))))
+                                                               (return-from :read (InputReadFailed)))))
                                          (InputClosed []
                                                       (do
                                                         (input-reader-clear! allocator
@@ -314,5 +830,27 @@
                                                         (input-reader-finish! allocator
                                                                               (mut lifecycle)
                                                                               profile)
-                                                        (return-from :read
-                                                                     (InputReadClosed)))))))))))))
+                                                        (return-from :read (InputReadClosed)))))))))))))
+
+;; A secondary prompt cancels on Ctrl-C; only the main composer offers to quit,
+;; because quitting out of "which run id?" is never what was meant.
+(defn input-read-interactive [(allocator (ptr Allocator))
+                              (editor (ptr InputEditor))
+                              (profile (ref TerminalProfile))
+                              (prompt (slice u8))] (-> InputReadResult)
+  (let [observer (alloc/stack NoopInputIdleObserver)]
+    (input-read-interactive-with allocator editor profile prompt false observer)))
+
+(defn input-read-primary [(allocator (ptr Allocator))
+                          (editor (ptr InputEditor))
+                          (profile (ref TerminalProfile))
+                          (prompt (slice u8))] (-> InputReadResult)
+  (let [observer (alloc/stack NoopInputIdleObserver)]
+    (input-read-interactive-with allocator editor profile prompt true observer)))
+
+(defn input-read-primary-observed [(allocator (ptr Allocator))
+                                   (editor (ptr InputEditor))
+                                   (profile (ref TerminalProfile))
+                                   (prompt (slice u8))
+                                   (observer (dyn InputIdleObserver))] (-> InputReadResult)
+  (input-read-interactive-with allocator editor profile prompt true observer))

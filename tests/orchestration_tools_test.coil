@@ -4,12 +4,12 @@
 (import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
-(import "harness-authorization-mailbox" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
 (import "harness-orchestration-tools" :use *)
 (import "harness-run-service" :use *)
+(import "harness-system" :use *)
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
@@ -22,6 +22,9 @@
                      (do
                        (store! (field self starts) (+ (load (field self starts)) 1))
                        0))
+  (request-cancel-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
+                              (-> i64)
+                              0)
   (cancel-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
                       (-> RunCancellationResult)
                       (RunCancellationAccepted)))
@@ -34,7 +37,7 @@
   (let [call (alloc/stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-put-string! (mut arguments) "run_id" run-id)
-    (when (not (str-eq name "spawn_subagent"))
+    (when (not (str-eq name "spawn_subagents"))
       (json-put-string! (mut arguments) "provider" "fake")
       (json-put-string! (mut arguments) "model" "fake-model")
       0)
@@ -50,11 +53,45 @@
               (ToolSucceeded [] true)
               (_ false)))
 
+(defn batch-agent [(allocator (ptr Allocator))
+                   (run-id (slice u8))
+                   (provider (slice u8))
+                   (model (slice u8))
+                   (prompt (slice u8))] (-> Json)
+  (let [(mut agent) (json-object allocator)]
+    (json-put-string! (mut agent) "run_id" run-id)
+    (json-put-string! (mut agent) "provider" provider)
+    (json-put-string! (mut agent) "model" model)
+    (json-put-string! (mut agent) "prompt" prompt)
+    (load agent)))
+
+(deftest asynchronous-tools-have-composable-strict-schemas
+         (let [allocator (malloc-allocator)
+               schema (spawn-subagents-schema allocator)
+               properties (json-get schema "properties")
+               required (json-get schema "required")
+               agent (json-get (json-get properties "agents") "items")]
+           (assert-eq (json-array-length required) 1)
+           (assert-eq (json-array-length (json-get agent "required")) 4)
+           (assert (match (json-bool-value (json-get agent "additionalProperties"))
+                     (Some [allowed] (not allowed))
+                     (None [] false)))
+           (let [start (start-async-schema allocator)
+                 notify (notify-async-schema allocator)]
+             (assert (json-object-has? (json-get start "properties") "tool_name"))
+             (assert (json-object-has? (json-get start "properties") "arguments"))
+             (assert (str-eq (command-string (json-get (json-get start "properties")
+                                                       "arguments")
+                                             "type")
+                             "string"))
+             (assert (json-object-has? (json-get notify "properties") "handles"))
+             (assert (not (json-object-has? (json-get notify "properties") "mode")))
+             (assert-eq (json-array-length (json-get notify "required")) 2))))
+
 (deftest subagent-and-workflow-tools-use-durable-run-service
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-orchestration-tools.jsonl"
                journal (alloc/stack EventJournal)
-               mailbox (alloc/stack AuthorizationMailbox)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
                controller (alloc/stack OrchestrationController)
@@ -64,16 +101,12 @@
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (match (authorization-mailbox-open allocator)
-             (AuthorizationMailboxOpenFailed [message] (assert false))
-             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
            (store! (field controller starts) 0)
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
-           (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (store! (field context run-id) "parent-run")
            (store! (field context cancellation) (cast (ptr CancellationToken) 0))
@@ -88,28 +121,63 @@
              (json-put-string! (mut parent) "prompt" "coordinate")
              (let [response (service-submit-run service (mut parent) "test")]
                (assert-eq (load (field response status)) 202)))
-           (let [spawn-tool (alloc/stack SpawnSubagentTool)
+           (let [spawn-tool (alloc/stack SpawnSubagentsTool)
                  spawn-call (alloc/stack ToolCall)
-                 override-call (alloc/stack ToolCall)]
+                 (mut arguments) (json-object allocator)
+                 (mut agents) (json-array allocator)]
              (store! (field spawn-tool service) service)
-             (store! spawn-call
-                     (orchestration-call allocator
-                                         "spawn-call"
-                                         "spawn_subagent"
-                                         "child-run"
-                                         "research"))
-             (assert (orchestration-succeeded? (execute-spawn-subagent spawn-tool spawn-call context allocator)))
-             (store! override-call
-                     (orchestration-call allocator
-                                         "override-call"
-                                         "spawn_subagent"
-                                         "override-child-run"
-                                         "use an override"))
-             (let [(mut arguments) (load (field override-call arguments))]
-               (json-put-string! (mut arguments) "provider" "fake-override")
-               (json-put-string! (mut arguments) "model" "override-model")
-               (store! (field override-call arguments) (load arguments)))
-             (assert (orchestration-succeeded? (execute-spawn-subagent spawn-tool override-call context allocator))))
+             (let [duplicate-call (alloc/stack ToolCall)
+                   (mut duplicate-arguments) (json-object allocator)
+                   (mut duplicates) (json-array allocator)]
+               (json-array-push! (mut duplicates)
+                                 (batch-agent allocator "same-run" "fake" "fake-model" "one"))
+               (json-array-push! (mut duplicates)
+                                 (batch-agent allocator "same-run" "fake" "fake-model" "two"))
+               (json-object-put! (mut duplicate-arguments) "agents" (load duplicates))
+               (store! (field duplicate-call id) "duplicate-batch")
+               (store! (field duplicate-call name) "spawn_subagents")
+               (store! (field duplicate-call arguments) (load duplicate-arguments))
+               (let [rejected (execute-spawn-subagents spawn-tool duplicate-call context allocator)]
+                 (assert (not (orchestration-succeeded? rejected)))
+                 ;; The entire invalid batch is rejected before either child starts.
+                 (assert-eq (load (field controller starts)) 1)))
+             (json-array-push! (mut agents)
+                               (batch-agent allocator "child-run" "fake" "fake-model" "research"))
+             (json-array-push! (mut agents)
+                               (batch-agent allocator
+                                            "override-child-run"
+                                            "fake-override"
+                                            "override-model"
+                                            "use an override"))
+             (json-object-put! (mut arguments) "agents" (load agents))
+             (store! (field spawn-call id) "spawn-batch-call")
+             (store! (field spawn-call name) "spawn_subagents")
+             (store! (field spawn-call arguments) (load arguments))
+             (store! (field spawn-call raw-arguments) "")
+             (let [result (execute-spawn-subagents spawn-tool spawn-call context allocator)]
+               (assert (orchestration-succeeded? result))
+               (assert-eq (json-array-length (json-get (load (field result output)) "handles")) 2)))
+           (let [async-tool (alloc/stack StartAsyncTool)
+                 (mut async-call)
+                   (orchestration-call allocator
+                                       "async-bash-call"
+                                       "start_async_tool"
+                                       "async-bash-run"
+                                       "")]
+             (store! (field async-tool service) service)
+             (let [(mut arguments) (load (field async-call arguments))
+                   (mut inner) (json-object allocator)]
+               (json-put-string! (mut arguments) "run_id" "async-bash-run")
+               (json-put-string! (mut arguments) "tool_name" "bash")
+               (json-put-string! (mut inner) "command" "echo ready")
+               (json-put-string! (mut arguments)
+                                 "arguments"
+                                 (json-stringify allocator (load inner)))
+               (store! (field async-call arguments) (load arguments)))
+             (let [result (execute-start-async async-tool (mut async-call) context allocator)]
+               (assert (orchestration-succeeded? result))
+               (assert (str-eq (command-string (load (field result output)) "status")
+                               "queued"))))
            (let [workflow-tool (alloc/stack CreateWorkflowNodeTool)
                  root-call (alloc/stack ToolCall)
                  child-call (alloc/stack ToolCall)]
@@ -141,21 +209,55 @@
                (json-object-put! (mut arguments) "depends_on" (load dependencies))
                (store! (field child-call arguments) (load arguments)))
              (assert (orchestration-succeeded? (execute-create-workflow-node workflow-tool child-call context allocator))))
-           (assert-eq (load (field controller starts)) 5)
+           (let [notify-tool (alloc/stack NotifyAsyncTool)
+                 (mut notify-call)
+                   (orchestration-call allocator
+                                       "notify-call"
+                                       "notify_async"
+                                       ""
+                                       "")]
+             (store! (field notify-tool service) service)
+             (let [(mut arguments) (load (field notify-call arguments))
+                   (mut handles) (json-array allocator)]
+               (json-put-string! (mut arguments) "group_id" "agent-batch")
+               (json-array-push! (mut handles) (JsonString "child-run"))
+               (json-array-push! (mut handles) (JsonString "override-child-run"))
+               (json-array-push! (mut handles) (JsonString "async-bash-run"))
+               (json-object-put! (mut arguments) "handles" (load handles))
+               (store! (field notify-call arguments) (load arguments)))
+             (let [result (execute-notify-async notify-tool (mut notify-call) context allocator)]
+               (assert (orchestration-succeeded? result))
+               (assert-eq (json-array-length (json-get (load (field result output)) "notifications")) 1)))
+           (assert-eq (load (field controller starts)) 7)
            (let [child (service-query-events service "child-run" 0)
                  events (json-get (load (field child body)) "events")
                  created (json-array-get events 0)
                  payload (json-get created "payload")]
              (assert (str-eq (command-string payload "provider") "fake"))
-             (assert (str-eq (command-string payload "model") "fake-model")))
+             (assert (str-eq (command-string payload "model") "fake-model"))
+             (assert (match (json-bool-value (json-get payload "notify_parent"))
+                       (Some [enabled] (not enabled))
+                       (None [] false))))
            (let [child (service-query-events service "override-child-run" 0)
                  events (json-get (load (field child body)) "events")
                  created (json-array-get events 0)
                  payload (json-get created "payload")]
              (assert (str-eq (command-string payload "provider") "fake-override"))
              (assert (str-eq (command-string payload "model") "override-model")))
+           (let [async-run (service-query-events service "async-bash-run" 0)
+                 events (json-get (load (field async-run body)) "events")
+                 payload (json-get (json-array-get events 0) "payload")]
+             (assert (str-eq (command-string payload "provider") "async-tool"))
+             (assert (str-eq (command-string payload "model") "async-tool")))
            (let [workflow (service-query-workflow service "workflow-tools")]
              (assert-eq (load (field workflow status)) 200)
              (assert-eq (json-array-length (json-get (load (field workflow body)) "nodes")) 2))
-           (authorization-mailbox-close! allocator mailbox)
+           (let [notification (service-query-events service "notification:agent-batch" 0)
+                 events (json-get (load (field notification body)) "events")
+                 payload (json-get (json-array-get events 0) "payload")]
+             (assert (str-eq (command-string payload "dependency_policy") "terminal"))
+             (assert-eq (json-array-length (json-get payload "depends_on")) 3)
+             (assert (str-eq (command-string payload "conversation_id")
+                             (command-string (orchestration-parent-command service "parent-run")
+                                             "conversation_id"))))
            (event-journal-close! journal)))

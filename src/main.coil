@@ -16,6 +16,7 @@
 (import "harness-tool" :use *)
 (import "harness-http" :use *)
 (import "harness-http-listener" :use *)
+(import "harness-directory" :use *)
 (import "harness-system" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-filesystem-tools" :use *)
@@ -34,11 +35,14 @@
 (import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
 (import "harness-allocation-domain" :use *)
-(import "harness-authorization-mailbox" :use *)
 (import "harness-tui-app" :use *)
 (import "harness-tui-output" :use *)
 (import "harness-tui-terminal" :use *)
 (import "tui-fixture-provider" :use *)
+(import "harness-bus-cc-address" :use *)
+(import "harness-bus-cc-discovery" :use *)
+(import "harness-bus-cc-peer" :use *)
+(import "harness-bus-cc-realm" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
   (let [writer (alloc/stack io/Writer)]
@@ -60,8 +64,17 @@
   (write-line 2 "       harness <login|logout> <codex|claude>")
   (write-line 2 "       harness tui [--plain] [journal-path]")
   (write-line 2 "       harness serve <port> <journal-path>")
+  (write-line 2 "       harness peers [--all] [--realm <name>]")
+  (write-line 2 "       harness send [--realm <name>] <peer> <message>")
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
   (write-line 2 "  tool  requires the model to call the echo tool")
+  (write-line 2 "  peers lists reachable Claude Code sessions; --all keeps dead sockets")
+  (write-line 2 "  send  delivers a message into a session's prompt queue")
+  (write-line 2 "        <peer> is a name, pid, session id, name prefix, or uds: address")
+  (write-line 2 "  --realm selects the peer namespace. 'claude-code' (the default) shares")
+  (write-line 2 "        Claude Code's directories and interoperates with its sessions; any")
+  (write-line 2 "        other name is a private namespace using the same protocol with no")
+  (write-line 2 "        contact in either direction. HARNESS_BUS_REALM sets the default.")
   64)
 
 (defstruct CliEventSink [(allocator (ptr Allocator))])
@@ -173,17 +186,15 @@
                (make-request allocator model prompt force-tool registry))
         sequence (box allocator i64 1)
         sink (alloc/stack CliEventSink)
-        authorizer (alloc/stack AllowAllAuthorizer)
         policy (alloc/stack AgentRunPolicy)]
     (store! (field sink allocator) allocator)
     (let [emitter (box allocator EventEmitter (zeroed EventEmitter))]
       (event-emitter-init! emitter allocator sink sequence)
-      (store! (field policy max-model-turns) 8)
+      (store! (field policy max-model-turns) 0)
       (store! (field policy max-parallel-tools) 8)
       (match (run-agent allocator
                         provider
                         request
-                        authorizer
                         emitter
                         (load policy))
         (ModelOk [response]
@@ -308,7 +319,6 @@
                      (session-allocator (ptr Allocator))] (-> i64)
   (let [allocator service-allocator
         (mut journal) (cast (ptr EventJournal) 0)
-        (mut mailbox) (cast (ptr AuthorizationMailbox) 0)
         (mut overrides) (terminal-overrides-from-env process-allocator)]
     (when force-plain
       (store! (field overrides force-plain) true)
@@ -327,15 +337,6 @@
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :tui 65))
-               (match (authorization-mailbox-open allocator)
-                 (AuthorizationMailboxOpenFailed [message]
-                                                 (do
-                                                   (write-line 2 message)
-                                                   (event-journal-close! journal)
-                                                   (return-from :tui 70)))
-                 (AuthorizationMailboxOpened [opened]
-                                             (store! mailbox
-                                                     (box allocator AuthorizationMailbox opened))))
                (let [sequence (box allocator i64 (+ (load (field recovery last-sequence)) 1))
                      emitter (box allocator EventEmitter (zeroed EventEmitter))
                      registry
@@ -353,13 +354,12 @@
                                                     registry
                                                     provider-factory
                                                     emitter
-                                                    mailbox
+                                                    journal
                                                     journal-path))
                      service (box allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
                  (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
                    (write-line 2 "could not initialize runtime provider factory")
-                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (return-from :tui 70))
                  (store! (field provider-factory tui-fixture)
@@ -372,20 +372,17 @@
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
-                 (store! (field service mailbox) mailbox)
                  (store! (field service controller) controller)
                  (register-orchestration-tools! registry process-allocator service)
                  (when (< (service-recover-runs! service) 0)
                    (write-line 2 "could not recover durable runs")
                    (runtime-controller-join-all! controller)
                    (default-runtime-provider-factory-close! provider-factory)
-                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (return-from :tui 65))
                  (let [result (tui-loop service session-allocator profile)]
                    (runtime-controller-join-all! controller)
                    (default-runtime-provider-factory-close! provider-factory)
-                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (tui-output-reset service-allocator profile)
                    result)))))))
@@ -419,11 +416,37 @@
         scratch-region (alloc/stack region/Region)]
     (region/region-init scratch-region owner)
     (let [allocator (region/region-allocator scratch-region)
+          state-root
+            (match (os/env-get allocator "HARNESS_STATE_DIR")
+              (Ok [configured]
+                  (match configured
+                    (Some [value] (os/owned-string-slice value))
+                    (None []
+                          (match (os/env-get allocator "HOME")
+                            (Ok [home]
+                                (match home
+                                  (Some [value]
+                                        (path-join allocator
+                                                   (os/owned-string-slice value)
+                                                   ".coil-harness"))
+                                  (None [] "/tmp/coil-harness")))
+                            (Err [home-failure] "/tmp/coil-harness")))))
+              (Err [missing]
+                   (match (os/env-get allocator "HOME")
+                     (Ok [home]
+                         (match home
+                           (Some [value]
+                                 (path-join allocator
+                                            (os/owned-string-slice value)
+                                            ".coil-harness"))
+                           (None [] "/tmp/coil-harness")))
+                     (Err [home-missing] "/tmp/coil-harness"))))
+          runs-directory (path-join allocator state-root "runs")
           process-id (json-stringify allocator (json-integer allocator (process/id)))
           timestamp (json-stringify allocator (json-integer allocator (now-ms)))
-          path
+          filename
             (concat-or-empty allocator
-                             ".harness-tui."
+                             "tui."
                              (concat-or-empty allocator
                                               process-id
                                               (concat-or-empty allocator
@@ -431,7 +454,14 @@
                                                                (concat-or-empty allocator
                                                                                 timestamp
                                                                                 ".jsonl"))))
-          result (cli-tui path force-plain)]
+          path (path-join allocator runs-directory filename)
+          directory-result (directory-create-all allocator runs-directory 448)
+          result
+            (if (= directory-result 0)
+                (cli-tui path force-plain)
+                (do
+                  (write-line 2 "error: could not create the Coil harness state directory")
+                  73))]
       (region/region-close! scratch-region)
       result)))
 
@@ -444,7 +474,6 @@
         observer-token (cli-observer-token process-allocator)
         service-auth (alloc/stack ServiceAuth)
         (mut journal) (cast (ptr EventJournal) 0)
-        (mut mailbox) (cast (ptr AuthorizationMailbox) 0)
         listener (alloc/stack HttpListener)]
     (block :serve
            (when (= (slice-len [u8] auth-token) 0)
@@ -474,15 +503,6 @@
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :serve 65))
-               (match (authorization-mailbox-open allocator)
-                 (AuthorizationMailboxOpenFailed [message]
-                                                 (do
-                                                   (write-line 2 message)
-                                                   (event-journal-close! journal)
-                                                   (return-from :serve 70)))
-                 (AuthorizationMailboxOpened [opened]
-                                             (store! mailbox
-                                                     (box allocator AuthorizationMailbox opened))))
                (let [sequence
                        (box allocator
                             i64
@@ -503,13 +523,12 @@
                                                     registry
                                                     provider-factory
                                                     emitter
-                                                    mailbox
+                                                    journal
                                                     journal-path))
                      service (box allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
                  (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
                    (write-line 2 "could not initialize runtime provider factory")
-                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (return-from :serve 70))
                  (store! (field provider-factory tui-fixture)
@@ -523,7 +542,6 @@
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
-                 (store! (field service mailbox) mailbox)
                  (store! (field service controller) controller)
                  (register-orchestration-tools! registry process-allocator service)
                  (match (http-listener-open allocator port)
@@ -531,7 +549,6 @@
                                        (do
                                          (write-line 2 message)
                                          (default-runtime-provider-factory-close! provider-factory)
-                                         (authorization-mailbox-close! allocator mailbox)
                                          (event-journal-close! journal)
                                          (return-from :serve 69)))
                    (ListenerOpened [opened] (store! listener opened)))
@@ -540,7 +557,6 @@
                    (runtime-controller-join-all! controller)
                    (default-runtime-provider-factory-close! provider-factory)
                    (http-listener-close! listener)
-                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (return-from :serve 65))
                  (write-line 2
@@ -567,7 +583,6 @@
                    (runtime-controller-join-all! controller)
                    (default-runtime-provider-factory-close! provider-factory)
                    (http-listener-close! listener)
-                   (authorization-mailbox-close! allocator mailbox)
                    (event-journal-close! journal)
                    (if (= (load server-code) 0) 0 74))))))))
 
@@ -589,6 +604,186 @@
       (allocation-domain-close! process-allocator service-domain)
       (region/region-close! process-region)
       (load result))))
+
+;; ---------------------------------------------------------------------------
+;; Claude Code peers
+;; ---------------------------------------------------------------------------
+
+(defn push-peer-field! [(buffer (mut StrBuf))
+                        (separator (slice u8))
+                        (value (slice u8))] (-> i64)
+  (when (> (slice-len [u8] value) 0)
+    (sb-push-str! (mut buffer) separator)
+    (sb-push-str! (mut buffer) value)
+    0)
+  0)
+
+;; ---------------------------------------------------------------------------
+;; Argument scanning for the peer commands
+;; ---------------------------------------------------------------------------
+;;
+;; These commands take an optional flag anywhere among their arguments, so the
+;; positional shapes cannot be enumerated the way the older commands are without
+;; multiplying cases. Scanning is smaller and keeps `--realm` from having to
+;; sit in one fixed slot.
+
+;; `--realm` is the only option carrying a value, so it is the only one whose
+;; following token has to be skipped when counting positionals.
+(defn cli-option-takes-value? [(name (slice u8))] (-> bool)
+  (str-eq name "--realm"))
+
+(defn cli-flag? [(count i64) (argv (ptr (ptr i8))) (name (slice u8))] (-> bool)
+  (let [(mut found) false
+        (mut i) 2]
+    (loop (if (or (>= (load i) count) (load found))
+              (break)
+              (do
+                (when (str-eq (cstr->str (load (index argv (load i)))) name)
+                  (store! found true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+;; The value following `name`, or empty when absent. Empty is also what a
+;; trailing `--realm` with nothing after it yields, which `cc-realm-init!`
+;; already treats as "use the configured default".
+(defn cli-option [(count i64)
+                  (argv (ptr (ptr i8)))
+                  (name (slice u8))] (-> (slice u8))
+  (let [(mut value) ""
+        (mut i) 2]
+    (loop (if (or (>= (load i) count) (> (slice-len [u8] (load value)) 0))
+              (break)
+              (do
+                (when (and (str-eq (cstr->str (load (index argv (load i)))) name)
+                           (< (+ (load i) 1) count))
+                  (store! value (cstr->str (load (index argv (+ (load i) 1)))))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load value)))
+
+;; The nth argument that is not a flag or a flag's value.
+(defn cli-positional [(count i64)
+                      (argv (ptr (ptr i8)))
+                      (wanted i64)] (-> (slice u8))
+  (let [(mut seen) 0
+        (mut found) ""
+        (mut i) 2]
+    (loop (if (or (>= (load i) count) (> (slice-len [u8] (load found)) 0))
+              (break)
+              (let [argument (cstr->str (load (index argv (load i))))]
+                (if (starts-with argument "--")
+                    (store! i (+ (load i) (if (cli-option-takes-value? argument) 2 1)))
+                    (do
+                      (when (= (load seen) wanted)
+                        (store! found argument)
+                        0)
+                      (store! seen (+ (load seen) 1))
+                      (store! i (+ (load i) 1)))))))
+    (load found)))
+
+(defn cli-unknown-flag [(count i64) (argv (ptr (ptr i8)))] (-> (slice u8))
+  (let [(mut bad) ""
+        (mut i) 2]
+    (loop (if (or (>= (load i) count) (> (slice-len [u8] (load bad)) 0))
+              (break)
+              (let [argument (cstr->str (load (index argv (load i))))]
+                (if (starts-with argument "--")
+                    (do
+                      (when (not (or (str-eq argument "--all")
+                                     (str-eq argument "--realm")))
+                        (store! bad argument)
+                        0)
+                      (store! i (+ (load i) (if (cli-option-takes-value? argument) 2 1))))
+                    (store! i (+ (load i) 1))))))
+    (load bad)))
+
+;; ---------------------------------------------------------------------------
+;; Peer commands
+;; ---------------------------------------------------------------------------
+
+;; One line per peer. Unregistered peers print their address instead of a name
+;; rather than being hidden: they are reachable, and a listing that omitted them
+;; would misrepresent who is actually out there.
+(defn cli-peers-in [(realm (ptr CcRealm))
+                    (allocator (ptr Allocator))
+                    (include-dead bool)] (-> i64)
+  (let [(mut peers) (cc-discover realm allocator include-dead)
+        n (al-len [CcPeer] peers)
+        (mut printed) 0
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [peer (al-elem [CcPeer] (mut peers) (load i))
+                    (mut line) (sb-new allocator)]
+                ;; The session we are running inside is hidden unless asked
+                ;; for. It is reachable, and messaging it would be a loop.
+                (if (and (load (field peer self)) (not include-dead))
+                    0
+                    (do
+                      (if (> (slice-len [u8] (load (field peer name))) 0)
+                          (sb-push-str! (mut line) (load (field peer name)))
+                          (sb-push-str! (mut line) (load (field peer address))))
+                      (sb-push-str! (mut line) "  pid ")
+                      (cc-push-decimal! (mut line) (load (field peer pid)))
+                      (push-peer-field! (mut line) "  " (load (field peer kind)))
+                      (push-peer-field! (mut line) "  " (load (field peer status)))
+                      (push-peer-field! (mut line) "  " (load (field peer cwd)))
+                      (when (not (load (field peer alive)))
+                        (sb-push-str! (mut line) "  [dead socket]")
+                        0)
+                      (when (not (load (field peer registered)))
+                        (sb-push-str! (mut line) "  [unregistered]")
+                        0)
+                      (when (load (field peer self))
+                        (sb-push-str! (mut line) "  [self]")
+                        0)
+                      (write-line 1 (sb-str (load line)))
+                      (store! printed (+ (load printed) 1))
+                      0))
+                (store! i (+ (load i) 1)))))
+    ;; Counted rather than derived from the peer count, which would report
+    ;; "found nothing" as a listing when the only peer present was ourselves.
+    (when (= (load printed) 0)
+      (write-line 2
+                  (if (load (field realm interop))
+                      "no reachable Claude Code sessions"
+                      "no reachable peers in this realm"))
+      0)
+    0))
+
+(defn cli-peers [(realm-name (slice u8)) (include-dead bool)] (-> i64)
+  (let [owner (malloc-allocator)
+        region (alloc/stack region/Region)]
+    (region/region-init region owner)
+    (let [allocator (region/region-allocator region)
+          realm (alloc/stack CcRealm)]
+      (cc-realm-init! realm allocator realm-name)
+      (cli-peers-in realm allocator include-dead)
+      (region/region-close! region)
+      0)))
+
+(defn cli-peer-send [(realm-name (slice u8))
+                     (target (slice u8))
+                     (message (slice u8))] (-> i64)
+  (let [owner (malloc-allocator)
+        region (alloc/stack region/Region)]
+    (region/region-init region owner)
+    (let [allocator (region/region-allocator region)
+          realm (alloc/stack CcRealm)
+          identity (alloc/stack CcIdentity)]
+      (cc-realm-init! realm allocator realm-name)
+      ;; No reply address: this process does not bind a socket, so a reply has
+      ;; nowhere to go. The message still delivers -- reachability never
+      ;; required registration -- it simply cannot be answered.
+      (cc-identity-init! identity "" "coil-harness" "bypass")
+      (let [outcome (cc-peer-send realm allocator identity target message "")]
+        (if (= outcome CC_SEND_OK)
+            (do (region/region-close! region) 0)
+            (do
+              (write-line 2 (cc-send-error-name outcome))
+              (region/region-close! region)
+              69))))))
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [count (cast i64 argc)]
@@ -615,16 +810,31 @@
                               (cli-tui (cstr->str (load (index argv 3))) true)
                               (cli-usage))
                         :else (cli-usage))
-                  (if (str-eq command "serve")
-                      (if (= count 4)
-                          (cli-serve (cstr->str (load (index argv 2)))
-                                     (cstr->str (load (index argv 3))))
-                          (cli-usage))
-                      (if (< count 5)
+                  (if (str-eq command "peers")
+                      (if (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
                           (cli-usage)
-                          (let [provider (cstr->str (load (index argv 2)))
-                                model (cstr->str (load (index argv 3)))
-                                prompt (cstr->str (load (index argv 4)))]
-                            (cond (str-eq command "run") (cli-run provider model prompt false)
-                                  (str-eq command "tool") (cli-run provider model prompt true)
-                                  :else (cli-usage)))))))))))
+                          (cli-peers (cli-option count argv "--realm")
+                                     (cli-flag? count argv "--all")))
+                      (if (str-eq command "send")
+                          (let [target (cli-positional count argv 0)
+                                message (cli-positional count argv 1)]
+                            (if (or (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
+                                    (or (= (slice-len [u8] target) 0)
+                                        (= (slice-len [u8] message) 0)))
+                                (cli-usage)
+                                (cli-peer-send (cli-option count argv "--realm")
+                                               target
+                                               message)))
+                          (if (str-eq command "serve")
+                              (if (= count 4)
+                                  (cli-serve (cstr->str (load (index argv 2)))
+                                             (cstr->str (load (index argv 3))))
+                                  (cli-usage))
+                              (if (< count 5)
+                                  (cli-usage)
+                                  (let [provider (cstr->str (load (index argv 2)))
+                                        model (cstr->str (load (index argv 3)))
+                                        prompt (cstr->str (load (index argv 4)))]
+                                    (cond (str-eq command "run") (cli-run provider model prompt false)
+                                          (str-eq command "tool") (cli-run provider model prompt true)
+                                          :else (cli-usage)))))))))))))

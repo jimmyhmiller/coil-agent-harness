@@ -1,0 +1,114 @@
+;; Directory tests.
+;;
+;; The one that matters is `dirent` field alignment: read `d_name` at the wrong
+;; offset and you get plausible-looking garbage, not an error. These assert
+;; against files this test creates itself, so a layout that is off by a few
+;; bytes produces names that do not match and fails loudly.
+(module harness-directory-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.assert" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+
+(defn contains-name? [(names (ArrayList (slice u8))) (wanted (slice u8))] (-> bool)
+  (let [n (al-len [(slice u8)] names)
+        (mut found) false
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (load found))
+              (break)
+              (do
+                (when (str-eq (al-get [(slice u8)] names (load i)) wanted)
+                  (store! found true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+(defn write-empty! [(allocator (ptr Allocator)) (path (slice u8))] (-> bool)
+  (match (fs/write-file allocator path "")
+    (Err [failure] false)
+    (Ok [_] true)))
+
+(defn scratch-dir [(allocator (ptr Allocator)) (name (slice u8))] (-> (slice u8))
+  (path-join allocator "/tmp" name))
+
+(deftest a-created-directory-lists-the-files-written-into-it
+         (let [allocator (malloc-allocator)
+               dir (scratch-dir allocator "harness-dir-test-list")]
+           (directory-create allocator dir 448)
+           (assert (path-exists? allocator dir))
+           (let [a (path-join allocator dir "alpha.sock")
+                 b (path-join allocator dir "beta.sock")
+                 c (path-join allocator dir "gamma.txt")]
+             (assert (write-empty! allocator a))
+             (assert (write-empty! allocator b))
+             (assert (write-empty! allocator c))
+             (let [names (directory-entries allocator dir)]
+               ;; Exactly the three written, with `.` and `..` filtered out.
+               (assert (= (al-len [(slice u8)] names) 3))
+               (assert (contains-name? names "alpha.sock"))
+               (assert (contains-name? names "beta.sock"))
+               (assert (contains-name? names "gamma.txt"))
+               (assert (not (contains-name? names ".")))
+               (assert (not (contains-name? names ".."))))
+             (let [sockets (directory-entries-with-suffix allocator dir ".sock")]
+               (assert (= (al-len [(slice u8)] sockets) 2))
+               (assert (contains-name? sockets "alpha.sock"))
+               (assert (not (contains-name? sockets "gamma.txt"))))
+             (path-remove allocator a)
+             (path-remove allocator b)
+             (path-remove allocator c))))
+
+;; A long name exercises the `d_name` read past the point where a wrong offset
+;; would still coincidentally land inside the record.
+(deftest a-long-entry-name-is-read-in-full
+         (let [allocator (malloc-allocator)
+               dir (scratch-dir allocator "harness-dir-test-long")
+               (mut long) (sb-new allocator)
+               (mut i) 0]
+           (directory-create allocator dir 448)
+           (loop (if (>= (load i) 120)
+                     (break)
+                     (do
+                       (sb-push-byte! (mut long) (cast u8 120))
+                       (store! i (+ (load i) 1)))))
+           (let [name (sb-str (load long))
+                 path (path-join allocator dir name)]
+             (assert (write-empty! allocator path))
+             (let [names (directory-entries allocator dir)]
+               (assert (contains-name? names name)))
+             (path-remove allocator path))))
+
+;; A missing socket directory means nobody is listening, which is a normal
+;; state. It must not be an error, or discovery would fail on a fresh machine.
+(deftest a-missing-directory-lists-as-empty-rather-than-failing
+         (let [allocator (malloc-allocator)
+               names (directory-entries allocator "/tmp/harness-dir-test-does-not-exist")]
+           (assert (= (al-len [(slice u8)] names) 0))))
+
+(deftest an-empty-directory-lists-as-empty
+         (let [allocator (malloc-allocator)
+               dir (scratch-dir allocator "harness-dir-test-empty")]
+           (directory-create allocator dir 448)
+           (assert (= (al-len [(slice u8)] (directory-entries allocator dir)) 0))))
+
+(deftest removing-a-path-makes-it-stop-existing
+         (let [allocator (malloc-allocator)
+               dir (scratch-dir allocator "harness-dir-test-remove")
+               path (path-join allocator dir "x.sock")]
+           (directory-create allocator dir 448)
+           (assert (write-empty! allocator path))
+           (assert (path-exists? allocator path))
+           (assert (= (path-remove allocator path) 0))
+           (assert (not (path-exists? allocator path)))))
+
+(deftest joining-paths-does-not-double-the-separator
+         (let [allocator (malloc-allocator)]
+           (assert (str-eq (path-join allocator "/tmp" "a.sock") "/tmp/a.sock"))
+           (assert (str-eq (path-join allocator "/tmp/" "a.sock") "/tmp/a.sock"))
+           (assert (str-eq (path-join allocator "" "a.sock") "a.sock"))))

@@ -15,7 +15,11 @@
     (RoleMuted [] "muted")
     (RoleSuccess [] "success")
     (RoleWarning [] "warning")
-    (RoleFailure [] "failure")))
+    (RoleFailure [] "failure")
+    (RoleCodeKeyword [] "code-keyword")
+    (RoleCodeString [] "code-string")
+    (RoleCodeComment [] "code-comment")
+    (RoleCodeNumber [] "code-number")))
 
 ;; A symbolic trace makes cursor behavior reviewable without duplicating ANSI bytes
 ;; outside the terminal driver.

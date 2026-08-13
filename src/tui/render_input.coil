@@ -2,6 +2,8 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-tui-diff" :use *)
 (import "harness-tui-frame" :use *)
 (import "harness-tui-render-inline" :use *)
 (import "harness-tui-terminal-operation" :use *)
@@ -9,13 +11,54 @@
 
 (defstruct InputRenderer
   [(previous-height i64)
-   (previous-cursor-row i64)])
+   (previous-cursor-row i64)
+   (previous-menu-rows i64)
+   (owner (ptr Allocator))
+   (retained Frame)
+   (retained-domain (ptr AllocationDomain))
+   (has-retained bool)])
 
 (defn input-renderer-new [] (-> InputRenderer)
   (let [renderer (alloc/stack InputRenderer)]
     (store! (field renderer previous-height) 0)
     (store! (field renderer previous-cursor-row) 0)
+    (store! (field renderer previous-menu-rows) 0)
+    (store! (field renderer owner) (cast (ptr Allocator) 0))
+    (store! (field renderer has-retained) false)
     (load renderer)))
+
+(defn input-renderer-new-retaining [(owner (ptr Allocator))] (-> InputRenderer)
+  (let [(mut renderer) (input-renderer-new)]
+    (store! (field renderer owner) owner)
+    (load renderer)))
+
+(defn input-renderer-release! [(renderer (ptr InputRenderer))] (-> i64)
+  (when (load (field renderer has-retained))
+    (allocation-domain-close! (load (field renderer owner))
+                              (load (field renderer retained-domain)))
+    (store! (field renderer has-retained) false)
+    0)
+  0)
+
+(defn input-renderer-retain! [(renderer (ptr InputRenderer))
+                              (frame (ptr Frame))] (-> i64)
+  (let [owner (load (field renderer owner))]
+    (if (= owner (cast (ptr Allocator) 0))
+        0
+        (let [domain (allocation-domain-open owner)]
+          (if (not (allocation-domain-valid? domain))
+              (do (input-renderer-release! renderer) 0)
+              (let [old-domain (load (field renderer retained-domain))
+                    had-old (load (field renderer has-retained))
+                    clone (alloc/stack Frame)]
+                (frame-clone! (allocation-domain-allocator domain) frame clone)
+                (store! (field renderer retained) (load clone))
+                (store! (field renderer retained-domain) domain)
+                (store! (field renderer has-retained) true)
+                (when had-old
+                  (allocation-domain-close! owner old-domain)
+                  0)
+                0))))))
 
 (defn input-renderer-final-row! [(renderer (ptr InputRenderer))
                                  (operations (ptr (ArrayList TerminalOperation)))] (-> i64)
@@ -29,17 +72,33 @@
       0)
     0))
 
+;; `menu-rows` is supplied by the caller rather than read back off the layout.
+;; The reader builds the menu, so it is the only thing that knows the count for
+;; certain -- deriving it from a struct field meant trusting a value that could
+;; be uninitialised, and an over-count here erases live transcript rows above the
+;; composer.
 (defn input-renderer-plan-with! [(renderer (ptr InputRenderer))
                                  (scratch (ptr Allocator))
-                                 (layout (ptr ViewLayout))] (-> (ArrayList TerminalOperation))
+                                 (layout (ptr ViewLayout))
+                                 (menu-rows i64)] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
         frame (mut (field layout frame))
         height (al-len [FrameLine] (load (field frame lines)))
         cursor-row (load (field layout cursor-row))]
     (input-renderer-final-row! renderer (mut operations))
-    (inline-plan-clear-live! (mut operations)
-                             (load (field renderer previous-height)))
-    (inline-plan-live-frame! (mut operations) frame)
+    ;; The cursor is now on the previous frame's last row, exactly the position
+    ;; expected by the row diff. A normal keystroke therefore rewrites only the
+    ;; row containing the edit instead of clearing and repainting the composer.
+    (if (and (load (field renderer has-retained))
+             (= (load (field renderer previous-height)) height))
+        (plan-live-diff! (mut operations)
+                         (field renderer retained)
+                         (field layout frame))
+        (do
+          (inline-plan-clear-live! (mut operations)
+                                   (load (field renderer previous-height)))
+          (inline-plan-live-frame! (mut operations) frame)
+          0))
     (let [rows (- (- height 1) cursor-row)]
       (when (> rows 0)
         (inline-push! (mut operations) (TerminalCursorUp rows))
@@ -49,23 +108,44 @@
                   (TerminalCursorRight (load (field layout cursor-column))))
     (store! (field renderer previous-height) height)
     (store! (field renderer previous-cursor-row) cursor-row)
+    (store! (field renderer previous-menu-rows) (if (< menu-rows 0) 0 menu-rows))
+    (input-renderer-retain! renderer (field layout frame))
     (load operations)))
 
 (defn input-renderer-plan! [(renderer (ptr InputRenderer))
                             (layout (ptr ViewLayout))] (-> (ArrayList TerminalOperation))
   (input-renderer-plan-with! renderer
                              (load (field (field layout frame) allocator))
-                             layout))
+                             layout
+                             0))
 
+;; Committing turns the composer into transcript. The menu is not transcript, so
+;; its rows are erased from the bottom up first and the line break is emitted
+;; from the composer's last row. Without this the highlighted completion row
+;; stays on screen forever, one copy per submitted command.
 (defn input-renderer-commit-plan! [(renderer (ptr InputRenderer))
                                    (scratch (ptr Allocator))] (-> (ArrayList TerminalOperation))
-  (let [(mut operations) (inline-operations-new scratch)]
+  (let [(mut operations) (inline-operations-new scratch)
+        menu-rows (load (field renderer previous-menu-rows))]
     (input-renderer-final-row! renderer (mut operations))
+    (when (> menu-rows 0)
+      (let [(mut remaining) menu-rows]
+        (loop (if (<= (load remaining) 0)
+                  (break)
+                  (do
+                    (inline-push! (mut operations) (TerminalCarriageReturn))
+                    (inline-push! (mut operations) (TerminalEraseLine))
+                    (inline-push! (mut operations) (TerminalCursorUp 1))
+                    (store! remaining (- (load remaining) 1))))))
+      0)
     (when (> (load (field renderer previous-height)) 0)
+      (inline-push! (mut operations) (TerminalCarriageReturn))
       (inline-push! (mut operations) (TerminalLineBreak))
       0)
     (store! (field renderer previous-height) 0)
     (store! (field renderer previous-cursor-row) 0)
+    (store! (field renderer previous-menu-rows) 0)
+    (input-renderer-release! renderer)
     (load operations)))
 
 (defn input-renderer-clear-plan! [(renderer (ptr InputRenderer))
@@ -76,4 +156,6 @@
                              (load (field renderer previous-height)))
     (store! (field renderer previous-height) 0)
     (store! (field renderer previous-cursor-row) 0)
+    (store! (field renderer previous-menu-rows) 0)
+    (input-renderer-release! renderer)
     (load operations)))

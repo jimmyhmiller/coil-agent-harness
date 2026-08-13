@@ -1,0 +1,244 @@
+;; Claude Code peer addresses.
+;;
+;; The cross-session protocol names peers by address rather than by connection,
+;; which is the one idea it shares with our own bus. `uds:<path>` is a local
+;; socket, `bridge:<id>` a cloud session, `did:...` a remote peer. A bare
+;; absolute path is read as `uds:`, so an address is always resolvable to
+;; something you can open.
+;;
+;; The encoding rules are not decorative. The receiver validates every address
+;; against `^[A-Za-z0-9%:_/.\-]{1,300}$` and re-renders the envelope it parsed to
+;; compare byte-for-byte against what arrived (see envelope.coil), so an address
+;; that is percent-encoded differently than the reference implementation makes
+;; the whole message degrade to opaque text. Encoding here is therefore a wire
+;; contract, not a formatting preference: the safe set below is exactly the
+;; complement of the reference client's `[^A-Za-z0-9:_/.\\-]` escape class, and
+;; hex digits are upper-case because that is what it emits.
+(module harness-bus-cc-address)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+;; The longest address the receiver will accept. Anything longer is refused
+;; there, so refusing it here turns a silent remote drop into a local error.
+(const CC_ADDRESS_MAX_BYTES 300)
+
+;; A unix socket path longer than this does not fit in `sockaddr_un` on the
+;; BSD layout macOS inherits, and the reference client falls back to a shorter
+;; directory rather than truncating.
+(const CC_SOCKET_PATH_MAX_BYTES 103)
+
+(defsum CcScheme
+  (CcUds [])
+  (CcBridge [])
+  (CcDid [])
+  (CcOther []))
+
+(defn cc-scheme-eq [(left CcScheme) (right CcScheme)] (-> bool)
+  (match left
+    (CcUds [] (match right (CcUds [] true) (CcBridge [] false) (CcDid [] false) (CcOther [] false)))
+    (CcBridge [] (match right (CcBridge [] true) (CcUds [] false) (CcDid [] false) (CcOther [] false)))
+    (CcDid [] (match right (CcDid [] true) (CcUds [] false) (CcBridge [] false) (CcOther [] false)))
+    (CcOther [] (match right (CcOther [] true) (CcUds [] false) (CcBridge [] false) (CcDid [] false)))))
+
+;; ---------------------------------------------------------------------------
+;; Percent encoding
+;; ---------------------------------------------------------------------------
+
+;; The complement of the reference client's escape class. Note that backslash is
+;; safe (Windows pipe names ride the same field) and that `%` is NOT: an address
+;; containing a literal percent must escape it, or decoding would not be
+;; injective and the round-trip check would fail.
+(defn cc-address-safe-byte? [(byte i64)] (-> bool)
+  (or (or (and (>= byte 48) (<= byte 57))
+          (and (>= byte 65) (<= byte 90)))
+      (or (and (>= byte 97) (<= byte 122))
+          (or (or (= byte 58) (= byte 95))
+              (or (or (= byte 47) (= byte 46))
+                  (or (= byte 92) (= byte 45)))))))
+
+(defn cc-hex-digit [(value i64)] (-> u8)
+  (cast u8 (if (< value 10) (+ 48 value) (+ 55 value))))
+
+(defn cc-hex-value [(byte i64)] (-> i64)
+  (cond (and (>= byte 48) (<= byte 57)) (- byte 48)
+        (and (>= byte 65) (<= byte 70)) (+ 10 (- byte 65))
+        (and (>= byte 97) (<= byte 102)) (+ 10 (- byte 97))
+        :else -1))
+
+;; Percent-encode every byte outside the safe set. Operates on bytes rather than
+;; code points, which is what the reference client's UTF-8 expansion amounts to.
+(defn cc-encode-address [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)
+        (mut i) 0
+        n (slice-len [u8] text)]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] text (load i)))]
+                (if (cc-address-safe-byte? byte)
+                    (sb-push-byte! (mut buffer) (cast u8 byte))
+                    (do
+                      (sb-push-byte! (mut buffer) (cast u8 37))
+                      (sb-push-byte! (mut buffer) (cc-hex-digit (/ byte 16)))
+                      (sb-push-byte! (mut buffer) (cc-hex-digit (% byte 16)))))
+                (store! i (+ (load i) 1)))))
+    (sb-finish! (mut buffer))))
+
+;; Decode percent escapes. A malformed escape is left verbatim rather than
+;; rejected, matching the reference client's `safeDecode`: an address that fails
+;; to decode is still a usable opaque string, and refusing it here would lose a
+;; message the receiver would have accepted.
+(defn cc-decode-address [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)
+        (mut i) 0
+        n (slice-len [u8] text)]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] text (load i)))]
+                (if (and (= byte 37) (<= (+ (load i) 3) n))
+                    (let [high (cc-hex-value (cast i64 (slice-get [u8] text (+ (load i) 1))))
+                          low (cc-hex-value (cast i64 (slice-get [u8] text (+ (load i) 2))))]
+                      (if (or (< high 0) (< low 0))
+                          (do
+                            (sb-push-byte! (mut buffer) (cast u8 byte))
+                            (store! i (+ (load i) 1)))
+                          (do
+                            (sb-push-byte! (mut buffer) (cast u8 (+ (* high 16) low)))
+                            (store! i (+ (load i) 3)))))
+                    (do
+                      (sb-push-byte! (mut buffer) (cast u8 byte))
+                      (store! i (+ (load i) 1)))))))
+    (sb-finish! (mut buffer))))
+
+;; True when `address` satisfies the receiver's own validation. Checked before
+;; sending so a rejected address surfaces here rather than as silence.
+(defn cc-address-valid? [(address (slice u8))] (-> bool)
+  (let [n (slice-len [u8] address)
+        (mut ok) (and (> n 0) (<= n CC_ADDRESS_MAX_BYTES))
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (not (load ok)))
+              (break)
+              (let [byte (cast i64 (slice-get [u8] address (load i)))]
+                (when (not (or (= byte 37) (cc-address-safe-byte? byte)))
+                  (store! ok false)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load ok)))
+
+;; ---------------------------------------------------------------------------
+;; Building and parsing
+;; ---------------------------------------------------------------------------
+
+(defn cc-uds-address [(allocator (ptr Allocator)) (path (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) "uds:")
+    (sb-push-str! (mut buffer) (cc-encode-address allocator path))
+    (sb-finish! (mut buffer))))
+
+;; Split an address into scheme and decoded target. `did:` keeps its prefix
+;; because the whole string is the identifier, not a locator with a payload.
+(defn cc-parse-address [(allocator (ptr Allocator))
+                        (address (slice u8))
+                        (out-scheme (ptr CcScheme))
+                        (out-target (ptr (slice u8)))] (-> i64)
+  (let [n (slice-len [u8] address)]
+    (cond (starts-with address "uds:")
+            (do
+              (store! out-scheme (CcUds))
+              (store! out-target
+                      (cc-decode-address allocator (substr address 4 n)))
+              0)
+          (starts-with address "bridge:")
+            (do
+              (store! out-scheme (CcBridge))
+              (store! out-target
+                      (cc-decode-address allocator (substr address 7 n)))
+              0)
+          (starts-with address "did:") (do (store! out-scheme (CcDid)) (store! out-target address) 0)
+          ;; A bare absolute path is a socket path. This is how the reference
+          ;; implementation reads a `to` that was typed by a human.
+          (starts-with address "/") (do (store! out-scheme (CcUds)) (store! out-target address) 0)
+          :else (do (store! out-scheme (CcOther)) (store! out-target address) 0))))
+
+;; True when the address names something on this machine that we can open.
+(defn cc-address-local? [(address (slice u8))] (-> bool)
+  (or (starts-with address "uds:") (starts-with address "/")))
+
+;; ---------------------------------------------------------------------------
+;; Where the sockets live
+;; ---------------------------------------------------------------------------
+
+(defn cc-env-or [(allocator (ptr Allocator))
+                 (name (slice u8))
+                 (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get allocator name)
+    (Err [failure] fallback)
+    (Ok [found]
+        (match found
+          (None [] fallback)
+          (Some [value]
+                (let [text (os/owned-string-slice value)]
+                  (if (= (slice-len [u8] text) 0) fallback text)))))))
+
+;; The directory holding one socket per session.
+;;
+;; Deliberately not a generic temp-directory lookup: peers must land in the same
+;; directory as the sessions they talk to, because a `peer_message_status`
+;; receipt whose `from` lives elsewhere is rejected as "outside our socket
+;; namespace". Agreeing on this path is part of the protocol.
+(defn cc-socket-dir [(allocator (ptr Allocator))] (-> (slice u8))
+  (let [base
+          (cc-env-or allocator
+                     "XDG_RUNTIME_DIR"
+                     (cc-env-or allocator "CLAUDE_CODE_TMPDIR" "/tmp"))
+        (mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) base)
+    (when (not (starts-with base "/"))
+      (store! buffer (sb-new allocator))
+      (sb-push-str! (mut buffer) "/tmp")
+      0)
+    (sb-push-str! (mut buffer) "/cc-socks")
+    (sb-finish! (mut buffer))))
+
+(defn cc-push-decimal! [(buffer (mut StrBuf)) (value i64)] (-> i64)
+  (if (<= value 0)
+      (sb-push-byte! (mut buffer) (cast u8 48))
+      (let [(mut divisor) 1]
+        (loop (if (> (* (load divisor) 10) value)
+                  (break)
+                  (store! divisor (* (load divisor) 10))))
+        (loop (do
+                (sb-push-byte! (mut buffer)
+                               (cast u8 (+ 48 (% (/ value (load divisor)) 10))))
+                (if (= (load divisor) 1)
+                    (break)
+                    (store! divisor (/ (load divisor) 10)))))
+        0)))
+
+;; The socket path for a pid, with the reference client's length fallback. The
+;; fallback exists because `sockaddr_un` cannot hold a longer path at all, so a
+;; silent truncation would bind the wrong file.
+(defn cc-socket-path [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) (cc-socket-dir allocator))
+    (sb-push-byte! (mut buffer) (cast u8 47))
+    (cc-push-decimal! (mut buffer) pid)
+    (sb-push-str! (mut buffer) ".sock")
+    (let [path (sb-str (load buffer))]
+      (if (<= (slice-len [u8] path) CC_SOCKET_PATH_MAX_BYTES)
+          (sb-finish! (mut buffer))
+          (let [(mut short) (sb-new allocator)]
+            (sb-push-str! (mut short) "/tmp/cc-socks-0/")
+            (cc-push-decimal! (mut short) pid)
+            (sb-push-str! (mut short) ".sock")
+            (sb-finish! (mut short)))))))
+
+;; Our own address, for the `from` attribute of an outgoing envelope. A peer
+;; that never listens can still send, but supplying a `from` it does not serve
+;; would make replies vanish, so callers pass the path they actually bound.
+(defn cc-self-address [(allocator (ptr Allocator)) (socket-path (slice u8))] (-> (slice u8))
+  (cc-uds-address allocator socket-path))

@@ -41,8 +41,8 @@
               (break)
               (do
                 (match-else (al-get [TerminalOperation] operations (load i))
-                  (TerminalWrite [_] (store! found (+ (load found) 1)))
-                  (_ 0))
+                            (TerminalWrite [_] (store! found (+ (load found) 1)))
+                            (_ 0))
                 (store! i (+ (load i) 1)))))
     (load found)))
 
@@ -54,8 +54,8 @@
               (break)
               (do
                 (match-else (al-get [TerminalOperation] operations (load i))
-                  (TerminalEraseLine [] (store! found (+ (load found) 1)))
-                  (_ 0))
+                            (TerminalEraseLine [] (store! found (+ (load found) 1)))
+                            (_ 0))
                 (store! i (+ (load i) 1)))))
     (load found)))
 

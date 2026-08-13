@@ -23,7 +23,7 @@
 (const MAX_FRAME_BYTES 16777216)
 
 (const FRAME_OK 0)
-(const FRAME_EOF -1)        ;; peer closed cleanly, between frames
+(const FRAME_EOF -1)  ;; peer closed cleanly, between frames
 (const FRAME_TRUNCATED -2)  ;; peer closed mid-frame -- not the same as EOF
 (const FRAME_TOO_LARGE -3)
 (const FRAME_IO -4)
@@ -54,19 +54,21 @@
     (block :done
            (loop (if (>= (load filled) length)
                      (break)
-                     (let [n (transport-read transport
+                     (let [n
+                             (transport-read transport
                                              (primitive/index buffer (load filled))
                                              (- length (load filled)))]
                        (cond (= n 0)
-                               ;; Closing between frames is orderly shutdown;
-                               ;; closing part-way through one is a protocol
-                               ;; violation. The caller needs to tell them apart.
-                               (return-from :done
+                             ;; Closing between frames is orderly shutdown;
+                             ;; closing part-way through one is a protocol
+                             ;; violation. The caller needs to tell them apart.
+                             (return-from :done
                                             (if (= (load filled) 0)
                                                 FRAME_EOF
                                                 FRAME_TRUNCATED))
-                             (< n 0) (return-from :done FRAME_IO)
-                             :else (do (store! filled (+ (load filled) n)) 0)))))
+                               (< n 0)
+                             (return-from :done FRAME_IO) :else
+                             (do (store! filled (+ (load filled) n)) 0)))))
            FRAME_OK)))
 
 (defn write-all [(transport (dyn Transport))
@@ -76,7 +78,8 @@
     (block :done
            (loop (if (>= (load sent) length)
                      (break)
-                     (let [n (transport-write transport
+                     (let [n
+                             (transport-write transport
                                               (primitive/index buffer (load sent))
                                               (- length (load sent)))]
                        (cond (< n 0) (return-from :done FRAME_IO)
@@ -113,9 +116,10 @@
         FRAME_TOO_LARGE
         (do
           (header-encode! header length)
-          (let [head (write-all transport
-                                (primitive/cast (ptr i8) (field header bytes))
-                                FRAME_HEADER_BYTES)]
+          (let [head
+                  (write-all transport
+                             (primitive/cast (ptr i8) (field header bytes))
+                             FRAME_HEADER_BYTES)]
             (if (!= head FRAME_OK)
                 head
                 ;; A zero-length frame is legal and carries no body, so skip the
@@ -132,27 +136,31 @@
                   (allocator (ptr Allocator))
                   (out (ptr (slice u8)))] (-> i64)
   (let [header (alloc/stack FrameHeader)
-        head (read-exactly transport
-                           (primitive/cast (ptr i8) (field header bytes))
-                           FRAME_HEADER_BYTES)]
+        head
+          (read-exactly transport
+                        (primitive/cast (ptr i8) (field header bytes))
+                        FRAME_HEADER_BYTES)]
     (if (!= head FRAME_OK)
         head
         (let [length (header-decode header)]
           (cond (> length MAX_FRAME_BYTES) FRAME_TOO_LARGE
                 (= length 0)
-                  (do (store! out (slice-new [u8] (primitive/cast (ptr u8) 0) 0))
-                      FRAME_OK)
+                  (do
+                    (store! out (slice-new [u8] (primitive/cast (ptr u8) 0) 0))
+                    FRAME_OK)
                 :else
                   (let [buffer (unwrap-ptr [u8] (alloc-slice [u8] allocator length))]
                     (if (= (primitive/cast i64 buffer) 0)
                         FRAME_OOM
-                        (let [body (read-exactly transport
-                                                 (primitive/cast (ptr i8) buffer)
-                                                 length)]
+                        (let [body
+                                (read-exactly transport
+                                              (primitive/cast (ptr i8) buffer)
+                                              length)]
                           (if (!= body FRAME_OK)
                               ;; A peer that closes here has already committed to
                               ;; a length, so this is truncation even though the
                               ;; read itself saw a clean close.
                               (if (= body FRAME_EOF) FRAME_TRUNCATED body)
-                              (do (store! out (slice-new [u8] buffer length))
-                                  FRAME_OK))))))))))
+                              (do
+                                (store! out (slice-new [u8] buffer length))
+                                FRAME_OK))))))))))

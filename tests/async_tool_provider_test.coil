@@ -1,0 +1,104 @@
+(module async-tool-provider-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "async-tool-provider" :use *)
+(import "harness-agent-runner" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-run-service" :use *)
+(import "harness-tool" :use *)
+
+(deftest turns-a-durable-request-into-the-requested-tool-call
+         (let [allocator (malloc-allocator)
+               (mut messages) (al-new [Message] allocator)
+               message (alloc/stack Message)
+               request (alloc/stack ModelRequest)]
+           (store! (field message role) (UserRole))
+           (store! (field message content)
+                   "{\"tool_name\":\"bash\",\"arguments\":{\"command\":\"echo ready\"}}")
+           (al-push! [Message] (mut messages) (load message))
+           (store! (field request run-id) "async-bash-1")
+           (store! (field request messages)
+                   (box allocator (ArrayList Message) (load messages)))
+           (match (async-tool-first-response request allocator)
+             (ModelErr [failure] (assert false))
+             (ModelOk [response]
+                      (let [value response]
+                        (assert-eq (al-len [ToolCall]
+                                           (load (field value tool-calls)))
+                                   1)
+                        (let [call
+                                (al-get [ToolCall]
+                                        (load (field value tool-calls))
+                                        0)]
+                          (assert (str-eq (load (field call name)) "bash"))
+                          (assert (match (json-string-at (load (field call arguments)) "command")
+                                    (Some [command] (str-eq command "echo ready"))
+                                    (None [] false)))))))))
+
+(deftest executes-an-ordinary-tool-through-a-durable-asynchronous-run
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-async-tool-provider.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               provider (box allocator AsyncToolProvider (zeroed AsyncToolProvider))
+               request (alloc/stack ModelRequest)
+               (mut messages) (al-new [Message] allocator)
+               message (alloc/stack Message)
+               policy (alloc/stack AgentRunPolicy)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (register-bash-tool! registry allocator ".")
+           (store! (field message role) (UserRole))
+           (store! (field message content)
+                   "{\"tool_name\":\"bash\",\"arguments\":{\"command\":\"printf async-ready\"}}")
+           (al-push! [Message] (mut messages) (load message))
+           (store! (field request run-id) "async-bash-integration")
+           (store! (field request operation-id) "async")
+           (store! (field request model) "async-tool")
+           (store! (field request messages)
+                   (box allocator (ArrayList Message) (load messages)))
+           (store! (field request tools) registry)
+           (store! (field request tool-choice) (ToolsAuto))
+           (store! (field request parallel-tool-calls) true)
+           (store! (field request reasoning) (ReasoningNone))
+           (store! (field policy max-model-turns) 0)
+           (store! (field policy max-parallel-tools) 4)
+           (match (run-agent allocator provider request emitter (load policy))
+             (ModelErr [failure] (assert false))
+             (ModelOk [response]
+                      (let [value response]
+                        (assert (match (json-string-at (json-get (load (field value raw-output))
+                                                                 "output")
+                                                       "stdout")
+                                  (Some [stdout] (str-eq stdout "async-ready"))
+                                  (None [] false))))))
+           (let [recovery (event-journal-recover allocator path)
+                 (mut saw-tool) false
+                 (mut saw-terminal) false
+                 (mut i) 0]
+             (loop (if (>= (load i) (al-len [Json] (load (field recovery events))))
+                       (break)
+                       (let [event (al-get [Json] (load (field recovery events)) (load i))]
+                         (when (str-eq (command-string event "event") "tool.call.completed")
+                           (store! saw-tool true)
+                           0)
+                         (when (str-eq (command-string event "event") "run.completed")
+                           (store! saw-terminal true)
+                           0)
+                         (store! i (+ (load i) 1)))))
+             (assert (load saw-tool))
+             (assert (load saw-terminal)))
+           (event-journal-close! journal)))

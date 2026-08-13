@@ -122,6 +122,8 @@ def main() -> int:
             prompt_lines = [line for line in oracle.visible_lines() if "❯" in line]
             assert prompt_lines and prompt_lines[-1].find("❯") == 0, \
                 "initial prompt did not begin at the left margin"
+            assert "[tui-fixture/fixture-model]" in "\n".join(oracle.visible_lines()), \
+                "bottom status bar did not show the active model"
             baseline_scrollback = len(oracle.scrollback)
             typed = "x" * 50
             send_text(master, typed)
@@ -140,6 +142,14 @@ def main() -> int:
             joined_transcript = transcript.replace("\n  ", "")
             assert joined_transcript.count(ANSWER) == 1, \
                 "completed answer was not committed exactly once"
+            # Committed rows above the composer are immutable. A renderer that
+            # miscounts the rows it owns erases upward into them, which is
+            # invisible to every other assertion here: the answer still appears
+            # exactly once, it just appears where the banner used to be.
+            assert "Coil " in transcript, \
+                "the startup banner was erased by a later redraw"
+            assert "reproduce codex streaming duplication" in transcript, \
+                "the submitted prompt was erased by a later redraw"
             for prefix in (
                 "It looks like",
                 "It looks like that may have been",
@@ -157,7 +167,23 @@ def main() -> int:
             drain(master, oracle, raw, snapshots, quiet=0.5)
             send_text(master, "cancel this response\r")
             wait_for(master, oracle, raw, "Thinking…", snapshots, timeout=4.0)
+            escape_started = time.monotonic()
             send_text(master, "\x1b", delay=0)
+            wait_for(master, oracle, raw, "cancelling…", snapshots, timeout=0.5)
+            assert time.monotonic() - escape_started < 0.1, \
+                "Escape did not produce immediate cancellation feedback"
+            wait_for(master, oracle, raw, "[tui-fixture/fixture-model]", snapshots, timeout=0.5)
+            assert time.monotonic() - escape_started < 0.1, \
+                "Escape did not return control within 100ms"
+            visible_after_cancel = "\n".join(oracle.visible_lines())
+            assert "Thinking…" not in visible_after_cancel, \
+                "cancelled run left the old thinking state visible"
+            assert "cancelling…" not in visible_after_cancel, \
+                "cancelled run left the transient cancellation state visible"
+            assert "error: run cancelled" not in visible_after_cancel, \
+                "cancellation was rendered as an assistant error"
+            assert not any(line.strip() == "●" for line in oracle.visible_lines()), \
+                "cancellation left an empty assistant bullet"
             wait_for_event_count(master, oracle, raw, journal, "run.cancelled", 1,
                                  snapshots, timeout=6.0)
             wait_for(master, oracle, raw, "❯", snapshots, timeout=4.0)

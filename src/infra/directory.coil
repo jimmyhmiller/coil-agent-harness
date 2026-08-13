@@ -1,0 +1,179 @@
+;; Directory listing and the small filesystem calls a socket registry needs.
+;;
+;; These live in the harness rather than in Coil's stdlib because Coil does not
+;; expose them yet; `coil.fs` reaches files, not directories. The declarations
+;; follow the same shape `coil.socket` uses for `sockaddr_un`: a comptime branch
+;; on the target OS, because `struct dirent` is not one layout.
+;;
+;;   Linux:  ino(8) off(8) reclen(2) type(1) name[256]   -- name at 19
+;;   Darwin: ino(8) seekoff(8) reclen(2) namlen(2) type(1) name[1024] -- name at 21
+;;
+;; The offsets are what matters; the struct is never allocated by us, only read
+;; through a pointer libc returns. Reading `d_name` at the wrong offset would
+;; yield plausible-looking garbage rather than an error, so both layouts carry a
+;; static assertion on the field position below.
+;;
+;; Why a directory listing is a protocol concern at all: for the Claude Code
+;; bus, the socket directory IS the reachability graph. The session registry is
+;; a cache of names over it. A peer that never registered is still reachable and
+;; still discoverable here -- which is exactly what makes `readdir` the
+;; authority and the roster the hint.
+(module harness-directory)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+(extern opendir :cc c [(ptr i8)] (-> (ptr i8)))
+(extern readdir :cc c [(ptr i8)] (-> (ptr i8)))
+(extern closedir :cc c [(ptr i8)] (-> i32))
+(extern mkdir :cc c [(ptr i8) u32] (-> i32))
+(extern unlink :cc c [(ptr i8)] (-> i32))
+(extern chmod :cc c [(ptr i8) u32] (-> i32))
+(extern access :cc c [(ptr i8) i32] (-> i32))
+
+(defn gen-dirent-layout [] (-> Code)
+  (if (primitive/code-eq (primitive/target-os) `linux)
+      `(do
+         (const DIRENT_NAME_OFFSET 19)
+         (const DIRENT_TYPE_OFFSET 18))
+      `(do
+         (const DIRENT_NAME_OFFSET 21)
+         (const DIRENT_TYPE_OFFSET 20))))
+(meta (gen-dirent-layout))
+
+;; DT_SOCK, for callers that want to skip non-sockets without a stat.
+(const DIRENT_TYPE_SOCKET 12)
+(const DIRENT_TYPE_UNKNOWN 0)
+
+;; F_OK: does the path exist at all.
+(const ACCESS_EXISTS 0)
+
+;; A directory entry name is bounded by the struct itself; this is only a guard
+;; against a missing NUL walking off the end of the record.
+(const DIRENT_NAME_MAX 1024)
+
+(defn dirent-name [(allocator (ptr Allocator)) (entry (ptr i8))] (-> (slice u8))
+  (let [bytes (primitive/cast (ptr u8) entry)
+        start (primitive/index bytes DIRENT_NAME_OFFSET)
+        (mut length) 0]
+    (loop (if (or (>= (load length) DIRENT_NAME_MAX)
+                  (= (primitive/cast i64 (load (primitive/index start (load length)))) 0))
+              (break)
+              (store! length (+ (load length) 1))))
+    (let [(mut buffer) (sb-new allocator)
+          (mut i) 0]
+      (loop (if (>= (load i) (load length))
+                (break)
+                (do
+                  (sb-push-byte! (mut buffer) (load (primitive/index start (load i))))
+                  (store! i (+ (load i) 1)))))
+      (sb-finish! (mut buffer)))))
+
+(defn dirent-type [(entry (ptr i8))] (-> i64)
+  (primitive/cast i64
+                  (load (primitive/index (primitive/cast (ptr u8) entry)
+                                         DIRENT_TYPE_OFFSET))))
+
+;; Every name in `path`, excluding `.` and `..`. Returns an empty list when the
+;; directory cannot be opened, which callers treat as "no peers" rather than as
+;; an error: a missing socket directory means nobody is listening, and that is a
+;; normal state, not a failure.
+(defn directory-entries [(allocator (ptr Allocator))
+                         (path (slice u8))] (-> (ArrayList (slice u8)))
+  (let [(mut names) (al-new [(slice u8)] allocator)
+        handle (opendir (str->cstr allocator path))]
+    (when (!= (primitive/cast i64 handle) 0)
+      (loop (let [entry (readdir handle)]
+              (if (= (primitive/cast i64 entry) 0)
+                  (break)
+                  (let [name (dirent-name allocator entry)]
+                    (when (not (or (str-eq name ".") (str-eq name "..")))
+                      (al-push! [(slice u8)] (mut names) name)
+                      0)
+                    0))))
+      (closedir handle)
+      0)
+    (load names)))
+
+;; Entries whose name ends with `suffix`. The socket directory holds one file
+;; per session named `<pid>.sock`, so this is how a caller asks for sockets
+;; without needing the entry type -- which some filesystems report as unknown.
+(defn directory-entries-with-suffix [(allocator (ptr Allocator))
+                                     (path (slice u8))
+                                     (suffix (slice u8))] (-> (ArrayList (slice u8)))
+  (let [all (directory-entries allocator path)
+        (mut matched) (al-new [(slice u8)] allocator)
+        (mut i) 0
+        n (al-len [(slice u8)] all)
+        suffix-length (slice-len [u8] suffix)]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [name (al-get [(slice u8)] all (load i))
+                    length (slice-len [u8] name)]
+                (when (and (>= length suffix-length)
+                           (str-eq (substr name (- length suffix-length) length) suffix))
+                  (al-push! [(slice u8)] (mut matched) name)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load matched)))
+
+(defn directory-create [(allocator (ptr Allocator))
+                        (path (slice u8))
+                        (mode i64)] (-> i64)
+  (primitive/cast i64 (mkdir (str->cstr allocator path) (primitive/cast u32 mode))))
+
+(defn path-remove [(allocator (ptr Allocator)) (path (slice u8))] (-> i64)
+  (primitive/cast i64 (unlink (str->cstr allocator path))))
+
+(defn path-set-mode [(allocator (ptr Allocator))
+                     (path (slice u8))
+                     (mode i64)] (-> i64)
+  (primitive/cast i64 (chmod (str->cstr allocator path) (primitive/cast u32 mode))))
+
+(defn path-exists? [(allocator (ptr Allocator)) (path (slice u8))] (-> bool)
+  (= (primitive/cast i64 (access (str->cstr allocator path) ACCESS_EXISTS)) 0))
+
+;; Create `path` and every missing parent.
+;;
+;; `mkdir` creates one level, which is not enough for any directory nested more
+;; than one deep below something that exists -- and a realm's registry is three
+;; levels down. Without this, the first run of a private realm fails to create
+;; its directories and then reports "no peers", which reads as an empty
+;; namespace rather than as a namespace that was never made.
+;;
+;; An existing directory is success, not an error: EEXIST is the normal outcome
+;; on every run after the first.
+(defn directory-create-all [(allocator (ptr Allocator))
+                            (path (slice u8))
+                            (mode i64)] (-> i64)
+  (let [n (slice-len [u8] path)
+        (mut i) 1]
+    (loop (if (> (load i) n)
+              (break)
+              (do
+                ;; Create each prefix ending at a separator, then the whole
+                ;; path. Index 0 is skipped so a leading "/" is not treated as
+                ;; a component to create.
+                (when (or (= (load i) n)
+                          (= (primitive/cast i64 (slice-get [u8] path (load i))) 47))
+                  (directory-create allocator (substr path 0 (load i)) mode)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (if (path-exists? allocator path) 0 -1)))
+
+;; Join two path components with a single separator.
+(defn path-join [(allocator (ptr Allocator))
+                 (base (slice u8))
+                 (name (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)
+        base-length (slice-len [u8] base)]
+    (sb-push-str! (mut buffer) base)
+    (when (and (> base-length 0)
+               (!= (primitive/cast i64 (slice-get [u8] base (- base-length 1))) 47))
+      (sb-push-byte! (mut buffer) (primitive/cast u8 47))
+      0)
+    (sb-push-str! (mut buffer) name)
+    (sb-finish! (mut buffer))))

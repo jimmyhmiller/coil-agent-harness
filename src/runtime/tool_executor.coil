@@ -18,7 +18,6 @@
    (provider (slice u8))
    (model (slice u8))
    (registry (ptr ToolRegistry))
-   (authorizer (dyn ToolAuthorizer))
    (calls (ptr (ArrayList ToolCall)))
    (emitter (ptr EventEmitter))
    (cancellation (ptr CancellationToken))
@@ -50,6 +49,14 @@
 
 (defstruct ActiveThread [(thread Thread) (spawned bool)])
 
+;; macOS gives pthread workers a 512 KiB default stack. That is not enough for
+;; the subprocess capture path used by the bash tool: execute-bash ->
+;; subprocess/run crossed the guard page in a real TUI run and surfaced as the
+;; misleading shell message `bus error`. Tool implementations are an extension
+;; boundary, so give every tool worker an explicit, portable stack contract.
+(const TOOL_WORKER_STACK_SIZE 8388608)
+(const TOOL_WORKER_GUARD_SIZE 65536)
+
 (defn tool-event [(emitter (ptr EventEmitter))
                   (kind EventKind)
                   (run-id (slice u8))
@@ -69,8 +76,8 @@
               payload))
 
 ;; The proposal is the authoritative immutable description of a tool call. Later
-;; lifecycle and authorization events reference the same operation ID and do not need
-;; to duplicate or reconstruct these facts.
+;; lifecycle events reference the same operation ID and do not need to duplicate or
+;; reconstruct these facts.
 (defn tool-proposal-payload [(allocator (ptr Allocator))
                              (call (ref ToolCall))] (-> Json)
   (let [(mut payload) (json-object allocator)]
@@ -155,7 +162,7 @@
     (store! (field result finished-at-ms) (now-ms))
     (load result)))
 
-;; Execute all authorized calls, using at most `max-parallel` worker threads. Results
+;; Execute all schema-valid calls, using at most `max-parallel` worker threads. Results
 ;; retain input order even though completion events reflect actual completion order.
 ;; Each handler receives a thread-confined child region. Only the deeply promoted
 ;; ToolResult survives in the synchronized run allocator after the worker joins.
@@ -215,68 +222,43 @@
                                             (load (field request model))
                                             call
                                             (JsonString "tool arguments do not satisfy input schema")))
-                              (match (authorize-tool (load (field request authorizer))
-                                                     (box allocator
-                                                          ToolSpec
-                                                          (load (field selected spec)))
-                                                     (box allocator ToolCall call))
-                                (Reject [reason]
-                                        (do
-                                          (al-set! [ToolResult] (mut results) (load i) (denied-result call reason))
-                                          (tool-event (load (field request emitter))
-                                                      (ToolCallRejected)
-                                                      (load (field request run-id))
-                                                      (load (field request parent-operation-id))
-                                                      (load (field request provider))
-                                                      (load (field request model))
-                                                      call
-                                                      (JsonString reason))))
-                                (Authorize []
-                                           (let [job (alloc/stack ToolJob)]
-                                             (store! (field job run-allocator) allocator)
-                                             (store! (field job run-id) (load (field request run-id)))
-                                             (store! (field job parent-operation-id)
-                                                     (load (field request parent-operation-id)))
-                                             (store! (field job provider) (load (field request provider)))
-                                             (store! (field job model) (load (field request model)))
-                                             (store! (field job call) call)
-                                             (store! (field job definition) selected)
-                                             (store! (field (field job context) run-id)
-                                                     (load (field request run-id)))
-                                             (store! (field (field job context) cancellation)
-                                                     (load (field request cancellation)))
-                                             (store! (field (field job context)
-                                                            run-deadline-monotonic-ms)
-                                                     (load (field request
-                                                                  run-deadline-monotonic-ms)))
-                                             (let [tool-timeout
-                                                     (load (field (field selected spec)
-                                                                  timeout-ms))
-                                                   tool-deadline (deadline-from-timeout tool-timeout)
-                                                   run-deadline
-                                                     (load (field request
-                                                                  run-deadline-monotonic-ms))]
-                                               (store! (field (field job context)
-                                                              tool-deadline-monotonic-ms)
-                                                       (if (and (> run-deadline 0)
-                                                                (or (= tool-deadline 0)
-                                                                    (< run-deadline tool-deadline)))
-                                                           run-deadline
-                                                           tool-deadline)))
-                                             (store! (field job results-data) (load (field results data)))
-                                             (store! (field job result-index) (load i))
-                                             (store! (field job emitter) (load (field request emitter)))
-                                             (al-push! [ToolJob] (mut jobs) (load job))
-                                             (tool-event (load (field request emitter))
-                                                         (ToolCallAuthorized)
-                                                         (load (field request run-id))
-                                                         (load (field request parent-operation-id))
-                                                         (load (field request provider))
-                                                         (load (field request model))
-                                                         call
-                                                         (JsonString (load (field call name)))))))))))
+                              (let [job (alloc/stack ToolJob)]
+                                (store! (field job run-allocator) allocator)
+                                (store! (field job run-id) (load (field request run-id)))
+                                (store! (field job parent-operation-id)
+                                        (load (field request parent-operation-id)))
+                                (store! (field job provider) (load (field request provider)))
+                                (store! (field job model) (load (field request model)))
+                                (store! (field job call) call)
+                                (store! (field job definition) selected)
+                                (store! (field (field job context) run-id)
+                                        (load (field request run-id)))
+                                (store! (field (field job context) cancellation)
+                                        (load (field request cancellation)))
+                                (store! (field (field job context)
+                                               run-deadline-monotonic-ms)
+                                        (load (field request
+                                                     run-deadline-monotonic-ms)))
+                                (let [tool-timeout
+                                        (load (field (field selected spec)
+                                                     timeout-ms))
+                                      tool-deadline (deadline-from-timeout tool-timeout)
+                                      run-deadline
+                                        (load (field request
+                                                     run-deadline-monotonic-ms))]
+                                  (store! (field (field job context)
+                                                 tool-deadline-monotonic-ms)
+                                          (if (and (> run-deadline 0)
+                                                   (or (= tool-deadline 0)
+                                                       (< run-deadline tool-deadline)))
+                                              run-deadline
+                                              tool-deadline)))
+                                (store! (field job results-data) (load (field results data)))
+                                (store! (field job result-index) (load i))
+                                (store! (field job emitter) (load (field request emitter)))
+                                (al-push! [ToolJob] (mut jobs) (load job)))))))
                 (store! i (+ (load i) 1)))))
-    
+
     (let [job-count (al-len [ToolJob] (load jobs))
           limit
             (if (> (load (field request max-parallel)) 0)
@@ -301,9 +283,11 @@
                             (let [active-slot (index (load (field active data)) (load j))
                                   job-slot (index (load (field jobs data)) (+ (load start) (load j)))
                                   spawn-code
-                                    (thread-spawn (field active-slot thread)
-                                                  (fnptr-of tool-job-run)
-                                                  (cast (ptr i8) job-slot))]
+                                    (thread-spawn-configured (field active-slot thread)
+                                                             (fnptr-of tool-job-run)
+                                                             (cast (ptr i8) job-slot)
+                                                             (thread-config TOOL_WORKER_STACK_SIZE
+                                                                            TOOL_WORKER_GUARD_SIZE))]
                               (if (= spawn-code 0)
                                   (store! (field active-slot spawned) true)
                                   (let [call (field job-slot call)

@@ -3,6 +3,7 @@
 (import "coil.alloc" :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-tui-input-editor" :use *)
 (import "harness-tui-frame" :use *)
@@ -12,6 +13,43 @@
 (import "harness-tui-terminal" :use *)
 (import "harness-tui-view" :use *)
 (import "harness-tui-view-layout" :use *)
+
+(defn input-count-writes [(operations (ArrayList TerminalOperation))] (-> i64)
+  (let [(mut at) 0
+        (mut writes) 0
+        count (al-len [TerminalOperation] operations)]
+    (loop (if (>= (load at) count)
+              (break)
+              (do
+                (match-else (al-get [TerminalOperation] operations (load at))
+                            (TerminalWrite [_] (store! writes (+ (load writes) 1)))
+                            (_ 0))
+                (store! at (+ (load at) 1)))))
+    (load writes)))
+
+(defn input-repeated [(allocator (ptr Allocator))
+                      (byte u8)
+                      (count i64)] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)
+        (mut at) 0]
+    (loop (if (>= (load at) count)
+              (break)
+              (do
+                (sb-push-byte! (mut text) byte)
+                (store! at (+ (load at) 1)))))
+    (sb-finish! (mut text))))
+
+(deftest append-layout-selects-a-screen-bounded-suffix
+         (let [allocator (malloc-allocator)
+               short (input-repeated allocator (cast u8 97) 100000)
+               huge (input-repeated allocator (cast u8 97) 1000000)
+               short-start (view-layout-tail-start short 80 24)
+               huge-start (view-layout-tail-start huge 80 24)]
+           ;; Total buffer length changes by 10x; selected work does not.
+           (assert (= (- (slice-len [u8] short) short-start)
+                      (- (slice-len [u8] huge) huge-start)))
+           (assert (<= (- (slice-len [u8] huge) huge-start)
+                       (* (* 26 80) 4)))))
 
 (defn test-input-layout [(allocator (ptr Allocator))
                          (editor (ptr InputEditor))
@@ -103,6 +141,22 @@
                                      (_ 0))
                          (store! at (+ (load at) 1)))))
              (assert (= (load breaks) 1)))))
+
+(deftest a-keystroke-rewrites-only-its-changed-input-row
+         (let [allocator (malloc-allocator)
+               (mut editor) (input-editor-new allocator)
+               (mut renderer) (input-renderer-new-retaining allocator)]
+           (input-editor-apply! (mut editor)
+                                (InputInsert "first row wraps here and keeps going"))
+           (let [(mut before) (test-input-layout allocator (mut editor) 12 24 "❯ ")]
+             (input-renderer-plan! (mut renderer) (mut before)))
+           (input-editor-apply! (mut editor) (InputInsert "x"))
+           (let [(mut after) (test-input-layout allocator (mut editor) 12 24 "❯ ")
+                 plan (input-renderer-plan! (mut renderer) (mut after))]
+             ;; Previously this was one write per visible row. The edit is on
+             ;; the final row, so all earlier wrapped rows stay untouched.
+             (assert (= (input-count-writes plan) 1)))
+           (input-renderer-clear-plan! (mut renderer) allocator)))
 
 (deftest bounds-multiline-input-around-the-cursor
          (let [allocator (malloc-allocator)

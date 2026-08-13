@@ -1,0 +1,319 @@
+;; Finding Claude Code peers.
+;;
+;; The design decision worth copying, and the one easiest to get wrong: the
+;; socket directory is the reachability graph, and the session registry is a
+;; cache of names over it. Neither is required in either direction -- an
+;; unregistered process can hold a full two-way conversation, and any process
+;; can enumerate every reachable session with `readdir` alone.
+;;
+;; So discovery here is layered rather than registry-first:
+;;
+;;   1. list `<socket-dir>/*.sock`   -- who is reachable
+;;   2. probe each by connecting     -- who is actually alive
+;;   3. read `<sessions>/<pid>.json` -- what they are called, if they said
+;;
+;; Step 3 can fail for a peer and the peer is still perfectly addressable; that
+;; is the point. Treating the registry as the source of truth would make
+;; unregistered peers invisible and stale entries authoritative, which is the
+;; exact failure the probe exists to prevent.
+;;
+;; Liveness is probed rather than declared. A registry entry is a hint; the
+;; socket connect is the truth. This needs no heartbeat and no lease, and it
+;; self-heals: a stale entry is discovered by whoever next tries to use it.
+(module harness-bus-cc-discovery)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.fs" :as fs)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+(import "harness-bus-cc-address" :use *)
+(import "harness-bus-cc-realm" :use *)
+
+;; A peer as we found it. Everything below `alive` comes from the session file
+;; and is absent for an unregistered peer, which is a normal and supported
+;; state rather than a degraded one.
+(defstruct CcPeer
+  [(socket-path (slice u8))
+   (address (slice u8))
+   (pid i64)
+   (alive bool)
+   (registered bool)
+   ;; True when this entry is the session we are running inside. Worth knowing
+   ;; rather than silently dropping: a harness launched from a Claude Code
+   ;; session can see its own parent, and messaging it would be a loop.
+   (self bool)
+   (name (slice u8))
+   (session-id (slice u8))
+   (cwd (slice u8))
+   (status (slice u8))
+   (kind (slice u8))
+   (version (slice u8))])
+
+(defn cc-peer-init! [(peer (ptr CcPeer))] (-> i64)
+  (store! (field peer socket-path) "")
+  (store! (field peer address) "")
+  (store! (field peer pid) 0)
+  (store! (field peer alive) false)
+  (store! (field peer registered) false)
+  (store! (field peer self) false)
+  (store! (field peer name) "")
+  (store! (field peer session-id) "")
+  (store! (field peer cwd) "")
+  (store! (field peer status) "")
+  (store! (field peer kind) "")
+  (store! (field peer version) "")
+  0)
+
+;; ---------------------------------------------------------------------------
+;; Liveness
+;; ---------------------------------------------------------------------------
+
+;; `socket-error-code` encodes a connect failure as 600 + errno. Going through
+;; that stable numbering rather than matching the sum is the same choice
+;; unix_transport.coil makes, and for the same reason: it keeps working as
+;; variants are added.
+(const SOCKET_CONNECT_FAILED_BASE 600)
+(const ERRNO_EBUSY 16)
+
+;; True when something is listening on `socket-path`.
+;;
+;; A busy listener counts as alive. That distinction is not pedantic: a session
+;; under load is exactly the one you most want to find, and reporting it dead
+;; would make peers flicker out of the roster precisely when they are working.
+;;
+;; Known limitation: `unix-connect` blocks, so this cannot impose the reference
+;; client's 250 ms probe timeout. For a local unix socket connect resolves in
+;; the kernel without a round trip -- it either finds a listener or does not --
+;; so there is no network delay to bound. The case that could still stall is a
+;; listener whose backlog is full on a platform that blocks rather than
+;; returning EBUSY. That needs a non-blocking connect to fix properly, and it is
+;; not worth a partial fix that only looks like one.
+(defn cc-probe-alive? [(allocator (ptr Allocator)) (socket-path (slice u8))] (-> bool)
+  (let [connection (alloc/stack socket/UnixConnection)]
+    (match (socket/unix-connect connection socket-path)
+      (Ok [_]
+          (do (socket/unix-connection-close! connection) true))
+      (Err [failure]
+           (= (socket/socket-error-code failure)
+              (+ SOCKET_CONNECT_FAILED_BASE ERRNO_EBUSY))))))
+
+;; ---------------------------------------------------------------------------
+;; The session registry
+;; ---------------------------------------------------------------------------
+
+;; Directory lookup and self-identification belong to the realm -- see
+;; realm.coil. Everything below works the same in a private namespace as in the
+;; shared one, which is the point: isolation is a pair of directories, not a
+;; second implementation.
+
+(defn cc-json-string-or [(value Json) (key (slice u8)) (fallback (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (None [] fallback)
+    (Some [text] text)))
+
+;; Overlay a session file's metadata onto a peer we already found by socket.
+;; Returns false when the file is missing or unreadable, which leaves the peer
+;; usable -- it just stays anonymous.
+(defn cc-apply-session-file! [(allocator (ptr Allocator))
+                              (path (slice u8))
+                              (peer (ptr CcPeer))] (-> bool)
+  (match (fs-read allocator path)
+    (None [] false)
+    (Some [source]
+          (let [result (json-parse allocator source)]
+            (if (not (load (field result ok)))
+                false
+                (let [value (load (field result value))]
+                  (store! (field peer registered) true)
+                  (store! (field peer name) (cc-json-string-or value "name" ""))
+                  (store! (field peer session-id) (cc-json-string-or value "sessionId" ""))
+                  (store! (field peer cwd) (cc-json-string-or value "cwd" ""))
+                  (store! (field peer status) (cc-json-string-or value "status" ""))
+                  (store! (field peer kind) (cc-json-string-or value "kind" ""))
+                  (store! (field peer version) (cc-json-string-or value "version" ""))
+                  true))))))
+
+;; ---------------------------------------------------------------------------
+;; Enumeration
+;; ---------------------------------------------------------------------------
+
+;; `<pid>.sock` -> pid, or -1 when the name is not one of ours to interpret.
+;; A foreign file in the socket directory is skipped rather than guessed at.
+(defn cc-pid-from-socket-name [(name (slice u8))] (-> i64)
+  (let [n (slice-len [u8] name)
+        suffix-length 5]
+    (if (or (<= n suffix-length)
+            (not (str-eq (substr name (- n suffix-length) n) ".sock")))
+        -1
+        (let [digits (substr name 0 (- n suffix-length))
+              length (slice-len [u8] digits)
+              (mut value) 0
+              (mut ok) (> length 0)
+              (mut i) 0]
+          (loop (if (or (>= (load i) length) (not (load ok)))
+                    (break)
+                    (let [byte (cast i64 (slice-get [u8] digits (load i)))]
+                      (if (and (>= byte 48) (<= byte 57))
+                          (store! value (+ (* (load value) 10) (- byte 48)))
+                          (store! ok false))
+                      (store! i (+ (load i) 1)))))
+          (if (load ok) (load value) -1)))))
+
+;; Every peer with a socket in the socket directory.
+;;
+;; `include-dead` keeps entries that failed the probe, which is what a reaper
+;; or a diagnostic listing wants; ordinary callers pass false and get only peers
+;; they can actually reach.
+(defn cc-discover [(realm (ptr CcRealm))
+                   (allocator (ptr Allocator))
+                   (include-dead bool)] (-> (ArrayList CcPeer))
+  (let [socket-dir (load (field realm socket-dir))
+        sessions-dir (load (field realm sessions-dir))
+        self-socket (load (field realm self-socket))
+        names (directory-entries-with-suffix allocator socket-dir ".sock")
+        (mut peers) (al-new [CcPeer] allocator)
+        (mut i) 0
+        n (al-len [(slice u8)] names)]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [name (al-get [(slice u8)] names (load i))
+                    pid (cc-pid-from-socket-name name)]
+                (when (> pid 0)
+                  (let [peer (alloc/stack CcPeer)
+                        socket-path (path-join allocator socket-dir name)]
+                    (cc-peer-init! peer)
+                    (store! (field peer socket-path) socket-path)
+                    (store! (field peer address) (cc-uds-address allocator socket-path))
+                    (store! (field peer pid) pid)
+                    (store! (field peer alive) (cc-probe-alive? allocator socket-path))
+                    (store! (field peer self)
+                            (and (> (slice-len [u8] self-socket) 0)
+                                 (str-eq socket-path self-socket)))
+                    ;; Names are an overlay, not a filter: a peer with no
+                    ;; session file is still returned and still addressable.
+                    (cc-apply-session-file! allocator
+                                            (path-join allocator sessions-dir (session-file-name allocator pid))
+                                            peer)
+                    (when (or include-dead (load (field peer alive)))
+                      (al-push! [CcPeer] (mut peers) (load peer))
+                      0)
+                    0)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load peers)))
+
+(defn session-file-name [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (cc-push-decimal! (mut buffer) pid)
+    (sb-push-str! (mut buffer) ".json")
+    (sb-finish! (mut buffer))))
+
+;; Read a whole file, or None. Wrapped because a missing session file is the
+;; common case, not an exception.
+(defn fs-read [(allocator (ptr Allocator)) (path (slice u8))] (-> (Option (slice u8)))
+  (match (fs/read-file allocator path)
+    (Err [failure] (None [(slice u8)]))
+    (Ok [contents] (Some contents))))
+
+;; ---------------------------------------------------------------------------
+;; Resolving a peer the user named
+;; ---------------------------------------------------------------------------
+
+(defn cc-decimal-eq? [(text (slice u8)) (value i64)] (-> bool)
+  (let [allocator (malloc-allocator)
+        (mut buffer) (sb-new allocator)]
+    (cc-push-decimal! (mut buffer) value)
+    (str-eq text (sb-str (load buffer)))))
+
+;; Does `query` name this peer? Matches the reference client's resolution
+;; order: exact name, pid, session id, then name prefix.
+(defn cc-peer-matches? [(peer (ptr CcPeer)) (query (slice u8))] (-> bool)
+  (or (or (str-eq (load (field peer name)) query)
+          (cc-decimal-eq? query (load (field peer pid))))
+      (or (str-eq (load (field peer session-id)) query)
+          (and (> (slice-len [u8] (load (field peer name))) 0)
+               (starts-with (load (field peer name)) query)))))
+
+;; Resolve `query` to a socket path.
+;;
+;; A raw `uds:` address or absolute path skips the roster entirely, which is
+;; deliberate: reachability never depended on registration, so neither should
+;; addressing. Returns an empty slice when nothing matches.
+(defn cc-resolve [(realm (ptr CcRealm))
+                  (allocator (ptr Allocator))
+                  (query (slice u8))] (-> (slice u8))
+  (if (cc-address-local? query)
+      (let [scheme (alloc/stack CcScheme)
+            target (alloc/stack (slice u8))]
+        (cc-parse-address allocator query scheme target)
+        (load target))
+      (let [(mut peers) (cc-discover realm allocator false)
+            n (al-len [CcPeer] peers)
+            (mut found) ""
+            (mut i) 0]
+        (loop (if (or (>= (load i) n) (> (slice-len [u8] (load found)) 0))
+                  (break)
+                  (let [peer (al-elem [CcPeer] (mut peers) (load i))]
+                    (when (cc-peer-matches? peer query)
+                      (store! found (load (field peer socket-path)))
+                      0)
+                    (store! i (+ (load i) 1)))))
+        (load found))))
+
+;; Remove session files whose socket is gone and whose process is gone.
+;;
+;; Both conditions, not either: a live process that has not yet bound its socket
+;; is starting up, and unlinking its entry would make a session that is about to
+;; be reachable disappear from every roster. Returns the number reaped.
+(defn cc-reap-stale! [(realm (ptr CcRealm)) (allocator (ptr Allocator))] (-> i64)
+  (let [sessions-dir (load (field realm sessions-dir))
+        socket-dir (load (field realm socket-dir))
+        names (directory-entries-with-suffix allocator sessions-dir ".json")
+        (mut reaped) 0
+        (mut i) 0
+        n (al-len [(slice u8)] names)]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [name (al-get [(slice u8)] names (load i))
+                    length (slice-len [u8] name)
+                    pid (cc-pid-from-json-name name)]
+                (when (> pid 0)
+                  (let [socket-path
+                          (path-join allocator
+                                     socket-dir
+                                     (socket-file-name allocator pid))]
+                    (when (and (not (cc-probe-alive? allocator socket-path))
+                               (not (process-alive? pid)))
+                      (path-remove allocator (path-join allocator sessions-dir name))
+                      (store! reaped (+ (load reaped) 1))
+                      0)
+                    0)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load reaped)))
+
+(defn cc-pid-from-json-name [(name (slice u8))] (-> i64)
+  (let [n (slice-len [u8] name)]
+    (if (or (<= n 5) (not (str-eq (substr name (- n 5) n) ".json")))
+        -1
+        (let [(mut renamed) (sb-new (malloc-allocator))]
+          (sb-push-str! (mut renamed) (substr name 0 (- n 5)))
+          (sb-push-str! (mut renamed) ".sock")
+          (cc-pid-from-socket-name (sb-str (load renamed)))))))
+
+(defn socket-file-name [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (cc-push-decimal! (mut buffer) pid)
+    (sb-push-str! (mut buffer) ".sock")
+    (sb-finish! (mut buffer))))
+
+;; Signal 0: ask whether the pid exists without disturbing it.
+(defn process-alive? [(pid i64)] (-> bool)
+  (= (cast i64 (os/kill (cast i32 pid) 0)) 0))

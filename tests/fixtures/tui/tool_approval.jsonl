@@ -1,5 +1,0 @@
-{"version":1,"sequence":1,"event":"tool.call.proposed","run_id":"run-1","operation_id":"tool-1","payload":{"name":"bash","arguments":{"command":"ls"}}}
-{"version":1,"sequence":2,"event":"authorization.requested","run_id":"run-1","operation_id":"tool-1","payload":{"authorization_id":"auth-1","tool":"bash","effect":"read-only","arguments":{"command":"ls"}}}
-{"version":1,"sequence":3,"event":"authorization.decided","run_id":"run-1","operation_id":"tool-1","payload":{"authorization_id":"auth-1","decision":"allow"}}
-{"version":1,"sequence":4,"event":"tool.call.started","run_id":"run-1","operation_id":"tool-1","payload":"bash"}
-{"version":1,"sequence":5,"event":"tool.call.completed","run_id":"run-1","operation_id":"tool-1","payload":{"exit_code":0}}

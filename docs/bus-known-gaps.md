@@ -52,3 +52,27 @@ This was previously blocked on the SIGPIPE crash above, on the grounds that
 wiring a subsystem into the main server while one disconnecting client could
 kill the process would turn a test-only crash into a production one. That
 objection is now resolved.
+
+Still open. The Claude Code dialect (`src/bus/cc/`, see
+[bus dialects](agent-bus-dialects.md)) landed first because it needs no shared
+poll — sending is one connection per message and discovery is a directory scan,
+so it delivers value without touching the serve loop. That does not make this
+gap smaller; it means the native bus is now the only one of the two that cannot
+be reached from a running harness.
+
+## 2. The Claude Code dialect can send but not receive
+
+`harness peers` and `harness send` work against live sessions. There is no
+listener, so the harness cannot be addressed, cannot reply, and does not appear
+in another session's `ListAgents`.
+
+Receiving needs three things, and only the third is interesting: bind a socket
+in the agreed directory, read newline-delimited JSON off it, and write a session
+file whose `procStart` matches `LC_ALL=C TZ=UTC ps -o lstart= -p <pid>` — which
+the peer lister re-runs and compares, so a recycled pid cannot inherit a dead
+session's identity. Skipping it does not fail loudly; it makes the entry
+quietly untrusted.
+
+Note that sending never required registration and receiving does not either: a
+peer that binds a socket can be messaged by anything that knows the path.
+Registration buys names and visibility, nothing more.

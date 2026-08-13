@@ -67,7 +67,7 @@
                                                  (_ (assert false))))
                        (_ (assert false)))))
 
-(deftest escape-becomes-interrupt-only-after-sequence-timeout
+(deftest escape-becomes-dismiss-only-after-sequence-timeout
          (let [allocator (malloc-allocator)
                (mut decoder) (input-decoder-new allocator)]
            (assert (match-else (input-decoder-feed! (mut decoder) (cast u8 27))
@@ -76,6 +76,6 @@
            (assert (match-else (input-decoder-timeout! (mut decoder))
                                (InputDecoded [key]
                                              (match-else key
-                                                         (InputInterrupt [] true)
+                                                         (InputDismiss [] true)
                                                          (_ false)))
                                (_ false)))))

@@ -1,0 +1,91 @@
+;; Subsequence matching for type-to-filter menus.
+;;
+;; A menu you have to arrow through is a menu you have to read. Typing narrows
+;; it, but only if the match is forgiving: `op5` should find "Claude Opus 5" and
+;; `terra` should find "Codex · GPT-5.6 terra" without either being a prefix.
+;;
+;; The rule is subsequence, not substring: every character of the query must
+;; appear in the candidate, in order, but not necessarily adjacently. That is
+;; what makes initials work. Scoring then decides which of the (usually many)
+;; subsequence matches a person actually meant.
+(module harness-tui-fuzzy)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+(const FUZZY_NO_MATCH -1)
+
+;; Matching is ASCII-case-insensitive and byte-wise. Menu labels here are model
+;; names, so that is sufficient; a label with non-ASCII letters still matches on
+;; its ASCII parts rather than failing outright, because a byte that is not an
+;; ASCII letter is simply compared as-is.
+(defn fuzzy-lower [(byte u8)] (-> u8)
+  (if (and (>= byte (cast u8 65)) (<= byte (cast u8 90)))
+      (cast u8 (+ (cast i64 byte) 32))
+      byte))
+
+;; A boundary is where a word starts: the first byte, or anything following a
+;; separator. Matching on a boundary is the strongest signal that the query is
+;; initials rather than a coincidental run of letters.
+(defn fuzzy-separator? [(byte u8)] (-> bool)
+  (or (= byte (cast u8 32))
+      (or (= byte (cast u8 45))
+          (or (= byte (cast u8 46))
+              (or (= byte (cast u8 47))
+                  (or (= byte (cast u8 95)) (= byte (cast u8 183))))))))
+
+;; Score a candidate against a query. FUZZY_NO_MATCH when the query is not a
+;; subsequence at all; otherwise higher is better.
+;;
+;; The weights encode three preferences, in decreasing strength: matched runs
+;; should be contiguous, matches should land on word boundaries, and matches
+;; should start early. An empty query matches everything with score 0, which is
+;; what keeps the unfiltered menu in registration order.
+(defn fuzzy-score [(query (slice u8)) (candidate (slice u8))] (-> i64)
+  (let [q (slice-len [u8] query)
+        n (slice-len [u8] candidate)]
+    (if (= q 0)
+        0
+        (if (> q n)
+            FUZZY_NO_MATCH
+            (let [(mut qi) 0
+                  (mut ci) 0
+                  (mut score) 0
+                  (mut previous-match) -2
+                  (mut first-match) -1]
+              (loop (if (or (>= (load qi) q) (>= (load ci) n))
+                        (break)
+                        (let [want (fuzzy-lower (slice-get [u8] query (load qi)))
+                              have (fuzzy-lower (slice-get [u8] candidate (load ci)))]
+                          (if (!= want have)
+                              (store! ci (+ (load ci) 1))
+                              (do
+                                (when (< (load first-match) 0)
+                                  (store! first-match (load ci))
+                                  0)
+                                (store! score (+ (load score) 1))
+                                ;; Contiguity dominates: "terra" beating a
+                                ;; scattered t-e-r-r-a is the whole point.
+                                (when (= (load ci) (+ (load previous-match) 1))
+                                  (store! score (+ (load score) 8))
+                                  0)
+                                (when (or (= (load ci) 0)
+                                          (fuzzy-separator? (slice-get [u8]
+                                                                       candidate
+                                                                       (- (load ci) 1))))
+                                  (store! score (+ (load score) 6))
+                                  0)
+                                (store! previous-match (load ci))
+                                (store! qi (+ (load qi) 1))
+                                (store! ci (+ (load ci) 1)))))))
+              (if (< (load qi) q)
+                  FUZZY_NO_MATCH
+                  ;; A late first match is weak evidence; cap the penalty so a
+                  ;; long label cannot be scored below a short accidental one.
+                  (let [lateness (if (> (load first-match) 12) 12 (load first-match))]
+                    (- (load score) lateness))))))))
+
+;; True when the query matches at all, ignoring rank.
+(defn fuzzy-matches? [(query (slice u8)) (candidate (slice u8))] (-> bool)
+  (!= (fuzzy-score query candidate) FUZZY_NO_MATCH))

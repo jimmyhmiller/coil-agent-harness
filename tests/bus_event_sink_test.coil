@@ -24,7 +24,8 @@
   0)
 
 (impl EventSink RecordingSink
-  (publish-event [(self (ptr RecordingSink)) (event (ptr Event))] (-> i64)
+  (publish-event [(self (ptr RecordingSink)) (event (ptr Event))]
+                 (-> i64)
                  (store! (field self calls) (+ (load (field self calls)) 1))
                  (store! (field self last-sequence) (load (field event sequence)))
                  ;; Recording the peer's call count at the moment we run is what

@@ -99,8 +99,11 @@
                       (break)
                       (do
                         (sb-push-byte! (mut buffer)
-                                       (cast u8 (+ 48 (al-get [i64] (load digits)
-                                                              (- (- count 1) (load i))))))
+                                       (cast u8
+                                             (+ 48
+                                                (al-get [i64]
+                                                        (load digits)
+                                                        (- (- count 1) (load i))))))
                         (store! i (+ (load i) 1))))))))
     (sb-str (load buffer))))
 
@@ -152,39 +155,41 @@
                       ;; Connected and went quiet. Refusing is the only safe
                       ;; option: waiting on it would stall every other client.
                       (do (transport-close! transport) -1)
-                  (if (!= (frame-read transport allocator out) FRAME_OK)
-                      ;; Connected and said nothing, or died mid-handshake.
-                      (do (transport-close! transport) -1)
-                      (match (codec-decode (load (load (field server codec)))
-                                           allocator
-                                           (load out)
-                                           envelope)
-                        (Err [_] (do (transport-close! transport) -1))
-                        (Ok [_]
-                            (match-else (load (field envelope kind))
-                              (Subscribe []
-                                         (let [topic (load (field envelope body))
-                                               name (subscriber-name allocator
-                                                                     (load (field server next-id)))
-                                               handle (router-attach! (load (field server router))
-                                                                      (Agent name))
-                                               subscriber (alloc/stack Subscriber)]
-                                           (store! (field server next-id)
-                                                   (+ (load (field server next-id)) 1))
-                                           (router-subscribe! (load (field server router))
-                                                              handle
-                                                              topic)
-                                           (store! (field subscriber transport) transport)
-                                           (store! (field subscriber handle) handle)
-                                           (store! (field subscriber alive) true)
-                                           (al-push! [Subscriber]
-                                                     (mut (field server subscribers))
-                                                     (load subscriber))
-                                           1))
-                              ;; Anything else is a client that does not speak
-                              ;; the handshake. Refuse it rather than guessing
-                              ;; what it wanted.
-                              (_ (do (transport-close! transport) -1))))))))))))))
+                      (if (!= (frame-read transport allocator out) FRAME_OK)
+                          ;; Connected and said nothing, or died mid-handshake.
+                          (do (transport-close! transport) -1)
+                          (match (codec-decode (load (load (field server codec)))
+                                               allocator
+                                               (load out)
+                                               envelope)
+                            (Err [_] (do (transport-close! transport) -1))
+                            (Ok [_]
+                                (match-else (load (field envelope kind))
+                                            (Subscribe []
+                                                       (let [topic (load (field envelope body))
+                                                             name
+                                                               (subscriber-name allocator
+                                                                                (load (field server next-id)))
+                                                             handle
+                                                               (router-attach! (load (field server router))
+                                                                               (Agent name))
+                                                             subscriber (alloc/stack Subscriber)]
+                                                         (store! (field server next-id)
+                                                                 (+ (load (field server next-id)) 1))
+                                                         (router-subscribe! (load (field server router))
+                                                                            handle
+                                                                            topic)
+                                                         (store! (field subscriber transport) transport)
+                                                         (store! (field subscriber handle) handle)
+                                                         (store! (field subscriber alive) true)
+                                                         (al-push! [Subscriber]
+                                                                   (mut (field server subscribers))
+                                                                   (load subscriber))
+                                                         1))
+                                            ;; Anything else is a client that does not speak
+                                            ;; the handshake. Refuse it rather than guessing
+                                            ;; what it wanted.
+                                            (_ (do (transport-close! transport) -1))))))))))))))
 
 ;; Accept with the default handshake timeout, for callers that own the thread.
 (defn bus-server-accept! [(server (ptr BusServer))
@@ -242,6 +247,7 @@
         (mut i) 0]
     (loop (if (>= (load i) n)
               (break)
-              (do (retire-subscriber! server (bus-server-subscriber server (load i)))
-                  (store! i (+ (load i) 1)))))
+              (do
+                (retire-subscriber! server (bus-server-subscriber server (load i)))
+                (store! i (+ (load i) 1)))))
     0))

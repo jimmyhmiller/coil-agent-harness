@@ -52,7 +52,6 @@
    (prompt-cache-key (slice u8))
    (messages (ptr (ArrayList Message)))
    (tools (ptr ToolRegistry))
-   (tool-authorizer (dyn ToolAuthorizer))
    (tool-choice ModelToolChoice)
    (parallel-tool-calls bool)
    (reasoning ReasoningEffort)

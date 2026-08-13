@@ -46,15 +46,18 @@
       TRANSPORT_FAILED))
 
 (impl Transport TcpTransport
-  (transport-read [(self (ptr TcpTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+  (transport-read [(self (ptr TcpTransport)) (buffer (ptr i8)) (length i64)]
+                  (-> i64)
                   (match (socket/tcp-read (field self connection) buffer length)
                     (Err [failure] (socket-error-transport-code failure))
                     ;; 0 is a clean close, which the framing layer reads as EOF
                     ;; between frames and truncation part-way through one.
                     (Ok [n] n)))
-  (transport-write [(self (ptr TcpTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+  (transport-write [(self (ptr TcpTransport)) (buffer (ptr i8)) (length i64)]
+                   (-> i64)
                    (match (socket/tcp-write (field self connection) buffer length)
                      (Err [failure] (socket-error-transport-code failure))
                      (Ok [n] n)))
-  (transport-close! [(self (ptr TcpTransport))] (-> i64)
+  (transport-close! [(self (ptr TcpTransport))]
+                    (-> i64)
                     (socket/tcp-connection-close! (field self connection))))

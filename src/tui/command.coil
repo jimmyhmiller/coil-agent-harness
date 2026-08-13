@@ -1,0 +1,183 @@
+;; The slash-command table.
+;;
+;; This exists because four things need to agree on what a command is: `/help`,
+;; Tab completion, the completion menu, and the "unknown command" check. They used
+;; to be three hardcoded lists and a `cond`, which is how `/bogus` ended up being
+;; sent to the model as a prompt while `/help` listed a command the completer did
+;; not know.
+;;
+;; Dispatch is deliberately NOT here. Handlers close over the service, the editor,
+;; and the loop's mutable state, so they stay in the application loop. What lives
+;; here is the name table, which is the part that has to be single-sourced. When
+;; extensions can register commands (see docs/extensions.md) this registry is what
+;; they register into; the dispatch `cond` gains one fallthrough arm and nothing
+;; else about this file changes.
+(module harness-tui-command)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+
+;; Whether a command reads follow-up input after being submitted. The menu uses
+;; this to hint the argument, and it is the reason `/status` cannot be silently
+;; completed and submitted in one keystroke.
+(defsum CommandArgument
+  (CommandNoArgument [])
+  (CommandPrompts [(hint (slice u8))]))
+
+(defstruct CommandSpec
+  [(name (slice u8))
+   (summary (slice u8))
+   (argument CommandArgument)])
+
+(defstruct CommandRegistry [(commands (ArrayList CommandSpec))])
+
+(defn command-spec [(name (slice u8))
+                    (summary (slice u8))
+                    (argument CommandArgument)] (-> CommandSpec)
+  (let [spec (alloc/stack CommandSpec)]
+    (store! (field spec name) name)
+    (store! (field spec summary) summary)
+    (store! (field spec argument) argument)
+    (load spec)))
+
+(defn command-registry-new [(allocator (ptr Allocator))] (-> CommandRegistry)
+  (let [registry (alloc/stack CommandRegistry)]
+    (store! (field registry commands) (al-new [CommandSpec] allocator))
+    (load registry)))
+
+(defn command-register! [(registry (ptr CommandRegistry))
+                         (spec CommandSpec)] (-> i64)
+  (al-push! [CommandSpec] (mut (field registry commands)) spec)
+  0)
+
+(defn command-count [(registry (ptr CommandRegistry))] (-> i64)
+  (al-len [CommandSpec] (load (field registry commands))))
+
+(defn command-at [(registry (ptr CommandRegistry)) (at i64)] (-> (ptr CommandSpec))
+  (al-elem [CommandSpec] (mut (field registry commands)) at))
+
+;; Registration order is display order: the list a user reads in `/help` and the
+;; list they arrow through in the menu are the same list in the same order.
+(defn command-registry-builtin [(allocator (ptr Allocator))] (-> CommandRegistry)
+  (let [(mut registry) (command-registry-new allocator)]
+    (command-register! (mut registry)
+                       (command-spec "/help" "list the commands" (CommandNoArgument)))
+    (command-register! (mut registry)
+                       (command-spec "/model"
+                                     "pick a model and effort level"
+                                     (CommandPrompts "a model, then an effort level")))
+    (command-register! (mut registry)
+                       (command-spec "/agent"
+                                     "delegate a subagent from the current run"
+                                     (CommandPrompts "subagent task")))
+    (command-register! (mut registry)
+                       (command-spec "/workflow"
+                                     "add a node to a durable workflow DAG"
+                                     (CommandPrompts "node id")))
+    (command-register! (mut registry)
+                       (command-spec "/status"
+                                     "inspect a run"
+                                     (CommandPrompts "run id")))
+    (command-register! (mut registry)
+                       (command-spec "/graph"
+                                     "inspect a workflow"
+                                     (CommandPrompts "workflow id")))
+    (command-register! (mut registry)
+                       (command-spec "/cancel" "cancel a run" (CommandPrompts "run id")))
+    (command-register! (mut registry)
+                       (command-spec "/conversation"
+                                     "show the durable conversation ID"
+                                     (CommandNoArgument)))
+    (command-register! (mut registry)
+                       (command-spec "/new" "start a new conversation" (CommandNoArgument)))
+    (command-register! (mut registry)
+                       (command-spec "/clear" "clear the screen" (CommandNoArgument)))
+    (command-register! (mut registry)
+                       (command-spec "/quit" "exit" (CommandNoArgument)))
+    (load registry)))
+
+(defn command-prefix? [(name (slice u8)) (prefix (slice u8))] (-> bool)
+  (let [n (slice-len [u8] prefix)]
+    (if (> n (slice-len [u8] name))
+        false
+        (let [(mut i) 0
+              (mut same) true]
+          (loop (if (or (not (load same)) (>= (load i) n))
+                    (break)
+                    (do
+                      (when (!= (slice-get [u8] name (load i))
+                                (slice-get [u8] prefix (load i)))
+                        (store! same false)
+                        0)
+                      (store! i (+ (load i) 1)))))
+          (load same)))))
+
+(defn command-exact [(registry (ptr CommandRegistry)) (name (slice u8))] (-> i64)
+  (let [n (command-count registry)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (str-eq (load (field (command-at registry (load i)) name)) name)
+                  (store! found (load i))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+;; `/exit` is accepted but not listed: it is a synonym nobody needs to be taught,
+;; and putting it in the menu would show two rows that do the same thing.
+(defn command-known? [(registry (ptr CommandRegistry)) (name (slice u8))] (-> bool)
+  (or (>= (command-exact registry name) 0) (str-eq name "/exit")))
+
+;; Indices of every command whose name starts with `prefix`, in registration order.
+(defn command-matches [(allocator (ptr Allocator))
+                       (registry (ptr CommandRegistry))
+                       (prefix (slice u8))] (-> (ArrayList i64))
+  (let [(mut out) (al-new [i64] allocator)
+        n (command-count registry)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (command-prefix? (load (field (command-at registry (load i)) name))
+                                       prefix)
+                  (al-push! [i64] (mut out) (load i))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load out)))
+
+;; The longest prefix shared by every match, which is what Tab should extend to
+;; when the matches have not narrowed to one. Returns `prefix` unchanged when the
+;; matches diverge immediately, so Tab is a no-op rather than a wrong guess.
+(defn command-common-prefix [(allocator (ptr Allocator))
+                             (registry (ptr CommandRegistry))
+                             (matches (ref (ArrayList i64)))] (-> (slice u8))
+  (let [count (al-len [i64] (load matches))]
+    (if (= count 0)
+        ""
+        (let [first-name (load (field (command-at registry (al-get [i64] (load matches) 0)) name))
+              (mut end) (slice-len [u8] first-name)
+              (mut at) 1]
+          (loop (if (>= (load at) count)
+                    (break)
+                    (let [name
+                            (load (field (command-at registry
+                                                     (al-get [i64] (load matches) (load at)))
+                                         name))
+                          limit
+                            (if (< (slice-len [u8] name) (load end))
+                                (slice-len [u8] name)
+                                (load end))
+                          (mut i) 0]
+                      (loop (if (>= (load i) limit)
+                                (break)
+                                (if (= (slice-get [u8] first-name (load i))
+                                       (slice-get [u8] name (load i)))
+                                    (store! i (+ (load i) 1))
+                                    (break))))
+                      (store! end (load i))
+                      (store! at (+ (load at) 1)))))
+          (subslice [u8] first-name 0 (load end))))))

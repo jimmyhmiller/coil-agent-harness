@@ -10,6 +10,7 @@
 (import "harness-tool" :use *)
 (import "harness-system" :use *)
 (import "harness-tool-executor" :use *)
+(import "harness-bash-tool" :use *)
 
 (defstruct ParallelProbe
   [(active (ptr i64))
@@ -100,6 +101,51 @@
     (store! (field call raw-arguments) "{}")
     (load call)))
 
+(defn executor-bash-call [(allocator (ptr Allocator))] (-> ToolCall)
+  (let [call (alloc/stack ToolCall)
+        (mut arguments) (json-object allocator)]
+    (json-object-put! (mut arguments) "command" (JsonString "printf worker-stack-ok"))
+    (store! (field call id) "bash-worker")
+    (store! (field call name) "bash")
+    (store! (field call arguments) (load arguments))
+    (store! (field call raw-arguments) "")
+    (load call)))
+
+;; Regression for the real macOS SIGBUS report: the platform's 512 KiB default
+;; pthread stack was exhausted inside execute-bash -> subprocess/run.
+(deftest executes-bash-on-a-tool-worker-with-an-explicit-stack
+         (let [allocator (malloc-allocator)
+               sequence (box allocator i64 0)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+               sink (alloc/stack NoopEventSink)
+               emitter (alloc/stack EventEmitter)
+               execution (alloc/stack ToolExecutionRequest)]
+           (let [(mut registry-value) (load registry)]
+             (register-bash-tool! (mut registry-value) allocator ".")
+             (store! registry (load registry-value)))
+           (al-push! [ToolCall] calls (executor-bash-call allocator))
+           (store! emitter (event-emitter-new allocator sink sequence))
+           (store! (field execution run-id) "bash-stack-test")
+           (store! (field execution parent-operation-id) "model-1")
+           (store! (field execution provider) "fixture")
+           (store! (field execution model) "fixture")
+           (store! (field execution registry) registry)
+           (store! (field execution calls) calls)
+           (store! (field execution emitter) emitter)
+           (store! (field execution cancellation) (cast (ptr CancellationToken) 0))
+           (store! (field execution run-deadline-monotonic-ms) 0)
+           (store! (field execution max-parallel) 1)
+           (let [batch (execute-tools-parallel allocator execution)
+                 result (al-get [ToolResult] (load (field batch results)) 0)
+                 output (load (field result output))]
+             (assert (match-else (load (field result status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert (match (json-string-at output "stdout")
+                       (Some [value] (str-eq value "worker-stack-ok"))
+                       (None [] false))))))
+
 (deftest executes-independent-tools-concurrently-and-keeps-result-order
          (let [allocator (malloc-allocator)
                active (box allocator i64 0)
@@ -112,7 +158,6 @@
                registry (box allocator ToolRegistry (tool-registry-new allocator))
                calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
                sink (alloc/stack CountingEventSink)
-               authorizer (alloc/stack AllowAllAuthorizer)
                emitter (alloc/stack EventEmitter)
                execution (alloc/stack ToolExecutionRequest)]
            (store! (field probe active) active)
@@ -132,7 +177,6 @@
            (store! (field execution provider) "fake")
            (store! (field execution model) "fake")
            (store! (field execution registry) registry)
-           (store! (field execution authorizer) authorizer)
            (store! (field execution calls) calls)
            (store! (field execution emitter) emitter)
            (store! (field execution cancellation) (cast (ptr CancellationToken) 0))
@@ -149,7 +193,7 @@
                (assert (match (json-string-value (load (field first output)))
                          (Some [text] (str-eq text "first"))
                          (None [] false))))
-             (assert-eq (atomic-load event-count) 8)
+             (assert-eq (atomic-load event-count) 6)
              (assert-eq (atomic-load valid-envelope) 1)
              (assert-eq (atomic-load valid-proposal) 1))))
 
@@ -165,7 +209,6 @@
                registry (box allocator ToolRegistry (tool-registry-new allocator))
                calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
                sink (alloc/stack CountingEventSink)
-               authorizer (alloc/stack AllowAllAuthorizer)
                emitter (alloc/stack EventEmitter)
                execution (alloc/stack ToolExecutionRequest)
                (mut definition) (executor-tool allocator probe)]
@@ -185,7 +228,6 @@
            (store! (field execution provider) "fake")
            (store! (field execution model) "fake")
            (store! (field execution registry) registry)
-           (store! (field execution authorizer) authorizer)
            (store! (field execution calls) calls)
            (store! (field execution emitter) emitter)
            (store! (field execution cancellation) (cast (ptr CancellationToken) 0))
@@ -197,6 +239,6 @@
                                  (ToolErrored [] true)
                                  (_ false)))
              (assert (str-eq (load (field result error)) "tool deadline exceeded"))
-             (assert-eq (atomic-load event-count) 4)
+             (assert-eq (atomic-load event-count) 3)
              (assert-eq (atomic-load valid-envelope) 1)
              (assert-eq (atomic-load valid-proposal) 1))))

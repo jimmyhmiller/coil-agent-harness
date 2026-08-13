@@ -48,8 +48,6 @@
 (deftest recorded-event-streams-produce-the-golden-transcripts
          (assert (tui-fixture-check "tests/fixtures/tui/plain_answer.jsonl"
                                     "tests/fixtures/tui/plain_answer.txt"))
-         (assert (tui-fixture-check "tests/fixtures/tui/tool_approval.jsonl"
-                                    "tests/fixtures/tui/tool_approval.txt"))
          (assert (tui-fixture-check "tests/fixtures/tui/parallel_tools.jsonl"
                                     "tests/fixtures/tui/parallel_tools.txt"))
          (assert (tui-fixture-check "tests/fixtures/tui/orchestration_cancel.jsonl"

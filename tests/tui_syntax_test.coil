@@ -1,0 +1,133 @@
+(module harness-tui-syntax-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-tui-frame" :use *)
+(import "harness-tui-syntax" :use *)
+
+(defn role-of [(spans (ptr (ArrayList FrameSpan))) (needle (slice u8))] (-> i64)
+  (let [n (al-len [FrameSpan] (load spans))
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (let [span (al-elem [FrameSpan] spans (load i))]
+                (when (str-eq (load (field span text)) needle)
+                  (store! found
+                          (match (load (field span role))
+                            (RolePrimary [] 0)
+                            (RoleMuted [] 1)
+                            (RoleSuccess [] 2)
+                            (RoleWarning [] 3)
+                            (RoleFailure [] 4)
+                            (RoleCodeKeyword [] 5)
+                            (RoleCodeString [] 6)
+                            (RoleCodeComment [] 7)
+                            (RoleCodeNumber [] 8)))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load found)))
+
+;; Concatenating every span must reproduce the input byte for byte. A highlighter
+;; that drops or duplicates a byte is a renderer that lies about what was said.
+(defn spans-text [(allocator (ptr Allocator))
+                  (spans (ptr (ArrayList FrameSpan)))] (-> (slice u8))
+  (let [(mut out) (sb-new allocator)
+        n (al-len [FrameSpan] (load spans))
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (let [span (al-elem [FrameSpan] spans (load i))]
+                  (sb-push-str! (mut out) (load (field span text))))
+                (store! i (+ (load i) 1)))))
+    (sb-finish! (mut out))))
+
+(deftest classifies-keywords-strings-numbers-and-comments
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)]
+           (store! language (syntax-language "python"))
+           (let [(mut spans)
+                   (syntax-highlight-line allocator
+                                          language
+                                          "return \"hi\" + 42  # done")]
+             (assert-eq (role-of (mut spans) "return") 5)
+             (assert-eq (role-of (mut spans) "\"hi\"") 6)
+             (assert-eq (role-of (mut spans) "42") 8)
+             (assert-eq (role-of (mut spans) "# done") 7))))
+
+(deftest every-span-together-reproduces-the-line
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)
+               line "  if (x >= 3) { return \"a b\"; } // trailing"]
+           (store! language (syntax-language "c"))
+           (let [(mut spans) (syntax-highlight-line allocator language line)]
+             (assert (str-eq (spans-text allocator (mut spans)) line)))))
+
+(deftest a-keyword-substring-is-not-a-keyword
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)]
+           (store! language (syntax-language "c"))
+           (let [(mut spans) (syntax-highlight-line allocator language "internal = 1")]
+             ;; `in` and `int` both live in the C keyword set; `internal` is neither.
+             (assert-eq (role-of (mut spans) "internal") 0))))
+
+;; The common streaming case: the closing quote has not arrived yet.
+(deftest an-unterminated-string-colours-to-end-of-line-without-losing-bytes
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)
+               line "msg = \"still typ"]
+           (store! language (syntax-language "python"))
+           (let [(mut spans) (syntax-highlight-line allocator language line)]
+             (assert-eq (role-of (mut spans) "\"still typ") 6)
+             (assert (str-eq (spans-text allocator (mut spans)) line)))))
+
+(deftest an-escaped-quote-does-not-close-the-string
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)
+               line "a = \"x\\\"y\" + b"]
+           (store! language (syntax-language "python"))
+           (let [(mut spans) (syntax-highlight-line allocator language line)]
+             (assert (str-eq (spans-text allocator (mut spans)) line))
+             (assert-eq (role-of (mut spans) "b") 0))))
+
+(deftest comment-syntax-follows-the-language
+         (let [allocator (malloc-allocator)
+               python (alloc/stack SyntaxLanguage)
+               lisp (alloc/stack SyntaxLanguage)]
+           (store! python (syntax-language "python"))
+           (store! lisp (syntax-language "coil"))
+           ;; A `;` is a comment in Coil and ordinary punctuation in Python.
+           (let [(mut a) (syntax-highlight-line allocator python "x = 1 ; y")
+                 (mut b) (syntax-highlight-line allocator lisp "x 1 ; y")]
+             (assert-eq (role-of (mut a) "; y") -1)
+             (assert-eq (role-of (mut b) "; y") 7))))
+
+(deftest an-unknown-language-still-highlights-and-never-fails
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)
+               line "if thing return 7"]
+           (store! language (syntax-language "brainfuck"))
+           (let [(mut spans) (syntax-highlight-line allocator language line)]
+             (assert (str-eq (spans-text allocator (mut spans)) line))
+             (assert-eq (role-of (mut spans) "if") 5)
+             (assert-eq (role-of (mut spans) "thing") 0))))
+
+(deftest an-empty-line-produces-no-spans
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)]
+           (store! language (syntax-language "python"))
+           (let [(mut spans) (syntax-highlight-line allocator language "")]
+             (assert-eq (al-len [FrameSpan] (load spans)) 0))))
+
+;; Plain runs are coalesced: every span costs an SGR sequence on every redraw,
+;; and a streaming code block redraws on each delta.
+(deftest adjacent-plain-bytes-share-one-span
+         (let [allocator (malloc-allocator)
+               language (alloc/stack SyntaxLanguage)]
+           (store! language (syntax-language "python"))
+           (let [(mut spans) (syntax-highlight-line allocator language "    +++    ")]
+             (assert-eq (al-len [FrameSpan] (load spans)) 1))))

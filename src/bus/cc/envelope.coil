@@ -1,0 +1,501 @@
+;; The `<cross-session-message>` envelope.
+;;
+;; Peer identity travels as a text envelope wrapped around the message body
+;; rather than as sibling JSON keys, because the payload ultimately has to
+;; survive as prompt text. That choice has a consequence worth stating plainly:
+;; the metadata and the body share one channel, so the body could otherwise
+;; forge the metadata. Two rules close that hole, and both are load-bearing.
+;;
+;;   Close-tag scrubbing. A `</cross-session-message` appearing in the body is
+;;   rewritten to `<\/cross-session-message`, so a body cannot terminate the
+;;   envelope early and start a forged one.
+;;
+;;   Round-trip validation. After parsing, the receiver re-renders the envelope
+;;   from what it extracted and compares it byte-for-byte with what arrived.
+;;   Reordered attributes, an extra space, or an unknown attribute all fail, and
+;;   the text is then treated as an opaque body rather than as peer metadata.
+;;
+;; The second rule is why this module is written as one renderer plus a parser
+;; that calls it, rather than as two independent codecs: the renderer IS the
+;; specification, and a parser that disagreed with it would simply never
+;; validate. It also sets the failure mode. A parser bug here degrades a message
+;; to plain text -- we lose the sender's name, never the message, and never
+;; another peer's identity.
+;;
+;; Attribute order is fixed: from, from-session, hop-chain, from-name,
+;; from-mode. Body newlines are significant -- exactly one after the open tag
+;; and one before the close tag -- and the body is not XML-escaped.
+(module harness-bus-cc-envelope)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-bus-cc-address" :use *)
+
+(const CC_TAG "cross-session-message")
+(const CC_OPEN "<cross-session-message")
+(const CC_CLOSE "\n</cross-session-message>")
+
+;; The receiver clamps a display name to 64 code points and appends an ellipsis.
+(const CC_NAME_MAX_CHARS 64)
+(const CC_SESSION_MAX_BYTES 80)
+(const CC_HOP_ID_BYTES 24)
+(const CC_HOP_MAX_IDS 32)
+
+(defstruct CcEnvelope
+  [(from (Option (slice u8)))
+   (from-session (Option (slice u8)))
+   ;; Held in joined `a,b,c` form rather than as a list: that is what the wire
+   ;; carries, what the validation pattern describes, and what render and parse
+   ;; must agree on byte-for-byte.
+   (hop-chain (Option (slice u8)))
+   (from-name (Option (slice u8)))
+   (from-mode (Option (slice u8)))
+   (body (slice u8))])
+
+(defn cc-envelope-init! [(envelope (ptr CcEnvelope))] (-> i64)
+  (store! (field envelope from) (None [(slice u8)]))
+  (store! (field envelope from-session) (None [(slice u8)]))
+  (store! (field envelope hop-chain) (None [(slice u8)]))
+  (store! (field envelope from-name) (None [(slice u8)]))
+  (store! (field envelope from-mode) (None [(slice u8)]))
+  (store! (field envelope body) "")
+  0)
+
+;; ---------------------------------------------------------------------------
+;; Attribute validity
+;; ---------------------------------------------------------------------------
+
+(defn cc-session-byte? [(byte i64)] (-> bool)
+  (or (or (and (>= byte 48) (<= byte 57))
+          (and (>= byte 65) (<= byte 90)))
+      (or (and (>= byte 97) (<= byte 122))
+          (or (= byte 95) (= byte 45)))))
+
+(defn cc-session-id-valid? [(value (slice u8))] (-> bool)
+  (let [n (slice-len [u8] value)
+        (mut ok) (and (> n 0) (<= n CC_SESSION_MAX_BYTES))
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (not (load ok)))
+              (break)
+              (do
+                (when (not (cc-session-byte? (cast i64 (slice-get [u8] value (load i)))))
+                  (store! ok false)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load ok)))
+
+(defn cc-lower-hex-byte? [(byte i64)] (-> bool)
+  (or (and (>= byte 48) (<= byte 57)) (and (>= byte 97) (<= byte 102))))
+
+;; `24hex(,24hex){0,31}` -- a bounded relay path. The bound matters: a hop chain
+;; is the only field an intermediary appends to, so an unbounded one would let a
+;; relay loop grow a message without limit.
+(defn cc-hop-chain-valid? [(value (slice u8))] (-> bool)
+  (let [n (slice-len [u8] value)
+        (mut ok) (> n 0)
+        (mut ids) 0
+        (mut i) 0]
+    (loop (if (or (>= (load i) n) (not (load ok)))
+              (break)
+              (do
+                (when (> (load ids) 0)
+                  (if (= (cast i64 (slice-get [u8] value (load i))) 44)
+                      (store! i (+ (load i) 1))
+                      (store! ok false))
+                  0)
+                (when (load ok)
+                  (if (> (+ (load i) CC_HOP_ID_BYTES) n)
+                      (store! ok false)
+                      (let [(mut j) 0]
+                        (loop (if (>= (load j) CC_HOP_ID_BYTES)
+                                  (break)
+                                  (do
+                                    (when (not (cc-lower-hex-byte? (cast i64
+                                                                         (slice-get [u8] value (+ (load i) (load j))))))
+                                      (store! ok false)
+                                      0)
+                                    (store! j (+ (load j) 1)))))
+                        (store! i (+ (load i) CC_HOP_ID_BYTES))
+                        (store! ids (+ (load ids) 1))
+                        0))
+                  0))))
+    (and (load ok) (and (> (load ids) 0) (<= (load ids) CC_HOP_MAX_IDS)))))
+
+(defn cc-mode-valid? [(value (slice u8))] (-> bool)
+  (or (str-eq value "bypass") (str-eq value "prompting")))
+
+;; The name as it may appear between the quotes: anything except a quote, an
+;; angle bracket, or a line break. Those would let a name close its own
+;; attribute or the tag.
+(defn cc-name-byte-allowed? [(byte i64)] (-> bool)
+  (not (or (or (= byte 34) (= byte 60))
+           (or (= byte 62) (or (= byte 10) (= byte 13))))))
+
+;; ---------------------------------------------------------------------------
+;; UTF-8, for code-point-accurate name clamping
+;; ---------------------------------------------------------------------------
+
+;; Length in bytes of the UTF-8 sequence starting at `index`. Returns 1 for a
+;; malformed lead byte so that scanning always advances -- a name is display
+;; metadata and must never be able to hang the parser.
+(defn cc-utf8-length [(text (slice u8)) (index i64)] (-> i64)
+  (let [byte (cast i64 (slice-get [u8] text index))
+        n (slice-len [u8] text)
+        width
+          (cond (< byte 128) 1
+                (and (>= byte 194) (<= byte 223)) 2
+                (and (>= byte 224) (<= byte 239)) 3
+                (and (>= byte 240) (<= byte 244)) 4
+                :else 1)]
+    (if (> (+ index width) n) 1 width)))
+
+(defn cc-utf8-codepoint [(text (slice u8)) (index i64) (width i64)] (-> i64)
+  (let [lead (cast i64 (slice-get [u8] text index))]
+    (cond (= width 1) lead
+          (= width 2)
+            (+ (* (- lead 192) 64)
+               (- (cast i64 (slice-get [u8] text (+ index 1))) 128))
+          (= width 3)
+            (+ (* (- lead 224) 4096)
+               (+ (* (- (cast i64 (slice-get [u8] text (+ index 1))) 128) 64)
+                  (- (cast i64 (slice-get [u8] text (+ index 2))) 128)))
+          :else
+            (+ (* (- lead 240) 262144)
+               (+ (* (- (cast i64 (slice-get [u8] text (+ index 1))) 128) 4096)
+                  (+ (* (- (cast i64 (slice-get [u8] text (+ index 2))) 128) 64)
+                     (- (cast i64 (slice-get [u8] text (+ index 3))) 128)))))))
+
+;; Code points the receiver strips from a display name: Cc, Cf, Cs, Zl, Zp.
+;;
+;; This is the common-case subset, not the complete Unicode tables, and the
+;; shortfall is deliberate. Getting it wrong for an exotic name costs the
+;; sender's display name on one message -- the round-trip check fails and the
+;; text is delivered as an opaque body. It cannot corrupt a body or misattribute
+;; a peer, so a full category table is not worth carrying for a field that is
+;; cosmetic by construction. Names we originate are ASCII anyway.
+(defn cc-name-stripped-codepoint? [(codepoint i64)] (-> bool)
+  (or (or (< codepoint 32) (= codepoint 127))
+      (or (or (and (>= codepoint 128) (<= codepoint 159)) (= codepoint 173))
+          (or (or (= codepoint 1564) (= codepoint 6158))
+              (or (or (and (>= codepoint 8203) (<= codepoint 8207))
+                      (or (= codepoint 8232) (= codepoint 8233)))
+                  (or (or (and (>= codepoint 8234) (<= codepoint 8238))
+                          (and (>= codepoint 8288) (<= codepoint 8303)))
+                      (or (or (and (>= codepoint 55296) (<= codepoint 57343))
+                              (= codepoint 65279))
+                          (and (>= codepoint 65529) (<= codepoint 65531)))))))))
+
+(defn cc-trim-byte? [(byte i64)] (-> bool)
+  (or (or (= byte 32) (= byte 9))
+      (or (or (= byte 10) (= byte 13))
+          (or (= byte 11) (= byte 12)))))
+
+;; Strip format and control code points, trim, and clamp to 64 code points with
+;; an ellipsis. Mirrors the receiver's own normalization so that a name we send
+;; survives its round-trip check unchanged.
+(defn cc-sanitize-name [(allocator (ptr Allocator)) (name (slice u8))] (-> (slice u8))
+  (let [(mut stripped) (sb-new allocator)
+        (mut i) 0
+        n (slice-len [u8] name)]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [width (cc-utf8-length name (load i))
+                    codepoint (cc-utf8-codepoint name (load i) width)]
+                ;; Quotes and angle brackets go first, matching the reference's
+                ;; separate pre-pass, so a name can never close its attribute.
+                (when (not (or (cc-name-stripped-codepoint? codepoint)
+                               (or (= codepoint 34)
+                                   (or (= codepoint 60) (= codepoint 62)))))
+                  (let [(mut k) 0]
+                    (loop (if (>= (load k) width)
+                              (break)
+                              (do
+                                (sb-push-byte! (mut stripped)
+                                               (slice-get [u8] name (+ (load i) (load k))))
+                                (store! k (+ (load k) 1))))))
+                  0)
+                (store! i (+ (load i) width)))))
+    (let [text (sb-str (load stripped))
+          length (slice-len [u8] text)
+          (mut lo) 0
+          (mut hi) length]
+      (loop (if (or (>= (load lo) (load hi))
+                    (not (cc-trim-byte? (cast i64 (slice-get [u8] text (load lo))))))
+                (break)
+                (store! lo (+ (load lo) 1))))
+      (loop (if (or (>= (load lo) (load hi))
+                    (not (cc-trim-byte? (cast i64 (slice-get [u8] text (- (load hi) 1))))))
+                (break)
+                (store! hi (- (load hi) 1))))
+      (let [trimmed (substr text (load lo) (load hi))
+            trimmed-length (slice-len [u8] trimmed)
+            (mut chars) 0
+            (mut at) 0
+            (mut cut) -1]
+        (loop (if (>= (load at) trimmed-length)
+                  (break)
+                  (do
+                    (when (= (load chars) CC_NAME_MAX_CHARS)
+                      (store! cut (load at))
+                      (break))
+                    (store! at (+ (load at) (cc-utf8-length trimmed (load at))))
+                    (store! chars (+ (load chars) 1)))))
+        (if (< (load cut) 0)
+            trimmed
+            (let [(mut clamped) (sb-new allocator)]
+              (sb-push-str! (mut clamped) (substr trimmed 0 (load cut)))
+              ;; U+2026 HORIZONTAL ELLIPSIS, as the receiver appends.
+              (sb-push-byte! (mut clamped) (cast u8 226))
+              (sb-push-byte! (mut clamped) (cast u8 128))
+              (sb-push-byte! (mut clamped) (cast u8 166))
+              (sb-finish! (mut clamped))))))))
+
+;; ---------------------------------------------------------------------------
+;; Close-tag scrubbing
+;; ---------------------------------------------------------------------------
+
+(defn cc-ascii-lower [(byte i64)] (-> i64)
+  (if (and (>= byte 65) (<= byte 90)) (+ byte 32) byte))
+
+(defn cc-matches-tag-ci? [(text (slice u8)) (index i64)] (-> bool)
+  (let [n (slice-len [u8] text)
+        tag-length (slice-len [u8] CC_TAG)
+        (mut ok) (<= (+ index tag-length) n)
+        (mut i) 0]
+    (loop (if (or (>= (load i) tag-length) (not (load ok)))
+              (break)
+              (do
+                (when (!= (cc-ascii-lower (cast i64 (slice-get [u8] text (+ index (load i)))))
+                          (cast i64 (slice-get [u8] CC_TAG (load i))))
+                  (store! ok false)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load ok)))
+
+;; Rewrite `</cross-session-message` to `<\/cross-session-message` so a body
+;; cannot terminate the envelope. Case-insensitive, and only when the tag name
+;; is followed by `>`, whitespace, `/`, or end of input -- otherwise
+;; `</cross-session-messages` would be needlessly mangled.
+(defn cc-scrub-close-tag [(allocator (ptr Allocator)) (body (slice u8))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)
+        n (slice-len [u8] body)
+        tag-length (slice-len [u8] CC_TAG)
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] body (load i)))]
+                (if (and (and (= byte 60) (< (+ (load i) 1) n))
+                         (and (= (cast i64 (slice-get [u8] body (+ (load i) 1))) 47)
+                              (cc-matches-tag-ci? body (+ (load i) 2))))
+                    (let [after (+ (+ (load i) 2) tag-length)
+                          next
+                            (if (>= after n)
+                                -1
+                                (cast i64 (slice-get [u8] body after)))
+                          terminates
+                            (or (< next 0)
+                                (or (or (= next 62) (= next 47))
+                                    (or (or (= next 32) (= next 9))
+                                        (or (= next 10) (= next 13)))))]
+                      (if terminates
+                          (do
+                            (sb-push-str! (mut buffer) "<\\/")
+                            (store! i (+ (load i) 2)))
+                          (do
+                            (sb-push-byte! (mut buffer) (cast u8 byte))
+                            (store! i (+ (load i) 1)))))
+                    (do
+                      (sb-push-byte! (mut buffer) (cast u8 byte))
+                      (store! i (+ (load i) 1)))))))
+    (sb-finish! (mut buffer))))
+
+;; ---------------------------------------------------------------------------
+;; Rendering
+;; ---------------------------------------------------------------------------
+
+(defn cc-push-attribute! [(buffer (mut StrBuf))
+                          (name (slice u8))
+                          (value (slice u8))] (-> i64)
+  (sb-push-byte! (mut buffer) (cast u8 32))
+  (sb-push-str! (mut buffer) name)
+  (sb-push-str! (mut buffer) "=\"")
+  (sb-push-str! (mut buffer) value)
+  (sb-push-byte! (mut buffer) (cast u8 34))
+  0)
+
+;; An attribute present but invalid is omitted rather than rejected, matching
+;; the reference: the message still goes, minus a field that would have been
+;; discarded anyway.
+(defn cc-optional-attribute [(value (Option (slice u8)))] (-> (slice u8))
+  (match value
+    (None [] "")
+    (Some [text] text)))
+
+;; Render the envelope. This is the normative form -- the parser validates by
+;; calling it, and the receiver validates by doing the same on its side.
+(defn cc-envelope-render [(allocator (ptr Allocator))
+                          (envelope (ptr CcEnvelope))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) CC_OPEN)
+    (let [from (cc-optional-attribute (load (field envelope from)))]
+      (when (> (slice-len [u8] from) 0)
+        (cc-push-attribute! (mut buffer) "from" from)
+        0))
+    (let [session (cc-optional-attribute (load (field envelope from-session)))]
+      (when (and (> (slice-len [u8] session) 0) (cc-session-id-valid? session))
+        (cc-push-attribute! (mut buffer) "from-session" session)
+        0))
+    (let [hops (cc-optional-attribute (load (field envelope hop-chain)))]
+      (when (and (> (slice-len [u8] hops) 0) (cc-hop-chain-valid? hops))
+        (cc-push-attribute! (mut buffer) "hop-chain" hops)
+        0))
+    (let [name (cc-optional-attribute (load (field envelope from-name)))]
+      (when (> (slice-len [u8] name) 0)
+        (let [clean (cc-sanitize-name allocator name)]
+          (when (> (slice-len [u8] clean) 0)
+            (cc-push-attribute! (mut buffer) "from-name" clean)
+            0))
+        0))
+    (let [mode (cc-optional-attribute (load (field envelope from-mode)))]
+      (when (and (> (slice-len [u8] mode) 0) (cc-mode-valid? mode))
+        (cc-push-attribute! (mut buffer) "from-mode" mode)
+        0))
+    (sb-push-str! (mut buffer) ">\n")
+    (sb-push-str! (mut buffer)
+                  (cc-scrub-close-tag allocator (load (field envelope body))))
+    (sb-push-str! (mut buffer) CC_CLOSE)
+    (sb-finish! (mut buffer))))
+
+;; ---------------------------------------------------------------------------
+;; Parsing
+;; ---------------------------------------------------------------------------
+
+;; Try to read ` name="value"` at `index`. On success writes the value and the
+;; index just past the closing quote; on absence leaves both untouched and
+;; returns false. `allowed?` is the per-attribute character class, which is what
+;; keeps this from accepting a value the reference's pattern would reject.
+(defn cc-read-attribute [(text (slice u8))
+                         (index i64)
+                         (name (slice u8))
+                         (out-value (ptr (slice u8)))
+                         (out-index (ptr i64))
+                         (kind i64)] (-> bool)
+  (let [n (slice-len [u8] text)
+        name-length (slice-len [u8] name)
+        ;; past the leading space, the name, the `=`, and the opening quote
+        start (+ (+ index name-length) 3)]
+    (if (or (> start n)
+            (or (!= (cast i64 (slice-get [u8] text index)) 32)
+                (not (str-eq (substr text (+ index 1) (+ (+ index 1) name-length)) name))))
+        false
+        (if (or (!= (cast i64 (slice-get [u8] text (+ (+ index 1) name-length))) 61)
+                (!= (cast i64 (slice-get [u8] text (+ (+ index 2) name-length))) 34))
+            false
+            (let [(mut at) start
+                  (mut ok) true
+                  (mut closed) false]
+              (loop (if (>= (load at) n)
+                        (break)
+                        (let [byte (cast i64 (slice-get [u8] text (load at)))]
+                          (if (= byte 34)
+                              (do (store! closed true) (break))
+                              (do
+                                ;; kind 0 address, 1 session, 2 hop-chain,
+                                ;; 3 name, 4 mode -- the classes the reference's
+                                ;; pattern encodes inline.
+                                (when (not (cond (= kind 0) (or (= byte 37) (cc-address-safe-byte? byte))
+                                                 (= kind 1) (cc-session-byte? byte)
+                                                 (= kind 2) (or (= byte 44) (cc-lower-hex-byte? byte))
+                                                 (= kind 3) (cc-name-byte-allowed? byte)
+                                                 :else true))
+                                  (store! ok false)
+                                  (break))
+                                (store! at (+ (load at) 1)))))))
+              (if (or (not (load ok)) (or (not (load closed)) (= (load at) start)))
+                  false
+                  (do
+                    (store! out-value (substr text start (load at)))
+                    (store! out-index (+ (load at) 1))
+                    true)))))))
+
+;; Parse `text` as an envelope. Returns false when it is not one -- including
+;; when it merely looks like one -- and the caller must then treat the text as
+;; an ordinary body.
+;;
+;; The final check is the important one: everything above only proposes a
+;; reading, and the reading is accepted only if re-rendering it reproduces the
+;; input exactly.
+(defn cc-envelope-parse [(allocator (ptr Allocator))
+                         (text (slice u8))
+                         (out (ptr CcEnvelope))] (-> bool)
+  (let [n (slice-len [u8] text)
+        open-length (slice-len [u8] CC_OPEN)
+        close-length (slice-len [u8] CC_CLOSE)]
+    (cc-envelope-init! out)
+    (if (or (< n (+ (+ open-length close-length) 2))
+            (or (not (starts-with text CC_OPEN))
+                (not (str-eq (substr text (- n close-length) n) CC_CLOSE))))
+        false
+        (let [(mut at) open-length
+              value (alloc/stack (slice u8))
+              next (alloc/stack i64)]
+          (when (cc-read-attribute text (load at) "from" value next 0)
+            (store! (field out from) (Some (load value)))
+            (store! at (load next))
+            0)
+          (when (cc-read-attribute text (load at) "from-session" value next 1)
+            (store! (field out from-session) (Some (load value)))
+            (store! at (load next))
+            0)
+          (when (cc-read-attribute text (load at) "hop-chain" value next 2)
+            (store! (field out hop-chain) (Some (load value)))
+            (store! at (load next))
+            0)
+          (when (cc-read-attribute text (load at) "from-name" value next 3)
+            (store! (field out from-name) (Some (load value)))
+            (store! at (load next))
+            0)
+          (when (cc-read-attribute text (load at) "from-mode" value next 4)
+            (store! (field out from-mode) (Some (load value)))
+            (store! at (load next))
+            0)
+          ;; The open tag must end here, immediately followed by the body's
+          ;; leading newline. Anything else -- an unknown attribute, a stray
+          ;; space -- fails, which is the point.
+          (if (or (> (+ (load at) 2) n)
+                  (or (!= (cast i64 (slice-get [u8] text (load at))) 62)
+                      (!= (cast i64 (slice-get [u8] text (+ (load at) 1))) 10)))
+              false
+              (let [body-start (+ (load at) 2)
+                    body-end (- n close-length)]
+                (if (< body-end body-start)
+                    false
+                    (do
+                      (store! (field out body) (substr text body-start body-end))
+                      ;; The round trip. Everything above is a proposal; this is
+                      ;; the acceptance test.
+                      (str-eq (cc-envelope-render allocator out) text)))))))))
+
+;; Wrap a body for sending. The common path: our address, our name, and the
+;; permission mode we attest to.
+(defn cc-envelope-wrap [(allocator (ptr Allocator))
+                        (from (slice u8))
+                        (from-name (slice u8))
+                        (from-mode (slice u8))
+                        (body (slice u8))] (-> (slice u8))
+  (let [envelope (alloc/stack CcEnvelope)]
+    (cc-envelope-init! envelope)
+    (when (> (slice-len [u8] from) 0)
+      (store! (field envelope from) (Some from))
+      0)
+    (when (> (slice-len [u8] from-name) 0)
+      (store! (field envelope from-name) (Some from-name))
+      0)
+    (when (> (slice-len [u8] from-mode) 0)
+      (store! (field envelope from-mode) (Some from-mode))
+      0)
+    (store! (field envelope body) body)
+    (cc-envelope-render allocator envelope)))

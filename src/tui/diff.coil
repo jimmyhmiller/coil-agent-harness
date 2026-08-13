@@ -38,7 +38,11 @@
     (RoleMuted [] 1)
     (RoleSuccess [] 2)
     (RoleWarning [] 3)
-    (RoleFailure [] 4)))
+    (RoleFailure [] 4)
+    (RoleCodeKeyword [] 5)
+    (RoleCodeString [] 6)
+    (RoleCodeComment [] 7)
+    (RoleCodeNumber [] 8)))
 
 ;; Rows are compared by their spans, not by the flattened line text: two rows
 ;; with identical characters but different styling are different rows, and
@@ -131,9 +135,8 @@
             (loop (if (>= (load row) height)
                       (break)
                       (do
-                        (unless (frame-line-same?
-                                 (al-get [FrameLine] previous-lines (load row))
-                                 (al-get [FrameLine] next-lines (load row)))
+                        (unless (frame-line-same? (al-get [FrameLine] previous-lines (load row))
+                                                  (al-get [FrameLine] next-lines (load row)))
                           ;; Only a changed row costs an erase and a rewrite.
                           (push-operation! operations (TerminalCarriageReturn))
                           (push-operation! operations (TerminalEraseLine))

@@ -79,8 +79,9 @@
         (mut i) 0]
     (loop (if (>= (load i) n)
               (break)
-              (do (al-pop! [Envelope] (mut (field sink queue)))
-                  (store! i (+ (load i) 1)))))
+              (do
+                (al-pop! [Envelope] (mut (field sink queue)))
+                (store! i (+ (load i) 1)))))
     n))
 
 ;; Drop the oldest entry to make room. Oldest rather than newest because a
@@ -100,7 +101,8 @@
     0))
 
 (impl EventSink BusObserverSink
-  (publish-event [(self (ptr BusObserverSink)) (event (ptr Event))] (-> i64)
+  (publish-event [(self (ptr BusObserverSink)) (event (ptr Event))]
+                 (-> i64)
                  (let [allocator (load (field self allocator))
                        topic (run-topic allocator (load (field event run-id)))]
                    ;; An event with no run id has no topic to publish on. That

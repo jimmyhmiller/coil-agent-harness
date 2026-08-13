@@ -13,11 +13,30 @@
    (continuation-prefix (slice u8))
    (text (slice u8))])
 
+;; One row of a selection list rendered beneath the composer. Kept generic on
+;; purpose: the view layer knows about "a list with one row highlighted", not
+;; about slash commands, so the same node serves any future picker.
+(defstruct ViewMenuEntry
+  [(label (slice u8))
+   (detail (slice u8))
+   (selected bool)])
+
 (defstruct ViewInput
   [(prompt (slice u8))
    (text (slice u8))
    (cursor-offset i64)
-   (row-budget i64)])
+   (row-budget i64)
+   ;; Null when no menu is open. The composer is the only node that owns a menu,
+   ;; because the menu has to share its redraw and its cursor ownership.
+   (menu (ptr (ArrayList ViewMenuEntry)))
+   (menu-overflow i64)])
+
+;; A fenced code block. The language is kept as the author wrote it so the
+;; highlighter, not the view layer, decides what it means.
+(defstruct ViewCode
+  [(language (slice u8))
+   (code (slice u8))
+   (prefix (slice u8))])
 
 (defstruct ViewDecoratedFlow
   [(line-role StyleRole)
@@ -33,6 +52,7 @@
   (ViewFlowNode [(flow ViewFlow)])
   (ViewDecoratedFlowNode [(flow ViewDecoratedFlow)])
   (ViewInputNode [(input ViewInput)])
+  (ViewCodeNode [(code ViewCode)])
   (ViewSpacerNode [(rows i64)])
   (ViewTailNode [(rows i64) (child (ptr ViewNode))])
   (ViewStackNode [(gap i64) (children (ptr (ArrayList ViewNode)))]))
@@ -50,16 +70,49 @@
     (store! (field flow text) text)
     (ViewFlowNode (load flow))))
 
-(defn view-input [(prompt (slice u8))
-                  (text (slice u8))
-                  (cursor-offset i64)
-                  (row-budget i64)] (-> ViewNode)
+(defn view-menu-entry [(label (slice u8))
+                       (detail (slice u8))
+                       (selected bool)] (-> ViewMenuEntry)
+  (let [entry (alloc/stack ViewMenuEntry)]
+    (store! (field entry label) label)
+    (store! (field entry detail) detail)
+    (store! (field entry selected) selected)
+    (load entry)))
+
+(defn view-input-with-menu [(prompt (slice u8))
+                            (text (slice u8))
+                            (cursor-offset i64)
+                            (row-budget i64)
+                            (menu (ptr (ArrayList ViewMenuEntry)))
+                            (menu-overflow i64)] (-> ViewNode)
   (let [input (alloc/stack ViewInput)]
     (store! (field input prompt) prompt)
     (store! (field input text) text)
     (store! (field input cursor-offset) cursor-offset)
     (store! (field input row-budget) row-budget)
+    (store! (field input menu) menu)
+    (store! (field input menu-overflow) menu-overflow)
     (ViewInputNode (load input))))
+
+(defn view-input [(prompt (slice u8))
+                  (text (slice u8))
+                  (cursor-offset i64)
+                  (row-budget i64)] (-> ViewNode)
+  (view-input-with-menu prompt
+                        text
+                        cursor-offset
+                        row-budget
+                        (cast (ptr (ArrayList ViewMenuEntry)) 0)
+                        0))
+
+(defn view-code [(language (slice u8))
+                 (code (slice u8))
+                 (prefix (slice u8))] (-> ViewNode)
+  (let [value (alloc/stack ViewCode)]
+    (store! (field value language) language)
+    (store! (field value code) code)
+    (store! (field value prefix) prefix)
+    (ViewCodeNode (load value))))
 
 (defn view-decorated-flow [(line-role StyleRole)
                            (first-prefix (slice u8))

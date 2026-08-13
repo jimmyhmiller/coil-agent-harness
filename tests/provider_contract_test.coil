@@ -604,18 +604,17 @@
            (let [request (test-request allocator)]
              (store! (field request cache-key) "cache-key-v1")
              (let [payload (model-completion-payload allocator request (mut response))]
-             (assert (match (json-string-at payload "response_id")
-                       (Some [value] (str-eq value "resp-cache"))
-                       (None [] false)))
-             (assert (match (json-string-at payload "provider_session_id")
-                       (Some [value] (str-eq value "thread-cache"))
-                       (None [] false)))
-             (assert (match (json-string-at payload "cache_key")
-                       (Some [value] (str-eq value "cache-key-v1"))
-                       (None [] false)))
-             (assert-eq (json-number-i64
-                          (json-get (json-get payload "usage") "cached_input_tokens"))
-                        80)))))
+               (assert (match (json-string-at payload "response_id")
+                         (Some [value] (str-eq value "resp-cache"))
+                         (None [] false)))
+               (assert (match (json-string-at payload "provider_session_id")
+                         (Some [value] (str-eq value "thread-cache"))
+                         (None [] false)))
+               (assert (match (json-string-at payload "cache_key")
+                         (Some [value] (str-eq value "cache-key-v1"))
+                         (None [] false)))
+               (assert-eq (json-number-i64 (json-get (json-get payload "usage") "cached_input_tokens"))
+                          80)))))
 
 (deftest codex-transport-call-and-close-contract
          (let [allocator (malloc-allocator)
@@ -665,9 +664,10 @@
 
 (deftest codex-provider-delegates-through-pluggable-execution-strategy
          (let [allocator (malloc-allocator)
-               strategy (box allocator
-                             FakeCodexExecutionStrategy
-                             (zeroed FakeCodexExecutionStrategy))
+               strategy
+                 (box allocator
+                      FakeCodexExecutionStrategy
+                      (zeroed FakeCodexExecutionStrategy))
                strategy-view (box allocator (dyn CodexExecutionStrategy) strategy)
                provider (alloc/stack CodexProvider)
                request (test-request allocator)
@@ -712,30 +712,30 @@
            (let [wire (codex-direct-request-json allocator request)
                  input (json-get wire "input")
                  include (json-get wire "include")]
-           (assert (str-eq (load (field context endpoint))
-                           "https://chatgpt.com/backend-api/codex/responses"))
-           (assert (not (json-object-has? wire "max_output_tokens")))
-           (assert (not (json-object-has? wire "previous_response_id")))
-           (assert (match (json-bool-value (json-get wire "store"))
-                     (Some [enabled] (not enabled))
-                     (None [] false)))
-           (assert (match (json-string-at wire "prompt_cache_key")
-                     (Some [value] (str-eq value "conversation-cache-key"))
-                     (None [] false)))
-           (assert-eq (json-array-length input) 4)
-           (assert (match (json-string-at (json-array-get input 1) "encrypted_content")
-                     (Some [value] (str-eq value "opaque"))
-                     (None [] false)))
-           (assert (match (json-string-at (json-array-get input 3) "type")
-                     (Some [value] (str-eq value "function_call_output"))
-                     (None [] false)))
-           (assert (match-else (json-array-get include 0)
-                               (JsonString [value]
-                                           (str-eq value "reasoning.encrypted_content"))
-                               (_ false)))
-           (assert (match (json-bool-value (json-get wire "stream"))
-                     (Some [enabled] enabled)
-                     (None [] false))))))
+             (assert (str-eq (load (field context endpoint))
+                             "https://chatgpt.com/backend-api/codex/responses"))
+             (assert (not (json-object-has? wire "max_output_tokens")))
+             (assert (not (json-object-has? wire "previous_response_id")))
+             (assert (match (json-bool-value (json-get wire "store"))
+                       (Some [enabled] (not enabled))
+                       (None [] false)))
+             (assert (match (json-string-at wire "prompt_cache_key")
+                       (Some [value] (str-eq value "conversation-cache-key"))
+                       (None [] false)))
+             (assert-eq (json-array-length input) 4)
+             (assert (match (json-string-at (json-array-get input 1) "encrypted_content")
+                       (Some [value] (str-eq value "opaque"))
+                       (None [] false)))
+             (assert (match (json-string-at (json-array-get input 3) "type")
+                       (Some [value] (str-eq value "function_call_output"))
+                       (None [] false)))
+             (assert (match-else (json-array-get include 0)
+                                 (JsonString [value]
+                                             (str-eq value "reasoning.encrypted_content"))
+                                 (_ false)))
+             (assert (match (json-bool-value (json-get wire "stream"))
+                       (Some [enabled] enabled)
+                       (None [] false))))))
 
 (deftest codex-connection-closes-and-emits-one-terminal-failure
          (let [allocator (malloc-allocator)

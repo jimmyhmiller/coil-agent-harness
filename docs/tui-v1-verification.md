@@ -19,7 +19,6 @@ horizon.
 | Mutable footer | `src/tui/render_inline.coil` | symbolic terminal-operation tests and PTY tests |
 | Terminal capabilities and modes | `src/tui/terminal.coil` | profile tests, signal/suspend PTYs, compatibility matrix |
 | Composer | editor, decoder, layout, reader, and input renderer modules under `src/tui/` | editor/decoder/layout unit tests and input PTY |
-| Approval policy and input | `approval.coil`, `approval_input.coil` | default-deny unit tests and approval PTY |
 | Application coordination | `src/tui/app.coil` | compiled binary and end-to-end suite |
 | Assembly | `src/main.coil` | imports only the TUI application facade and terminal profile |
 
@@ -31,15 +30,14 @@ presentation state, layout, and frames contain no ANSI bytes or terminal coordin
 Recorded event fixtures cover:
 
 - a submitted user turn and multi-delta assistant response;
-- one authorized tool call;
+- one tool call;
 - parallel tools completing out of order;
 - delegation, workflow progress, and cancellation;
 - provider/run failure with a human-readable message.
 
-Model tests add duplicate replay, unknown future events, proposal data without an
-authorization event, child-agent completion, terminalization of open children, 2,000
-text deltas, and 256 parallel tool records. The adapter never retrieves tool arguments
-from authorization records or neighboring events.
+Model tests add duplicate replay, unknown future events, child-agent completion,
+terminalization of open children, 2,000 text deltas, and 256 parallel tool records.
+The adapter never retrieves tool arguments from neighboring events.
 
 The renderer tests prove that committed blocks write once, only the owned live rows
 are erased, semantic span boundaries survive planning, and clearing leaves no owned
@@ -50,14 +48,11 @@ CJK, emoji, malformed UTF-8, tabs, newlines, and terminal controls.
 
 `scripts/tui_pty_test.py` exercises editing, bracketed paste, resize, interruption,
 submission, ANSI styling, and final termios restoration. Separate PTYs cover SIGTERM
-and Ctrl-Z suspend/resume. `scripts/tui_approval_pty_test.py` checks allow, Escape
-rejection, pasted textual approval, prompt erasure, paste-mode cleanup, and termios
-restoration.
+and Ctrl-Z suspend/resume.
 
 During a run, the composer is unavailable. Escape and Ctrl-C request idempotent
 cancellation, Ctrl-Z restores modes before suspension, terminal closure exits the
-watch, and other input is ignored. Approval input defaults to rejection and owns a
-transient row beneath the semantic live footer.
+watch, and other input is ignored.
 
 ## Capability and accessibility coverage
 
@@ -85,7 +80,6 @@ compatible POSIX TTY.
 - Committed layout: batches of 128 blocks.
 - Streaming redraw cadence: one recovery/render cycle per 40 ms, with all available
   journal deltas reduced before rendering.
-- Approval paste: shared 1 MiB decoder limit.
 
 ## Release commands
 

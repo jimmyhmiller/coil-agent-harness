@@ -1,0 +1,178 @@
+;; Talking to a Claude Code session.
+;;
+;; Sending requires no registration and no writes anywhere: you need the
+;; target's socket path, and that is all. A one-shot process that publishes
+;; nothing can deliver into a live session's prompt queue, and a session that
+;; knows our address can reply to a listener we never advertised. Registration
+;; buys names and visibility; it buys nothing about who can talk to whom.
+;;
+;; The connection model is one message per connection: connect, write one line,
+;; close. There is no persistent channel to manage, no reconnect logic, and no
+;; ordering guarantee beyond what the receiver's own queue provides.
+(module harness-bus-cc-peer)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-system" :use *)
+(import "harness-bus-cc-address" :use *)
+(import "harness-bus-cc-discovery" :use *)
+(import "harness-bus-cc-realm" :use *)
+(import "harness-bus-cc-envelope" :use *)
+(import "harness-bus-cc-frame" :use *)
+
+(const CC_SEND_OK 0)
+(const CC_SEND_UNRESOLVED -1)
+(const CC_SEND_CONNECT_FAILED -2)
+(const CC_SEND_WRITE_FAILED -3)
+(const CC_SEND_TOO_LARGE -4)
+
+(defn cc-send-error-name [(code i64)] (-> (slice u8))
+  (cond (= code CC_SEND_OK) "delivered"
+        (= code CC_SEND_UNRESOLVED) "no such peer"
+        (= code CC_SEND_CONNECT_FAILED) "could not connect to the peer socket"
+        (= code CC_SEND_WRITE_FAILED) "the peer closed before the frame was written"
+        (= code CC_SEND_TOO_LARGE) "the frame exceeds the receiver's line limit"
+        :else "unknown send failure"))
+
+;; Wait before closing, because closing immediately after the write can deliver
+;; an RST that costs the peer the payload. The reference client does the same
+;; and for the same reason; this is a real observed behavior on macOS, not
+;; superstition. It is the one place a sender has to be patient.
+(const CC_LINGER_MS 150)
+
+;; What we assert about ourselves. `from-mode` is self-asserted and nothing
+;; verifies it, so the only honest value is the one describing how this process
+;; actually treats tool permissions.
+;;
+;; It matters which we send: a receiver in bypass mode HOLDS a message from a
+;; sender that attested nothing, but accepts one whose attested mode matches.
+;; Attesting nothing is treated more suspiciously than attesting a match, so a
+;; harness that stays silent here looks like the more dangerous peer.
+(defstruct CcIdentity
+  [;; Our reply address, or empty when we are not listening. Empty is legal:
+   ;; the message still lands, it just cannot be answered.
+   (address (slice u8))
+   (name (slice u8))
+   (mode (slice u8))])
+
+(defn cc-identity-init! [(identity (ptr CcIdentity))
+                         (address (slice u8))
+                         (name (slice u8))
+                         (mode (slice u8))] (-> i64)
+  (store! (field identity address) address)
+  (store! (field identity name) name)
+  (store! (field identity mode) (if (= (slice-len [u8] mode) 0) "bypass" mode))
+  0)
+
+;; Write every byte of `line`, or fail. A partial write is a truncated frame,
+;; which the receiver drops when the newline never arrives -- so reporting
+;; success on a short write would report a message that was never delivered.
+(defn write-all-bytes [(connection (ptr socket/UnixConnection))
+                       (line (slice u8))] (-> bool)
+  (let [length (slice-len [u8] line)
+        data (primitive/cast (ptr i8) (slice-data [u8] line))
+        (mut sent) 0
+        (mut ok) true]
+    (loop (if (or (>= (load sent) length) (not (load ok)))
+              (break)
+              (match (socket/unix-write connection
+                                        (primitive/index data (load sent))
+                                        (- length (load sent)))
+                (Err [failure] (store! ok false))
+                (Ok [n]
+                    (if (<= n 0)
+                        (store! ok false)
+                        (store! sent (+ (load sent) n)))))))
+    (and (load ok) (>= (load sent) length))))
+
+;; Deliver one already-serialized NDJSON line to a socket path.
+(defn cc-send-line [(allocator (ptr Allocator))
+                    (socket-path (slice u8))
+                    (line (slice u8))] (-> i64)
+  (if (= (slice-len [u8] line) 0)
+      CC_SEND_TOO_LARGE
+      (let [connection (alloc/stack socket/UnixConnection)]
+        (match (socket/unix-connect connection socket-path)
+          (Err [failure] CC_SEND_CONNECT_FAILED)
+          (Ok [_]
+              (let [written (write-all-bytes connection line)]
+                (when written
+                  (sleep-ms CC_LINGER_MS)
+                  0)
+                (socket/unix-connection-close! connection)
+                (if written CC_SEND_OK CC_SEND_WRITE_FAILED)))))))
+
+;; Send `body` to `target`, which may be a name, a pid, a session id, a name
+;; prefix, or a raw address.
+;;
+;; `session-id` is almost always empty. Pinning a session that does not match
+;; makes the receiver drop the frame silently, so it is opt-in: a wrong guess
+;; here is indistinguishable from the message never being sent.
+(defn cc-peer-send [(realm (ptr CcRealm))
+                    (allocator (ptr Allocator))
+                    (identity (ptr CcIdentity))
+                    (target (slice u8))
+                    (body (slice u8))
+                    (session-id (slice u8))] (-> i64)
+  (let [socket-path (cc-resolve realm allocator target)]
+    (if (= (slice-len [u8] socket-path) 0)
+        CC_SEND_UNRESOLVED
+        (let [content
+                (cc-envelope-wrap allocator
+                                  (load (field identity address))
+                                  (load (field identity name))
+                                  (load (field identity mode))
+                                  body)
+              frame
+                (cc-user-frame allocator
+                               (cc-new-message-id allocator)
+                               content
+                               (load (field identity address))
+                               "next"
+                               session-id)]
+          (cc-send-line allocator socket-path (cc-frame-line allocator frame))))))
+
+;; Ask a peer to display us under a different name. A courtesy, not a
+;; requirement: the roster is a name directory and nothing routes on it.
+(defn cc-peer-rename [(realm (ptr CcRealm))
+                      (allocator (ptr Allocator))
+                      (target (slice u8))
+                      (name (slice u8))] (-> i64)
+  (let [socket-path (cc-resolve realm allocator target)]
+    (if (= (slice-len [u8] socket-path) 0)
+        CC_SEND_UNRESOLVED
+        (cc-send-line allocator
+                      socket-path
+                      (cc-frame-line allocator
+                                     (cc-rename-frame allocator
+                                                      (cc-new-message-id allocator)
+                                                      name))))))
+
+;; Tell a sender what became of a message it sent us. Only accepted by the
+;; receiver when our `from` lives in the same socket directory as theirs, so
+;; `identity.address` must be a path we really bound.
+(defn cc-peer-report-status [(realm (ptr CcRealm))
+                             (allocator (ptr Allocator))
+                             (identity (ptr CcIdentity))
+                             (target (slice u8))
+                             (status (slice u8))
+                             (reason (slice u8))
+                             (original-id (slice u8))] (-> i64)
+  (let [socket-path (cc-resolve realm allocator target)]
+    (if (= (slice-len [u8] socket-path) 0)
+        CC_SEND_UNRESOLVED
+        (cc-send-line allocator
+                      socket-path
+                      (cc-frame-line allocator
+                                     (cc-status-frame allocator
+                                                      (cc-new-message-id allocator)
+                                                      status
+                                                      reason
+                                                      (load (field identity address))
+                                                      original-id))))))

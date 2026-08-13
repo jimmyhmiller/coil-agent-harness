@@ -6,6 +6,7 @@
 (import "coil.match" :use *)
 (import "coil.os" :as os)
 (import "coil.result" :use *)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "coil.thread" :use *)
 (import "codex-app-server" :use *)
@@ -15,12 +16,11 @@
 (import "deepseek-openai" :use *)
 (import "harness-agent-runner" :use *)
 (import "harness-allocation-domain" :use *)
-(import "harness-authorization-mailbox" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
-(import "harness-interactive-authorizer" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
+(import "harness-model-catalog" :use *)
 (import "harness-run-service" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
@@ -28,9 +28,11 @@
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 (import "tui-fixture-provider" :use *)
+(import "async-tool-provider" :use *)
 
 (defstruct ActiveRuntimeRun
   [(run-id (slice u8))
+   (command Json)
    (handle AgentRunHandle)
    (allocation-domain (ptr AllocationDomain))])
 
@@ -38,6 +40,10 @@
   [(command Json)
    (allocation-domain (ptr AllocationDomain))
    (workflow i64)])
+
+(defstruct PendingCancellation
+  [(command Json)
+   (allocation-domain (ptr AllocationDomain))])
 
 (defsum RuntimeDependencyState
   (RuntimeDependenciesReady [])
@@ -70,14 +76,11 @@
     (Err [failure] true)))
 
 (defn default-codex-strategy [(allocator (ptr Allocator))
-                              (cwd (slice u8))]
-                             (-> (ptr (dyn CodexExecutionStrategy)))
+                              (cwd (slice u8))] (-> (ptr (dyn CodexExecutionStrategy)))
   (if (default-codex-direct? allocator)
-      (let [context
-              (box allocator CodexDirectContext (codex-direct-context allocator))]
+      (let [context (box allocator CodexDirectContext (codex-direct-context allocator))]
         (box allocator (dyn CodexExecutionStrategy) context))
-      (let [context
-              (box allocator CodexAppServerContext (zeroed CodexAppServerContext))]
+      (let [context (box allocator CodexAppServerContext (zeroed CodexAppServerContext))]
         (codex-context-init-persistent! context allocator cwd)
         (box allocator (dyn CodexExecutionStrategy) context))))
 
@@ -160,6 +163,10 @@
                                                         (None [(dyn ModelProvider)]))))
                                             (None [] (None [(dyn ModelProvider)]))))
                                       (Err [failure] (None [(dyn ModelProvider)])))
+                                  (str-eq provider-name "async-tool")
+                                    (Some (box allocator
+                                               AsyncToolProvider
+                                               (zeroed AsyncToolProvider)))
                                   :else (None [(dyn ModelProvider)]))))
 
 (defstruct RuntimeRunController
@@ -167,42 +174,44 @@
    (registry (ptr ToolRegistry))
    (provider-factory (dyn RuntimeProviderFactory))
    (emitter (ptr EventEmitter))
-   (mailbox (ptr AuthorizationMailbox))
+   (journal (ptr EventJournal))
    (journal-path (slice u8))
    (runs (ArrayList ActiveRuntimeRun))
    (pending (ArrayList PendingRuntimeRun))
+   (cancellations (ArrayList PendingCancellation))
    (pending-next i64)
    (state-lock (ptr i64))
    (stopping (ptr i64))
    (scheduler Thread)
    (scheduler-started bool)
    (policy AgentRunPolicy)
-   (max-active-runs i64)
-   (authorization-timeout-ms i64)])
+   (max-active-runs i64)])
 
 (defn runtime-controller-new [(allocator (ptr Allocator))
                               (registry (ptr ToolRegistry))
                               (provider-factory (dyn RuntimeProviderFactory))
                               (emitter (ptr EventEmitter))
-                              (mailbox (ptr AuthorizationMailbox))
+                              (journal (ptr EventJournal))
                               (journal-path (slice u8))] (-> RuntimeRunController)
   (let [controller (alloc/stack RuntimeRunController)]
     (store! (field controller allocator) allocator)
     (store! (field controller registry) registry)
     (store! (field controller provider-factory) provider-factory)
     (store! (field controller emitter) emitter)
-    (store! (field controller mailbox) mailbox)
+    (store! (field controller journal) journal)
     (store! (field controller journal-path) journal-path)
     (store! (field controller runs) (al-new [ActiveRuntimeRun] allocator))
     (store! (field controller pending) (al-new [PendingRuntimeRun] allocator))
+    (store! (field controller cancellations) (al-new [PendingCancellation] allocator))
     (store! (field controller pending-next) 0)
     (store! (field controller state-lock) (box allocator i64 0))
     (store! (field controller stopping) (box allocator i64 0))
     (store! (field controller scheduler-started) false)
-    (store! (field (field controller policy) max-model-turns) 8)
+    ;; Runs continue until completion, cancellation, a provider failure, or an
+    ;; explicit deadline. Zero is the runner's unlimited-turn policy.
+    (store! (field (field controller policy) max-model-turns) 0)
     (store! (field (field controller policy) max-parallel-tools) 8)
     (store! (field controller max-active-runs) 32)
-    (store! (field controller authorization-timeout-ms) 300000)
     (load controller)))
 
 (defn runtime-controller-lock! [(controller (ptr RuntimeRunController))] (-> i64)
@@ -213,17 +222,38 @@
 (defn runtime-controller-unlock! [(controller (ptr RuntimeRunController))] (-> i64)
   (atomic-store (load (field controller state-lock)) 0))
 
-(defn runtime-command-timeout [(command Json)] (-> i64)
+;; Three unrelated things used to share one clamped number, and only one of them
+;; was ever a real failure mode.
+;;
+;;   transport timeout  a single HTTP request to the provider. A dead socket
+;;                      really can hang forever, so this one is always set.
+;;   tool deadline      one tool call. Already per-tool: see the `timeout-ms`
+;;                      on each ToolSpec (bash carries its own).
+;;   run deadline       the whole task. NOT a failure mode -- a task taking
+;;                      forty minutes is a task taking forty minutes.
+;;
+;; Deriving all three from one two-minute constant is why a long run looked like
+;; a broken filesystem: once the run clock expired the tool executor rejected
+;; every later call before running it, so a `read_text_file` that never touched
+;; the disk reported a deadline error, and `spawn_subagents` handed each child
+;; whatever scraps of the parent's clock remained.
+;;
+;; So the runtime no longer manufactures a run deadline. It is a policy the
+;; caller sets per command, and absent means unlimited.
+(const RUNTIME_TRANSPORT_TIMEOUT_MS 600000)
+
+;; Monotonic deadline for the run, or 0 for none. `timeout_ms` is honoured
+;; exactly as given -- no default, no ceiling. A caller that wants a bounded
+;; run asks for one; nothing else imposes it.
+(defn runtime-command-deadline [(command Json)] (-> i64)
   (let [value (json-number-i64 (json-get command "timeout_ms"))]
-    (cond (<= value 0) 120000
-          (> value 120000) 120000
-          :else value)))
+    (if (<= value 0) 0 (deadline-from-timeout value))))
 
 (defn runtime-command-instructions [(command Json)] (-> (slice u8))
   (let [value (command-string command "instructions")]
     (if (> (str-len value) 0)
         value
-        "Be concise. Use tools when they are required by the request.")))
+        "Be concise. Use tools when they are required by the request. When starting multiple independent asynchronous operations, emit all start calls together in one response with distinct run IDs, never retry a successful start, and register exactly one notify_async call containing the complete handle set.")))
 
 (defn runtime-model-request [(controller (ptr RuntimeRunController))
                              (command Json)
@@ -262,7 +292,13 @@
     (store! (field request tools) (load (field controller registry)))
     (store! (field request tool-choice) (ToolsAuto))
     (store! (field request parallel-tool-calls) true)
-    (store! (field request reasoning) (ReasoningMedium))
+    ;; The command carries the effort the caller picked. It was hardcoded to
+    ;; medium, which made the ladder unreachable from any client; an absent or
+    ;; unrecognised value still lands on medium, so an older command is
+    ;; unaffected. The cache key below already includes the effort name, so
+    ;; changing it correctly misses the provider prompt cache.
+    (store! (field request reasoning)
+            (effort-from-name (command-string command "effort")))
     (let [(mut cache) (json-object allocator)]
       (json-object-put! (mut cache) "version" (json-integer allocator 1))
       (json-put-string! (mut cache) "provider" (command-string command "provider"))
@@ -285,15 +321,16 @@
                                               "/"
                                               (concat-or-empty allocator
                                                                (load (field request model))
-                                                               (concat-or-empty
-                                                                 allocator
-                                                                 "/"
-                                                                 (command-string command
-                                                                                 "conversation_id"))))))
+                                                               (concat-or-empty allocator
+                                                                                "/"
+                                                                                (command-string command
+                                                                                                "conversation_id"))))))
     (store! (field request max-output-tokens) 4096)
-    (store! (field request timeout-ms) (runtime-command-timeout command))
-    (store! (field request deadline-monotonic-ms)
-            (deadline-from-timeout (load (field request timeout-ms))))
+    ;; The transport timeout bounds one HTTP request. It is deliberately not the
+    ;; run's deadline: when the run has none, `model-request-remaining-ms` falls
+    ;; back to this, and when it has one, the remaining run time wins.
+    (store! (field request timeout-ms) RUNTIME_TRANSPORT_TIMEOUT_MS)
+    (store! (field request deadline-monotonic-ms) (runtime-command-deadline command))
     (store! (field request cancellation) (cancellation-token-new allocator))
     (store! (field (field request continuation) present)
             (and (str-eq (load (field request cache-key))
@@ -309,13 +346,53 @@
             (cast (ptr (ArrayList ToolResult)) 0))
     request))
 
-(defn runtime-authorizer [(controller (ptr RuntimeRunController))
-                          (command Json)
-                          (request (ptr ModelRequest))
-                          (allocator (ptr Allocator))] (-> (ptr AllowAllAuthorizer))
-  ;; Permissions will return as an explicit policy layer. Until then, every
-  ;; registered tool is authorized immediately after schema validation.
-  (box allocator AllowAllAuthorizer (zeroed AllowAllAuthorizer)))
+(defn runtime-controller-notify-parent-locked! [(controller (ptr RuntimeRunController))
+                                                (child-command Json)
+                                                (status (slice u8))
+                                                (content (slice u8))] (-> i64)
+  (let [allocator (load (field controller allocator))
+        child-run-id (command-string child-command "run_id")
+        parent-run-id (command-string child-command "parent_run_id")
+        notification-run-id (concat-or-empty allocator "notification:" child-run-id)
+        (mut prompt) (sb-new allocator)
+        (mut command) (json-object allocator)]
+    (sb-push-str! (mut prompt)
+                  "A subagent completion message was delivered. Respond to the user in context; include or synthesize the result as appropriate, and do not ask them to poll.")
+    (json-object-put! (mut command) "version" (json-integer allocator 1))
+    (json-put-string! (mut command)
+                      "command_id"
+                      (concat-or-empty allocator "notify:" child-run-id))
+    (json-put-string! (mut command) "run_id" notification-run-id)
+    (json-put-string! (mut command) "provider" (command-string child-command "provider"))
+    (json-put-string! (mut command) "model" (command-string child-command "model"))
+    (json-put-string! (mut command)
+                      "conversation_id"
+                      (command-string child-command "parent_conversation_id"))
+    (json-put-string! (mut command) "notification_parent_run_id" parent-run-id)
+    (json-put-string! (mut command) "notification_child_run_id" child-run-id)
+    (json-put-string! (mut command) "actor" "agent-notification")
+    (json-put-string! (mut command) "prompt" (sb-finish! (mut prompt)))
+    ;; Do not race a completion continuation against the parent's current turn.
+    ;; The scheduler launches this internal workflow node only after the parent
+    ;; is terminal; conversation enrichment then sees the parent's final reply.
+    (json-put-string! (mut command)
+                      "workflow_id"
+                      (concat-or-empty allocator "notifications:" parent-run-id))
+    (json-object-put! (mut command) "workflow_version" (json-integer allocator 1))
+    (json-put-string! (mut command) "node_id" child-run-id)
+    (let [(mut dependencies) (json-array allocator)]
+      (json-array-push! (mut dependencies) (JsonString parent-run-id))
+      (json-object-put! (mut command) "depends_on" (load dependencies)))
+    (emit-event (load (field controller emitter))
+                (now-ms)
+                (RunCreated)
+                notification-run-id
+                notification-run-id
+                ""
+                (command-string child-command "provider")
+                (command-string child-command "model")
+                (load command))
+    (runtime-controller-enqueue-locked! controller (load command))))
 
 (defn runtime-controller-reap! [(controller (ptr RuntimeRunController))] (-> i64)
   (let [(mut i) 0]
@@ -331,7 +408,49 @@
                             (- (al-len [ActiveRuntimeRun]
                                        (load (field controller runs)))
                                1)]
-                      (agent-run-join (mut (field slot handle)))
+                      (let [result (agent-run-join (mut (field slot handle)))
+                            command (load (field slot command))
+                            parent-run-id (command-string command "parent_run_id")]
+                        (when (and (> (slice-len [u8] parent-run-id) 0)
+                                   (match (json-bool-value (json-get command "notify_parent"))
+                                     (Some [enabled] enabled)
+                                     (None [] false)))
+                          (let [(mut message) (json-object (load (field controller allocator)))]
+                            (json-object-put! (mut message)
+                                              "version"
+                                              (json-integer (load (field controller allocator)) 1))
+                            (json-put-string! (mut message) "kind" "subagent_completion")
+                            (json-put-string! (mut message) "from" (load (field slot run-id)))
+                            (json-put-string! (mut message) "to" parent-run-id)
+                            (match result
+                              (ModelOk [response]
+                                       (let [response-value response]
+                                         (json-put-string! (mut message) "status" "completed")
+                                         (json-put-string! (mut message)
+                                                           "content"
+                                                           (load (field response-value output-text)))))
+                              (ModelErr [failure]
+                                        (let [failure-value failure]
+                                          (json-put-string! (mut message) "status" "failed")
+                                          (json-put-string! (mut message)
+                                                            "content"
+                                                            (load (field failure-value message))))))
+                            (emit-event-for-agent (load (field controller emitter))
+                                                  (now-ms)
+                                                  (AgentMessageReceived)
+                                                  parent-run-id
+                                                  parent-run-id
+                                                  (load (field slot run-id))
+                                                  (load (field slot run-id))
+                                                  (command-string command "provider")
+                                                  (command-string command "model")
+                                                  (load message))
+                            (runtime-controller-notify-parent-locked! controller
+                                                                      command
+                                                                      (command-string (load message) "status")
+                                                                      (command-string (load message) "content"))
+                            0))
+                        0)
                       (allocation-domain-close! (load (field controller allocator))
                                                 (load (field slot allocation-domain)))
                       (when (!= (load i) last-index)
@@ -392,18 +511,17 @@
           -1
           (let [run-allocator (allocation-domain-allocator domain)
                 request (runtime-model-request controller command run-allocator)
-                authorizer (runtime-authorizer controller command request run-allocator)
                 handle
                   (run-agent-background run-allocator
                                         provider
                                         request
-                                        authorizer
                                         (load (field controller emitter))
                                         (load (field controller policy)))]
             (if (not (load (field handle spawned)))
                 -1
                 (let [active (alloc/stack ActiveRuntimeRun)]
                   (store! (field active run-id) (load (field request run-id)))
+                  (store! (field active command) command)
                   (store! (field active handle) handle)
                   (store! (field active allocation-domain) domain)
                   (al-push! [ActiveRuntimeRun]
@@ -419,21 +537,39 @@
         provider-name (command-string command "provider")]
     (if (not (allocation-domain-valid? domain))
         -1
-        (match (resolve-runtime-provider (load (field controller provider-factory))
-                                         allocator
-                                         provider-name)
-          (Some [provider]
-                (runtime-controller-start-provider-in-domain! controller
-                                                              command
-                                                              provider
-                                                              domain))
-          (None [] -1)))))
+        (let [(mut launch-command) (json-clone allocator command)]
+          (when (str-eq (command-string (load launch-command) "actor")
+                        "agent-notification")
+            (let [temporary (alloc/stack RunService)]
+              (store! (field temporary allocator) (load (field controller allocator)))
+              (store! (field temporary journal-path) (load (field controller journal-path)))
+              (store! (field temporary journal) (load (field controller journal)))
+              (store! (field temporary emitter) (load (field controller emitter)))
+              (store! (field temporary controller) controller)
+              (service-enrich-conversation! temporary (mut launch-command)))
+            0)
+          (match (resolve-runtime-provider (load (field controller provider-factory))
+                                           allocator
+                                           provider-name)
+            (Some [provider]
+                  (runtime-controller-start-provider-in-domain! controller
+                                                                (load launch-command)
+                                                                provider
+                                                                domain))
+            (None [] -1))))))
 
-(defn runtime-dependency-view-state [(view DurableRunView)] (-> RuntimeDependencyState)
+(defn runtime-dependency-view-state [(view DurableRunView)
+                                     (terminal-policy bool)] (-> RuntimeDependencyState)
   (match-else (load (field view status))
               (RunSucceeded [] (RuntimeDependenciesReady))
-              (RunErrored [] (RuntimeDependenciesFailed))
-              (RunCancelledStatus [] (RuntimeDependenciesFailed))
+              (RunErrored []
+                          (if terminal-policy
+                              (RuntimeDependenciesReady)
+                              (RuntimeDependenciesFailed)))
+              (RunCancelledStatus []
+                                  (if terminal-policy
+                                      (RuntimeDependenciesReady)
+                                      (RuntimeDependenciesFailed)))
               (_ (RuntimeDependenciesWaiting))))
 
 (defn runtime-command-dependency-state [(controller (ptr RuntimeRunController))
@@ -451,6 +587,7 @@
                         (event-journal-recover (allocation-domain-allocator domain)
                                                (load (field controller journal-path)))
                       (mut state) (RuntimeDependenciesReady)
+                      terminal-policy (str-eq (command-string command "dependency_policy") "terminal")
                       (mut i) 0
                       n (al-len [Json] (load items))]
                   (if (not (load (field recovery ok)))
@@ -462,7 +599,8 @@
                                               (JsonString [dependency-run-id]
                                                           (match (runtime-dependency-view-state (project-run (field recovery
                                                                                                                     events)
-                                                                                                             dependency-run-id))
+                                                                                                             dependency-run-id)
+                                                                                                terminal-policy)
                                                             (RuntimeDependenciesReady [] 0)
                                                             (RuntimeDependenciesWaiting []
                                                                                         (store! state
@@ -719,7 +857,6 @@
                              (load i))]
                 (agent-run-cancel! (field slot handle))
                 (store! i (+ (load i) 1)))))
-    (authorization-mailbox-notify! (load (field controller mailbox)))
     0))
 
 (defn runtime-controller-close-pending-locked! [(controller (ptr RuntimeRunController))] (-> i64)
@@ -758,7 +895,9 @@
                                0)
                         (store! done true)
                         0))
-                    (runtime-controller-drain-locked! controller))
+                    (do
+                      (runtime-controller-drain-cancellations-locked! controller)
+                      (runtime-controller-drain-locked! controller)))
                 (runtime-controller-unlock! controller)
                 (when (not (load done)) (sleep-ms 10) 0))))
     (cast (ptr i8) 0)))
@@ -792,9 +931,8 @@
               (runtime-controller-unlock! controller)
               result)))))
 
-(defn runtime-controller-cancel! [(controller (ptr RuntimeRunController))
-                                  (command Json)] (-> RunCancellationResult)
-  (runtime-controller-lock! controller)
+(defn runtime-controller-cancel-locked! [(controller (ptr RuntimeRunController))
+                                         (command Json)] (-> RunCancellationResult)
   (runtime-controller-reap! controller)
   (let [run-id (command-string command "run_id")
         (mut i) 0
@@ -823,7 +961,6 @@
                                     (store! result (RunCancellationFailed)))
                                   (do
                                     (agent-run-confirm-cancellation! (field slot handle))
-                                    (authorization-mailbox-notify! (load (field controller mailbox)))
                                     (store! result (RunCancellationAccepted))))
                             (= reserve-code 1) (store! result (RunCancellationAccepted))
                             :else (store! result (RunCancellationTerminalOrMissing)))
@@ -862,12 +999,50 @@
                       (runtime-controller-cancel-pending-locked! controller run-id)
                       (store! result (RunCancellationAccepted)))))))
         0))
-    (runtime-controller-unlock! controller)
     (load result)))
+
+(defn runtime-controller-cancel! [(controller (ptr RuntimeRunController))
+                                  (command Json)] (-> RunCancellationResult)
+  (runtime-controller-lock! controller)
+  (let [result (runtime-controller-cancel-locked! controller command)]
+    (runtime-controller-unlock! controller)
+    result))
+
+(defn runtime-controller-request-cancel! [(controller (ptr RuntimeRunController))
+                                          (command Json)] (-> i64)
+  (let [domain (allocation-domain-open (load (field controller allocator)))]
+    (if (not (allocation-domain-valid? domain))
+        -1
+        (let [pending (alloc/stack PendingCancellation)]
+          (store! (field pending command)
+                  (json-clone (allocation-domain-allocator domain) command))
+          (store! (field pending allocation-domain) domain)
+          (runtime-controller-lock! controller)
+          (al-push! [PendingCancellation]
+                    (mut (field controller cancellations))
+                    (load pending))
+          (runtime-controller-unlock! controller)
+          0))))
+
+(defn runtime-controller-drain-cancellations-locked! [(controller (ptr RuntimeRunController))] (-> i64)
+  (let [(mut i) 0
+        n (al-len [PendingCancellation] (load (field controller cancellations)))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [pending
+                      (al-get [PendingCancellation]
+                              (load (field controller cancellations))
+                              (load i))]
+                (runtime-controller-cancel-locked! controller
+                                                   (load (field pending command)))
+                (allocation-domain-close! (load (field controller allocator))
+                                          (load (field pending allocation-domain)))
+                (store! i (+ (load i) 1)))))
+    (al-clear! [PendingCancellation] (mut (field controller cancellations)))
+    0))
 
 (defn runtime-controller-join-all! [(controller (ptr RuntimeRunController))] (-> i64)
   (atomic-store (load (field controller stopping)) 1)
-  (authorization-mailbox-notify! (load (field controller mailbox)))
   (if (load (field controller scheduler-started))
       (cast i64 (thread-join (field controller scheduler)))
       (do
@@ -892,13 +1067,16 @@
   (prepare-durable-provider [(self (ptr RuntimeRunController))
                              (provider-name (slice u8))]
                             (-> i64)
-                            (prepare-runtime-provider
-                              (load (field self provider-factory))
-                              (load (field self allocator))
-                              provider-name))
+                            (prepare-runtime-provider (load (field self provider-factory))
+                                                      (load (field self allocator))
+                                                      provider-name))
   (start-durable-run [(self (ptr RuntimeRunController)) (command (ptr Json))]
                      (-> i64)
                      (runtime-controller-enqueue! self (load command)))
+  (request-cancel-durable-run [(self (ptr RuntimeRunController))
+                               (command (ptr Json))]
+                              (-> i64)
+                              (runtime-controller-request-cancel! self (load command)))
   (cancel-durable-run [(self (ptr RuntimeRunController))
                        (command (ptr Json))]
                       (-> RunCancellationResult)

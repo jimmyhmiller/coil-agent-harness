@@ -1,0 +1,11 @@
+error: mono: comptime-only code operation 52 reached mono (compiler bug)
+   --> /Users/jimmyhmiller/Documents/Code/projects/coil-agent-harness/tools/nesting_depth.coil:83:12
+   |
+83 |            (primitive/lint-param "harness.nesting-depth.maximum" "24"))
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: mono: comptime-only code operation 52 reached mono (compiler bug)
+   --> /Users/jimmyhmiller/Documents/Code/projects/coil-agent-harness/tools/nesting_depth.coil:83:12
+   |
+83 |            (primitive/lint-param "harness.nesting-depth.maximum" "24"))
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+error: project lint fixes did not produce a clean project — all changes reverted

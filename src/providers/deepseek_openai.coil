@@ -383,6 +383,7 @@
             (store! (field http-request headers) headers)
             (store! (field http-request body) body)
             (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+            (store! (field http-request cancellation) (load (field request cancellation)))
             (store! (field (field http-request chunks) context) (cast (ptr i8) 0))
             (store! (field (field http-request chunks) consume) (fnptr-of discard-http-chunk))
             (deepseek-openai-event emitter request (ModelRequestStarted) (JsonNull))
@@ -460,6 +461,7 @@
                   (json-stringify allocator
                                   (deepseek-openai-request-json allocator request)))
           (store! (field http-request timeout-ms) (model-request-remaining-ms request))
+          (store! (field http-request cancellation) (load (field request cancellation)))
           (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
           (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
           (deepseek-openai-event emitter request (ModelRequestStarted) (JsonNull))
@@ -499,7 +501,7 @@
   (provider-capabilities [(self (ptr DeepSeekOpenAIContext))]
                          (-> ProviderCapabilities)
                          (provider-capabilities-for "deepseek-openai"))
-  
+
   (execute-model [(self (ptr DeepSeekOpenAIContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))

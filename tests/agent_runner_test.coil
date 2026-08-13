@@ -126,7 +126,7 @@
   (provider-capabilities [(self (ptr FakeProviderState))]
                          (-> ProviderCapabilities)
                          (provider-capabilities-for "fake"))
-  
+
   (execute-model [(self (ptr FakeProviderState))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
@@ -160,7 +160,30 @@
                                (_ 0))
                    0)))
 
-(deftest background-run-executes-tools-and-continues-the-model
+(deftest successful-notification-registration-short-circuits-model-continuation
+         (let [allocator (malloc-allocator)
+               (mut calls) (al-new [ToolCall] allocator)
+               (mut results) (al-new [ToolResult] allocator)
+               call (alloc/stack ToolCall)
+               (mut arguments) (json-object allocator)
+               (mut result) (tool-result-empty "spawn-call" (ToolSucceeded))]
+           (json-object-put! (mut arguments) "notify_parent" (JsonBool false))
+           (store! (field call id) "spawn-call")
+           (store! (field call name) "notify_async")
+           (store! (field call arguments) (load arguments))
+           (store! (field call raw-arguments) "")
+           (al-push! [ToolCall] (mut calls) (load call))
+           (al-push! [ToolResult] (mut results) (load result))
+           (assert (async-delegation-batch? (mut calls) (mut results)))
+           (let [stored-call (al-elem [ToolCall] (mut calls) 0)
+                 (mut waiting) (load (field stored-call arguments))]
+             (json-object-put! (mut waiting) "notify_parent" (JsonBool true))
+             (store! (field stored-call arguments) (load waiting)))
+           (assert (async-delegation-batch? (mut calls) (mut results)))
+           (store! (field (al-elem [ToolResult] (mut results) 0) status) (ToolErrored))
+           (assert (not (async-delegation-batch? (mut calls) (mut results))))))
+
+(deftest unlimited-background-run-executes-tools-and-continues-the-model
          (let [allocator (malloc-allocator)
                calls (box allocator i64 0)
                observed (box allocator i64 0)
@@ -173,8 +196,7 @@
                request (box allocator ModelRequest (zeroed ModelRequest))
                sink (alloc/stack TerminalEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)
-               authorizer (alloc/stack AllowAllAuthorizer)]
+               policy (alloc/stack AgentRunPolicy)]
            (store! (field state calls) calls)
            (store! (field state observed-continuation) observed)
            (tool-register! registry (fake-definition allocator))
@@ -192,13 +214,13 @@
            (store! (field sink terminal-count) terminals)
            (store! (field emitter sink) (box allocator (dyn EventSink) sink))
            (store! (field emitter next-sequence) sequence)
-           (store! (field policy max-model-turns) 3)
+           ;; Zero is the production default: continue until the model finishes.
+           (store! (field policy max-model-turns) 0)
            (store! (field policy max-parallel-tools) 2)
            (let [(mut handle)
                    (run-agent-background allocator
                                          state
                                          request
-                                         authorizer
                                          emitter
                                          (load policy))
                  result (agent-run-join (mut handle))]
@@ -209,7 +231,9 @@
                              "model:model:1"))
              (assert (str-eq (load (field state second-operation-id))
                              "model:model:2"))
-             (assert-eq (atomic-load events) 10)
+             ;; run.started, proposed/started/completed for each of the two tool
+             ;; calls, and run.completed. No authorization step.
+             (assert-eq (atomic-load events) 8)
              (assert-eq (atomic-load terminals) 1)
              (assert (match result
                        (ModelOk [response]
@@ -226,7 +250,6 @@
                sequence (box allocator i64 1)
                sink (alloc/stack TerminalEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
-               authorizer (alloc/stack AllowAllAuthorizer)
                policy (alloc/stack AgentRunPolicy)]
            (store! (field provider delay-ms) 30)
            (store! (field request run-id) "cancel-test")
@@ -242,7 +265,6 @@
                    (run-agent-background allocator
                                          provider
                                          request
-                                         authorizer
                                          emitter
                                          (load policy))]
              (sleep-ms 5)
@@ -267,13 +289,15 @@
                sequence (box allocator i64 1)
                sink (alloc/stack TerminalEventSink)
                emitter (box allocator EventEmitter (zeroed EventEmitter))
-               authorizer (alloc/stack AllowAllAuthorizer)
                policy (alloc/stack AgentRunPolicy)]
            (store! (field provider delay-ms) 20)
            (store! (field request run-id) "deadline-test")
            (store! (field request operation-id) "model")
            (store! (field request model) "slow-model")
+           ;; A deadline has to be asked for now, so the test asks for one --
+           ;; the runner will not conjure a run budget out of `timeout-ms`.
            (store! (field request timeout-ms) 5)
+           (store! (field request deadline-monotonic-ms) (deadline-from-timeout 5))
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
            (store! emitter (event-emitter-new allocator sink sequence))
@@ -283,7 +307,6 @@
                    (run-agent allocator
                               provider
                               request
-                              authorizer
                               emitter
                               (load policy))]
              (assert (match result

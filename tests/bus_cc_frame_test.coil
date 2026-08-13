@@ -1,0 +1,173 @@
+;; Frame tests.
+;;
+;; The assertions that matter are the omissions: `session_id` absent unless
+;; pinned, and `from` absent when we have no reply address. Both are cases where
+;; sending the field is worse than not having it -- a mismatched session_id is
+;; dropped silently by the receiver, which looks exactly like a network problem.
+(module harness-bus-cc-frame-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.assert" :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-bus-cc-frame" :use *)
+
+(defn user-frame-json [(allocator (ptr Allocator))
+                       (from (slice u8))
+                       (session-id (slice u8))] (-> Json)
+  (cc-user-frame allocator "id-1" "hello" from "next" session-id))
+
+(deftest a-user-frame-has-the-shape-the-receiver-validates
+         (let [allocator (malloc-allocator)
+               frame (user-frame-json allocator "uds:/tmp/x.sock" "")]
+           (assert (str-eq (json-stringify allocator frame)
+                           "{\"msgV\":1,\"msg_id\":\"id-1\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"priority\":\"next\",\"from\":\"uds:/tmp/x.sock\"}"))))
+
+;; A present-but-wrong session_id is dropped without a trace, so it must be
+;; absent unless the caller is deliberately pinning a session.
+(deftest a-user-frame-omits-session-id-unless-pinned
+         (let [allocator (malloc-allocator)]
+           (assert (not (json-object-has? (user-frame-json allocator "uds:/tmp/x.sock" "")
+                                          "session_id")))
+           (assert (json-object-has? (user-frame-json allocator "uds:/tmp/x.sock" "sess-9")
+                                     "session_id"))))
+
+;; A sender that never listens is legal: it can deliver, it just cannot be
+;; replied to. Emitting an empty `from` would advertise an unopenable address.
+(deftest a-user-frame-omits-an-absent-reply-address
+         (let [allocator (malloc-allocator)]
+           (assert (not (json-object-has? (user-frame-json allocator "" "") "from")))))
+
+(deftest priority-defaults-to-next
+         (let [allocator (malloc-allocator)
+               frame (cc-user-frame allocator "id-1" "hi" "" "" "")]
+           (match (json-string-at frame "priority")
+             (None [] (assert false))
+             (Some [value] (assert (str-eq value "next"))))))
+
+(deftest a-rename-frame-carries-the-new-name
+         (let [allocator (malloc-allocator)
+               frame (cc-rename-frame allocator "id-2" "harness")]
+           (assert (str-eq (json-stringify allocator frame)
+                           "{\"msgV\":1,\"msg_id\":\"id-2\",\"type\":\"control\",\"action\":\"rename\",\"name\":\"harness\"}"))))
+
+(deftest a-status-frame-names-the-message-it-answers
+         (let [allocator (malloc-allocator)
+               frame (cc-status-frame allocator "id-3" "held" "" "uds:/tmp/x.sock" "id-1")]
+           (assert (str-eq (json-stringify allocator frame)
+                           "{\"msgV\":1,\"msg_id\":\"id-3\",\"type\":\"control\",\"action\":\"peer_message_status\",\"status\":\"held\",\"from\":\"uds:/tmp/x.sock\",\"orig_msg_id\":\"id-1\"}"))))
+
+(deftest a-frame-line-is-one-json-object-with-a-trailing-newline
+         (let [allocator (malloc-allocator)
+               line (cc-frame-line allocator (cc-rename-frame allocator "id-2" "n"))
+               n (slice-len [u8] line)]
+           (assert (> n 0))
+           (assert (= (cast i64 (slice-get [u8] line (- n 1))) 10))
+           ;; Exactly one newline: a frame is a line, and an embedded one would
+           ;; split it into two malformed frames.
+           (let [(mut newlines) 0
+                 (mut i) 0]
+             (loop (if (>= (load i) n)
+                       (break)
+                       (do
+                         (when (= (cast i64 (slice-get [u8] line (load i))) 10)
+                           (store! newlines (+ (load newlines) 1))
+                           0)
+                         (store! i (+ (load i) 1)))))
+             (assert (= (load newlines) 1)))))
+
+;; A body containing a newline must be escaped by the JSON encoder rather than
+;; splitting the frame.
+(deftest a-newline-in-the-content-does-not-split-the-frame
+         (let [allocator (malloc-allocator)
+               frame (cc-user-frame allocator "id-1" "one\ntwo" "" "next" "")
+               line (cc-frame-line allocator frame)
+               n (slice-len [u8] line)
+               (mut newlines) 0
+               (mut i) 0]
+           (loop (if (>= (load i) n)
+                     (break)
+                     (do
+                       (when (= (cast i64 (slice-get [u8] line (load i))) 10)
+                         (store! newlines (+ (load newlines) 1))
+                         0)
+                       (store! i (+ (load i) 1)))))
+           (assert (= (load newlines) 1))))
+
+(deftest a-user-frame-parses-back
+         (let [allocator (malloc-allocator)
+               parsed (alloc/stack CcFrame)
+               line
+                 (cc-frame-line allocator
+                                (cc-user-frame allocator "id-1" "hello" "uds:/tmp/x.sock" "next" ""))]
+           (assert (cc-frame-parse allocator line parsed))
+           (assert (str-eq (load (field parsed message-id)) "id-1"))
+           (assert (str-eq (load (field parsed content)) "hello"))
+           (assert (str-eq (load (field parsed from)) "uds:/tmp/x.sock"))
+           (assert (str-eq (load (field parsed priority)) "next"))))
+
+(deftest a-control-frame-parses-back
+         (let [allocator (malloc-allocator)
+               parsed (alloc/stack CcFrame)
+               line
+                 (cc-frame-line allocator
+                                (cc-status-frame allocator "id-3" "held" "" "uds:/tmp/x.sock" "id-1"))]
+           (assert (cc-frame-parse allocator line parsed))
+           (assert (str-eq (load (field parsed action)) "peer_message_status"))
+           (assert (str-eq (load (field parsed status)) "held"))
+           (assert (str-eq (load (field parsed original-id)) "id-1"))))
+
+;; The minimal injection from the protocol's own debug log -- no msgV, no
+;; msg_id, no from. It must work, because that is what a shell one-liner sends.
+(deftest the-minimal-documented-injection-parses
+         (let [allocator (malloc-allocator)
+               parsed (alloc/stack CcFrame)]
+           (assert (cc-frame-parse allocator
+                                   "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}"
+                                   parsed))
+           (assert (str-eq (load (field parsed content)) "hello"))))
+
+;; An unrecognized type is a future frame kind, not a protocol error: dropping
+;; the connection over one would make us fail against a newer Claude Code.
+(deftest an-unknown-frame-type-is-accepted-and-ignored
+         (let [allocator (malloc-allocator)
+               parsed (alloc/stack CcFrame)]
+           (assert (cc-frame-parse allocator "{\"type\":\"future-thing\"}" parsed))
+           (match (load (field parsed kind))
+             (CcUnknownFrame [] (assert true))
+             (CcUserFrame [] (assert false))
+             (CcControlFrame [] (assert false)))))
+
+(deftest malformed-input-is-rejected-rather-than-guessed
+         (let [allocator (malloc-allocator)
+               parsed (alloc/stack CcFrame)]
+           (assert (not (cc-frame-parse allocator "not json" parsed)))
+           (assert (not (cc-frame-parse allocator "" parsed)))
+           ;; No type: nothing to dispatch on.
+           (assert (not (cc-frame-parse allocator "{\"msgV\":1}" parsed)))
+           ;; A user frame with no content is ignored by the receiver too.
+           (assert (not (cc-frame-parse allocator "{\"type\":\"user\"}" parsed)))))
+
+(deftest a-message-id-is-a-version-4-uuid
+         (let [allocator (malloc-allocator)
+               id (cc-new-message-id allocator)]
+           (assert (= (slice-len [u8] id) 36))
+           (assert (= (cast i64 (slice-get [u8] id 8)) 45))
+           (assert (= (cast i64 (slice-get [u8] id 13)) 45))
+           (assert (= (cast i64 (slice-get [u8] id 18)) 45))
+           (assert (= (cast i64 (slice-get [u8] id 23)) 45))
+           ;; Version nibble, then the RFC 4122 variant.
+           (assert (= (cast i64 (slice-get [u8] id 14)) 52))
+           (let [variant (cast i64 (slice-get [u8] id 19))]
+             (assert (or (or (= variant 56) (= variant 57))
+                         (or (= variant 97) (= variant 98)))))))
+
+;; Two ids minted back to back must differ, or a receipt could be matched to the
+;; wrong outstanding message.
+(deftest message-ids-do-not-repeat
+         (let [allocator (malloc-allocator)]
+           (assert (not (str-eq (cc-new-message-id allocator)
+                                (cc-new-message-id allocator))))))

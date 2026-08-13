@@ -7,9 +7,7 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
-(import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
-(import "harness-interactive-authorizer" :use *)
 (import "harness-model-router" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
@@ -23,6 +21,9 @@
 (deftrait RunController [Self]
   (prepare-durable-provider [(self (ptr Self)) (provider-name (slice u8))] (-> i64))
   (start-durable-run [(self (ptr Self)) (command (ptr Json))] (-> i64))
+  ;; Enqueue control-plane cancellation without journal I/O on the caller's
+  ;; input path. The controller remains responsible for durable-first ordering.
+  (request-cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> i64))
   (cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> RunCancellationResult)))
 
 (defstruct RunService
@@ -30,7 +31,6 @@
    (journal-path (slice u8))
    (journal (ptr EventJournal))
    (emitter (ptr EventEmitter))
-   (mailbox (ptr AuthorizationMailbox))
    (controller (dyn RunController))])
 
 (defstruct ServiceResponse [(status i64) (body Json)])
@@ -58,6 +58,12 @@
   (let [command-ref (alloc/stack Json)]
     (store! command-ref command)
     (cancel-durable-run (load (field service controller)) command-ref)))
+
+(defn service-request-cancel-durable-run [(service (ptr RunService))
+                                          (command Json)] (-> i64)
+  (let [command-ref (alloc/stack Json)]
+    (store! command-ref command)
+    (request-cancel-durable-run (load (field service controller)) command-ref)))
 
 (defn service-response [(status i64) (body Json)] (-> ServiceResponse)
   (let [response (alloc/stack ServiceResponse)]
@@ -163,16 +169,21 @@
           (let [(mut valid) true
                 (mut i) 0
                 n (al-len [Json] (load items))
-                run-id (command-string command "run_id")]
+                run-id (command-string command "run_id")
+                external
+                  (match (json-bool-value (json-get command "allow_external_dependencies"))
+                    (Some [enabled] enabled)
+                    (None [] false))]
             (loop (if (or (>= (load i) n) (not (load valid)))
                       (break)
                       (do
                         (match-else (al-get [Json] (load items) (load i))
                                     (JsonString [dependency]
                                                 (if (or (str-eq dependency run-id)
-                                                        (not (workflow-event-run-id events
-                                                                                    dependency
-                                                                                    workflow-id)))
+                                                        (and (not external)
+                                                             (not (workflow-event-run-id events
+                                                                                         dependency
+                                                                                         workflow-id))))
                                                     (store! valid false)
                                                     0))
                                     (_ (store! valid false)))
@@ -363,6 +374,25 @@
                                             (break))
                                           (store! slot (+ (load slot) 1)))))
                               (when (>= (load matched) 0)
+                                ;; Child completions are addressed agent messages,
+                                ;; not tool polling results. Preserve them in the
+                                ;; conversation as user-role input so any resumed
+                                ;; parent turn receives the child identity, status,
+                                ;; and output in chronological order.
+                                (when (str-eq kind "agent.message.received")
+                                  (let [(mut item) (json-object allocator)
+                                        (mut content) (sb-new allocator)]
+                                    (sb-push-str! (mut content) "<subagent-completion from=\"")
+                                    (sb-push-str! (mut content) (command-string payload "from"))
+                                    (sb-push-str! (mut content) "\" status=\"")
+                                    (sb-push-str! (mut content) (command-string payload "status"))
+                                    (sb-push-str! (mut content) "\">\n")
+                                    (sb-push-str! (mut content) (command-string payload "content"))
+                                    (sb-push-str! (mut content) "\n</subagent-completion>")
+                                    (json-put-string! (mut item) "role" "user")
+                                    (json-put-string! (mut item) "content" (sb-finish! (mut content)))
+                                    (json-array-push! (mut messages) (load item)))
+                                  0)
                                 (when (str-eq kind "model.response.delta")
                                   (match-else payload
                                               (JsonString [text]
@@ -517,6 +547,20 @@
                                   (json-put-string! (mut command)
                                                     "routing_profile"
                                                     (command-string parent "routing_profile"))
+                                  ;; Delegation inherits routing, never conversational
+                                  ;; identity. A child is a clean-slate agent whose
+                                  ;; conversation persists independently of its parent
+                                  ;; and siblings. Retain the parent's identity only as
+                                  ;; an explicit address for completion notification.
+                                  (json-put-string! (mut command)
+                                                    "parent_conversation_id"
+                                                    (command-string parent "conversation_id"))
+                                  (json-put-string! (mut command)
+                                                    "conversation_id"
+                                                    (concat-or-empty allocator
+                                                                     "agent:"
+                                                                     (command-string (load command)
+                                                                                     "run_id")))
                                   (store! found true)
                                   (break)))))))
                 0))))))
@@ -828,138 +872,6 @@
                                                   (field recovery events)
                                                   intervention-state))))))))
 
-(defn service-authorization-response [(service (ptr RunService))
-                                      (run-id (slice u8))
-                                      (authorization-id (slice u8))
-                                      (status i64)] (-> ServiceResponse)
-  (let [allocator (load (field service allocator))
-        recovery (service-recover-into service allocator)
-        decision
-          (authorization-decision (field recovery events)
-                                  run-id
-                                  authorization-id)
-        (mut body) (json-object allocator)]
-    (json-object-put! (mut body) "version" (json-integer allocator 1))
-    (json-put-string! (mut body) "run_id" run-id)
-    (json-put-string! (mut body) "authorization_id" authorization-id)
-    (match decision
-      (AuthorizationPending [] (json-put-string! (mut body) "decision" "pending"))
-      (AuthorizationAllowed [] (json-put-string! (mut body) "decision" "allow"))
-      (AuthorizationRejected [reason]
-                             (do
-                               (json-put-string! (mut body) "decision" "reject")
-                               (json-put-string! (mut body) "reason" reason))))
-    (service-response status (load body))))
-
-(defn authorization-command-valid? [(command Json)] (-> bool)
-  (and (command-envelope-valid? command)
-       (and (> (slice-len [u8] (command-string command "authorization_id")) 0)
-            (match (json-string-at command "decision")
-              (Some [value] (or (str-eq value "allow") (str-eq value "reject")))
-              (None [] false)))))
-
-(defn service-commit-authorization-decision [(service (ptr RunService))
-                                             (command Json)] (-> ServiceResponse)
-  (let [allocator (load (field service allocator))
-        mailbox (load (field service mailbox))
-        run-id (command-string command "run_id")
-        authorization-id (command-string command "authorization_id")
-        (mut response) (service-error allocator 500 "journal_recovery_failed" "authorization journal unavailable")
-        (mut decided) false]
-    (authorization-mailbox-lock! mailbox)
-    (let [recovery (service-recover-into service allocator)]
-      (if (not (load (field recovery ok)))
-          (store! response
-                  (service-error allocator
-                                 500
-                                 "journal_recovery_failed"
-                                 (load (field recovery error))))
-          (match (authorization-decision (field recovery events)
-                                         run-id
-                                         authorization-id)
-            (AuthorizationAllowed []
-                                  (store! response
-                                          (service-error allocator
-                                                         409
-                                                         "authorization_decided"
-                                                         "authorization already has a decision")))
-            (AuthorizationRejected [reason]
-                                   (store! response
-                                           (service-error allocator
-                                                          409
-                                                          "authorization_decided"
-                                                          "authorization already has a decision")))
-            (AuthorizationPending []
-                                  (if (< (emit-event (load (field service emitter))
-                                                     (now-ms)
-                                                     (AuthorizationDecided)
-                                                     run-id
-                                                     authorization-id
-                                                     ""
-                                                     "service"
-                                                     ""
-                                                     command)
-                                         0)
-                                      (store! response
-                                              (service-error allocator
-                                                             500
-                                                             "journal_write_failed"
-                                                             "authorization decision was not durable"))
-                                      (do
-                                        (store! decided true)
-                                        (store! response
-                                                (service-authorization-response service
-                                                                                run-id
-                                                                                authorization-id
-                                                                                202)))))))
-      (authorization-mailbox-unlock! mailbox)
-      (when (load decided) (authorization-mailbox-notify! mailbox) 0)
-      (load response))))
-
-(defn service-decide-authorization [(service (ptr RunService))
-                                    (command Json)] (-> ServiceResponse)
-  (let [allocator (load (field service allocator))]
-    (if (not (authorization-command-valid? command))
-        (service-error allocator
-                       400
-                       "invalid_command"
-                       "expected an allow or reject authorization command")
-        (let [recovery (service-recover-into service allocator)
-              command-id (command-string command "command_id")
-              run-id (command-string command "run_id")
-              authorization-id (command-string command "authorization_id")]
-          (if (not (load (field recovery ok)))
-              (service-error allocator
-                             500
-                             "journal_recovery_failed"
-                             (load (field recovery error)))
-              (if (> (journal-command-sequence (field recovery events) command-id) 0)
-                  (service-authorization-response service run-id authorization-id 200)
-                  (if (= (authorization-request-sequence (field recovery events)
-                                                         run-id
-                                                         authorization-id)
-                         0)
-                      (service-error allocator
-                                     404
-                                     "authorization_not_found"
-                                     "authorization request does not exist")
-                      (match (authorization-decision (field recovery events)
-                                                     run-id
-                                                     authorization-id)
-                        (AuthorizationAllowed []
-                                              (service-error allocator
-                                                             409
-                                                             "authorization_decided"
-                                                             "authorization already has a decision"))
-                        (AuthorizationRejected [reason]
-                                               (service-error allocator
-                                                              409
-                                                              "authorization_decided"
-                                                              "authorization already has a decision"))
-                        (AuthorizationPending []
-                                              (service-commit-authorization-decision service
-                                                                                     command))))))))))
-
 (defn run-created-before? [(events (ref (ArrayList Json)))
                            (before i64)
                            (run-id (slice u8))] (-> bool)
@@ -1084,24 +996,6 @@
               ""))
     (None [] "")))
 
-(defn service-authorization-marker [(rest (slice u8))] (-> i64)
-  (match (str-find rest "/authorizations/")
-    (Some [position] position)
-    (None [] -1)))
-
-(defn service-authorization-run-id [(rest (slice u8))] (-> (slice u8))
-  (let [marker (service-authorization-marker rest)]
-    (if (> marker 0) (subslice [u8] rest 0 marker) "")))
-
-(defn service-authorization-id [(rest (slice u8))] (-> (slice u8))
-  (let [marker (service-authorization-marker rest)]
-    (if (> marker 0)
-        (let [start (+ marker 16)]
-          (if (< start (slice-len [u8] rest))
-              (subslice [u8] rest start (slice-len [u8] rest))
-              ""))
-        "")))
-
 ;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
 ;; request into this value and serialize the returned status/body.
 (defn service-handle-http [(service (ptr RunService))
@@ -1132,9 +1026,7 @@
                   cancel-run-id (service-cancel-run-id rest)
                   events-run-id (service-events-run-id rest)
                   assessment-run-id (service-suffixed-run-id rest "/assessments")
-                  intervention-run-id (service-suffixed-run-id rest "/interventions")
-                  authorization-run-id (service-authorization-run-id rest)
-                  authorization-id (service-authorization-id rest)]
+                  intervention-run-id (service-suffixed-run-id rest "/interventions")]
               (cond (and (str-eq method "POST")
                          (> (slice-len [u8] assessment-run-id) 0))
                       (if (not can-control)
@@ -1161,30 +1053,6 @@
                                                    intervention-run-id))
                                       (service-error allocator 409 "run_id_mismatch" "path and command run IDs differ")
                                       (service-request-intervention service (load command)))))))
-                    (and (str-eq method "POST")
-                         (> (slice-len [u8] authorization-run-id) 0)
-                         (> (slice-len [u8] authorization-id) 0))
-                      (if (not can-control)
-                          (service-forbidden allocator)
-                          (let [parsed
-                                  (service-parse-command service
-                                                         (load (field request body)))]
-                            (if (not (load (field parsed ok)))
-                                (service-error allocator
-                                               400
-                                               "invalid_json"
-                                               "request body is not valid JSON")
-                                (let [(mut command) (load (field parsed value))]
-                                  (service-command-actor! (mut command) principal)
-                                  (if (or (not (str-eq (command-string (load command) "run_id")
-                                                       authorization-run-id))
-                                          (not (str-eq (command-string (load command) "authorization_id")
-                                                       authorization-id)))
-                                      (service-error allocator
-                                                     409
-                                                     "authorization_id_mismatch"
-                                                     "path and command authorization IDs differ")
-                                      (service-decide-authorization service (load command)))))))
                     (and (str-eq method "POST")
                          (> (slice-len [u8] cancel-run-id) 0))
                       (if (not can-control)

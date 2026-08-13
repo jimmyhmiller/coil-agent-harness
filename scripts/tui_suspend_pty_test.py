@@ -97,22 +97,29 @@ def main() -> int:
             process.kill()
             process.wait()
             fail("resume did not restore interactive input", bytes(output))
+        # Ctrl-C no longer echoes "^C" and no longer ends the read: with text on
+        # the line it discards the line, shell-style, and stays in the composer.
+        # Assert that contract rather than the old echo, and assert the composer
+        # is still live afterwards by typing again.
         os.write(master, b"\x03")
         deadline = time.monotonic() + 5.0
-        while b"^C" not in output and time.monotonic() < deadline:
+        while b"draft" in output.split(b"\x1b[2K")[-1] and time.monotonic() < deadline:
             read_available(master, output)
-        if b"^C" not in output:
+        if b"^C" in output:
             process.kill()
             process.wait()
-            fail("interrupt after resume did not return to the prompt", bytes(output))
+            fail("interrupt echoed a literal ^C into the transcript", bytes(output))
+        os.write(master, b"z")
         deadline = time.monotonic() + 5.0
-        while output.count(b"\x1b[?2004h") < 3 and time.monotonic() < deadline:
+        while b"z" not in output.split(b"\x1b[2K")[-1] and time.monotonic() < deadline:
             read_available(master, output)
-        if output.count(b"\x1b[?2004h") < 3:
+        if b"z" not in output.split(b"\x1b[2K")[-1]:
             process.kill()
             process.wait()
-            fail("new prompt after interrupt did not enter raw mode", bytes(output))
-        os.write(master, b"/quit\r")
+            fail("composer stopped accepting input after interrupt", bytes(output))
+        # Ctrl-U clears the probe character; without it /quit would be typed
+        # onto the end of it and submitted to the model instead.
+        os.write(master, b"\x15/quit\r")
         deadline = time.monotonic() + 5.0
         while process.poll() is None and time.monotonic() < deadline:
             read_available(master, output)

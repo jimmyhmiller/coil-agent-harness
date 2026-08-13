@@ -7,7 +7,6 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
-(import "harness-authorization-mailbox" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
 (import "provider-common" :use *)
@@ -21,6 +20,9 @@
                      (do
                        (store! (field self starts) (+ (load (field self starts)) 1))
                        0))
+  (request-cancel-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
+                              (-> i64)
+                              0)
   (cancel-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                       (-> RunCancellationResult)
                       (do
@@ -67,13 +69,12 @@
                          (body (slice u8))] (-> ServiceResponse)
   (http-service-call-as service method target body "test-operator" true true))
 
-(deftest persists-idempotent-create-cancel-and-cursor-queries
+(deftest subagents-have-private-clean-slate-conversations
          (let [allocator (malloc-allocator)
-               path "/tmp/coil-agent-harness-run-service.jsonl"
+               path "/tmp/coil-agent-harness-private-subagent-conversations.jsonl"
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
-               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack FakeRunController)
                service (alloc/stack RunService)]
            (fs/write-file allocator path "")
@@ -81,22 +82,94 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
-           (match (authorization-mailbox-open allocator)
-             (AuthorizationMailboxOpenFailed [message] (assert false))
-             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! (field controller starts) 0)
            (store! (field controller cancels) 0)
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
-           (store! (field service mailbox) mailbox)
+           (store! (field service controller) controller)
+           (let [(mut parent) (run-command allocator "parent-create" "parent")]
+             (json-put-string! (mut parent) "conversation_id" "parent-conversation")
+             (json-put-string! (mut parent) "prompt" "Use three subagents")
+             (let [response (service-submit-run service (mut parent) "test")]
+               (assert-eq (load (field response status)) 202)))
+           (let [(mut child-a) (run-command allocator "child-a-create" "child-a")
+                 (mut child-b) (run-command allocator "child-b-create" "child-b")]
+             (json-put-string! (mut child-a) "parent_run_id" "parent")
+             (json-put-string! (mut child-a) "prompt" "Write poem A")
+             (json-put-string! (mut child-b) "parent_run_id" "parent")
+             (json-put-string! (mut child-b) "prompt" "Write poem B")
+             (let [response-a (service-submit-run service (mut child-a) "agent:parent")
+                   response-b (service-submit-run service (mut child-b) "agent:parent")]
+               (assert-eq (load (field response-a status)) 202)
+               (assert-eq (load (field response-b status)) 202)))
+           (let [(mut grandchild) (run-command allocator "grandchild-create" "grandchild")]
+             (json-put-string! (mut grandchild) "parent_run_id" "child-a")
+             (json-put-string! (mut grandchild) "prompt" "Write one line")
+             (let [response (service-submit-run service (mut grandchild) "agent:child-a")]
+               (assert-eq (load (field response status)) 202)))
+           (let [recovery (event-journal-recover allocator path)
+                 events (field recovery events)
+                 (mut child-a-payload) (JsonNull)
+                 (mut child-b-payload) (JsonNull)
+                 (mut grandchild-payload) (JsonNull)
+                 (mut i) 0]
+             (loop (if (>= (load i) (al-len [Json] (load events)))
+                       (break)
+                       (let [event (al-get [Json] (load events) (load i))]
+                         (when (str-eq (command-string event "event") "run.created")
+                           (cond (str-eq (command-string event "run_id") "child-a")
+                                   (store! child-a-payload (json-get event "payload"))
+                                 (str-eq (command-string event "run_id") "child-b")
+                                   (store! child-b-payload (json-get event "payload"))
+                                 (str-eq (command-string event "run_id") "grandchild")
+                                   (store! grandchild-payload (json-get event "payload"))
+                                 :else 0)
+                           0)
+                         (store! i (+ (load i) 1)))))
+             (assert (str-eq (command-string (load child-a-payload) "conversation_id")
+                             "agent:child-a"))
+             (assert (str-eq (command-string (load child-b-payload) "conversation_id")
+                             "agent:child-b"))
+             (assert (str-eq (command-string (load grandchild-payload) "conversation_id")
+                             "agent:grandchild"))
+             (assert (str-eq (command-string (load grandchild-payload)
+                                             "parent_conversation_id")
+                             "agent:child-a"))
+             (assert-eq (json-array-length (json-get (load child-a-payload) "messages")) 1)
+             (assert-eq (json-array-length (json-get (load child-b-payload) "messages")) 1)
+             (assert-eq (json-array-length (json-get (load grandchild-payload) "messages")) 1)
+             (assert (str-eq (command-string (json-array-get (json-get (load grandchild-payload) "messages") 0)
+                                             "content")
+                             "Write one line")))
+           (event-journal-close! journal)))
+
+(deftest persists-idempotent-create-cancel-and-cursor-queries
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-run-service.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field controller cancels) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
            (store! (field service controller) controller)
            (let [created
                    (http-service-call service
                                       "POST"
                                       "/v1/runs"
-                                      "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\",\"actor\":\"spoofed-client\"}")
+                                      "{\"version\":1,\"command_id\":\"create-1\",\"run_id\":\"run-1\",\"conversation_id\":\"root-conversation\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\",\"actor\":\"spoofed-client\"}")
                  duplicate
                    (http-service-call service
                                       "POST"
@@ -198,6 +271,16 @@
              (assert (str-eq (command-string payload "parent_agent_id") "run-1"))
              (assert (str-eq (command-string payload "provider") "fake"))
              (assert (str-eq (command-string payload "model") "fake-model"))
+             (assert (str-eq (command-string payload "conversation_id")
+                             "agent:child-agent"))
+             (assert (str-eq (command-string payload "parent_conversation_id")
+                             "root-conversation"))
+             ;; A new subagent is a clean slate: its request contains only the
+             ;; delegation, never the parent's instruction or sibling history.
+             (let [messages (json-get payload "messages")]
+               (assert-eq (json-array-length messages) 1)
+               (assert (str-eq (command-string (json-array-get messages 0) "content")
+                               "research this")))
              (assert (str-eq (command-string message "kind") "delegation"))
              (assert (str-eq (command-string message "from") "run-1"))
              (assert (str-eq (command-string message "to") "child-agent"))
@@ -297,7 +380,6 @@
              (assert (load saw-assessment))
              (assert (load saw-intervention))
              (assert-eq (load intervention-requests) 1))
-           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 
 (deftest http-boundary-rejects-invalid-json-and-run-id-mismatch
@@ -306,7 +388,6 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
-               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack FakeRunController)
                service (alloc/stack RunService)]
            (fs/write-file allocator path "")
@@ -314,14 +395,10 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
-           (match (authorization-mailbox-open allocator)
-             (AuthorizationMailboxOpenFailed [message] (assert false))
-             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
-           (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (let [invalid (http-service-call service "POST" "/v1/runs" "{")
                  dependency-without-workflow
@@ -337,7 +414,6 @@
              (assert-eq (load (field invalid status)) 400)
              (assert-eq (load (field dependency-without-workflow status)) 400)
              (assert-eq (load (field mismatch status)) 409))
-           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))
 
 (deftest restart-launches-only-queued-work-and-terminalizes-in-flight-work
@@ -346,7 +422,6 @@
                journal (alloc/stack EventJournal)
                sequence (box allocator i64 1)
                emitter (alloc/stack EventEmitter)
-               mailbox (alloc/stack AuthorizationMailbox)
                controller (alloc/stack FakeRunController)
                service (alloc/stack RunService)]
            (fs/write-file allocator path "")
@@ -354,16 +429,12 @@
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
-           (match (authorization-mailbox-open allocator)
-             (AuthorizationMailboxOpenFailed [message] (assert false))
-             (AuthorizationMailboxOpened [opened] (store! mailbox opened)))
            (store! (field controller starts) 0)
            (store! (field controller cancels) 0)
            (store! (field service allocator) allocator)
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
-           (store! (field service mailbox) mailbox)
            (store! (field service controller) controller)
            (emit-event emitter
                        1
@@ -420,5 +491,4 @@
              (assert (match (json-string-at (load (field cancelling body)) "status")
                        (Some [value] (str-eq value "cancelled"))
                        (None [] false))))
-           (authorization-mailbox-close! allocator mailbox)
            (event-journal-close! journal)))

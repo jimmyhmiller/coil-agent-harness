@@ -39,7 +39,8 @@
   0)
 
 (impl EventSink TeeEventSink
-  (publish-event [(self (ptr TeeEventSink)) (event (ptr Event))] (-> i64)
+  (publish-event [(self (ptr TeeEventSink)) (event (ptr Event))]
+                 (-> i64)
                  (let [durable-code (publish-event (load (load (field self durable))) event)]
                    (if (!= durable-code 0)
                        ;; The durable write failed, so there is nothing worth

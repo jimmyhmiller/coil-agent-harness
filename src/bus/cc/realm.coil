@@ -1,0 +1,168 @@
+;; Which peer namespace we are part of.
+;;
+;; The mechanism in this directory -- a socket per participant, liveness by
+;; probe, a registry of names layered over the directory, an envelope that
+;; survives a prompt-text channel -- is worth having whether or not Claude Code
+;; is on the other end. A realm is what separates the design from the company:
+;; the same code, pointed at a different pair of directories.
+;;
+;; Two kinds:
+;;
+;;   claude-code   the shared namespace. We appear to Claude Code sessions and
+;;                 they appear to us. This is interop, and it is opt-in-shaped
+;;                 even though it is the default, because it is the only realm
+;;                 where another vendor's processes can see ours.
+;;
+;;   anything else a private namespace with its own directories. Same protocol,
+;;                 same envelope, same discovery -- and no contact with Claude
+;;                 Code in either direction.
+;;
+;; Isolation is by directory, not by dialect. That is deliberate and it is the
+;; whole reason this is cheap: a Claude Code session enumerates its own socket
+;; directory and never looks in ours, so a private realm is invisible to it
+;; without needing a single byte of the wire format to differ. Changing the
+;; envelope tag as well would buy nothing -- nobody would be reading it -- and
+;; would cost us the one property worth the most here, which is that the
+;; conformance-tested renderer is the same renderer in both realms.
+;;
+;; The private socket directory is named `harness-socks-<realm>`, never
+;; `cc-socks`, so pointing two realms at the same base directory still keeps
+;; them apart. There is no configuration that silently merges them.
+(module harness-bus-cc-realm)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-bus-cc-address" :use *)
+
+(const CC_REALM_CLAUDE_CODE "claude-code")
+
+;; The realm used when nothing says otherwise. Interop is the default because
+;; it is what the harness was built to do first and what is verified against a
+;; live session; a private realm is one flag away.
+(const CC_REALM_DEFAULT CC_REALM_CLAUDE_CODE)
+
+(defstruct CcRealm
+  [(name (slice u8))
+   (socket-dir (slice u8))
+   (sessions-dir (slice u8))
+   ;; Our own socket in this realm, when we have one. For the claude-code realm
+   ;; this is the parent session's socket, which Claude Code exports to its
+   ;; children; for a private realm it is whatever we bound, and empty until we
+   ;; bind something.
+   (self-socket (slice u8))
+   ;; True only for the shared namespace. Callers that need to say "this may
+   ;; reach another vendor's processes" test this rather than comparing names.
+   (interop bool)])
+
+;; ---------------------------------------------------------------------------
+;; Resolution
+;; ---------------------------------------------------------------------------
+
+;; Where a private realm keeps its sockets. Under the temp directory rather than
+;; the config directory for the same reason Claude Code does it: `sockaddr_un`
+;; caps a socket path at 104 bytes on the BSD layout macOS inherits, and a path
+;; under a home directory plus a realm name can exceed that. A short base keeps
+;; the length fallback in `cc-socket-path` from ever being needed.
+(defn cc-realm-socket-base [(allocator (ptr Allocator))] (-> (slice u8))
+  (cc-env-or allocator
+             "XDG_RUNTIME_DIR"
+             (cc-env-or allocator "TMPDIR" "/tmp")))
+
+(defn cc-realm-config-root [(allocator (ptr Allocator))] (-> (slice u8))
+  (cc-env-or allocator
+             "HARNESS_CONFIG_DIR"
+             (path-join allocator
+                        (cc-env-or allocator "HOME" "/tmp")
+                        ".coil-agent-harness")))
+
+(defn cc-realm-private-socket-dir [(allocator (ptr Allocator))
+                                   (name (slice u8))] (-> (slice u8))
+  (let [(mut leaf) (sb-new allocator)]
+    (sb-push-str! (mut leaf) "harness-socks-")
+    (sb-push-str! (mut leaf) name)
+    (path-join allocator (cc-realm-socket-base allocator) (sb-str (load leaf)))))
+
+(defn cc-realm-private-sessions-dir [(allocator (ptr Allocator))
+                                     (name (slice u8))] (-> (slice u8))
+  (path-join allocator
+             (path-join allocator
+                        (path-join allocator (cc-realm-config-root allocator) "bus")
+                        name)
+             "sessions"))
+
+;; The realm named by the environment, or the default.
+(defn cc-realm-configured-name [(allocator (ptr Allocator))] (-> (slice u8))
+  (let [configured (cc-env-or allocator "HARNESS_BUS_REALM" "")]
+    (if (= (slice-len [u8] configured) 0) CC_REALM_DEFAULT configured)))
+
+;; Populate `realm` for `name`.
+;;
+;; An empty name means "whatever the environment says", so a caller with no
+;; opinion and a caller that was given `--realm` go through one path.
+(defn cc-realm-init! [(realm (ptr CcRealm))
+                      (allocator (ptr Allocator))
+                      (name (slice u8))] (-> i64)
+  (let [chosen
+          (if (= (slice-len [u8] name) 0)
+              (cc-realm-configured-name allocator)
+              name)]
+    (store! (field realm name) chosen)
+    (if (str-eq chosen CC_REALM_CLAUDE_CODE)
+        (do
+          (store! (field realm socket-dir) (cc-socket-dir allocator))
+          (store! (field realm sessions-dir) (cc-claude-sessions-dir allocator))
+          ;; Claude Code exports this to its child processes. It is the only way
+          ;; a child can recognize its own parent in the directory: the pid it
+          ;; would compare against is the session's, not its own.
+          (store! (field realm self-socket)
+                  (cc-env-or allocator "CLAUDE_CODE_MESSAGING_SOCKET" ""))
+          (store! (field realm interop) true)
+          0)
+        (do
+          (store! (field realm socket-dir)
+                  (cc-realm-private-socket-dir allocator chosen))
+          (store! (field realm sessions-dir)
+                  (cc-realm-private-sessions-dir allocator chosen))
+          ;; Nothing to inherit: a private realm has no ambient parent, so self
+          ;; is empty until this process binds a socket of its own.
+          (store! (field realm self-socket)
+                  (cc-env-or allocator "HARNESS_BUS_SOCKET" ""))
+          (store! (field realm interop) false)
+          0))))
+
+;; Claude Code's registry. `CLAUDE_CONFIG_DIR` relocates it, but every
+;; participant must agree on the same value, so it is not an escape from writing
+;; the file -- only from writing it under the home directory.
+(defn cc-claude-sessions-dir [(allocator (ptr Allocator))] (-> (slice u8))
+  (let [configured (cc-env-or allocator "CLAUDE_CONFIG_DIR" "")]
+    (if (> (slice-len [u8] configured) 0)
+        (path-join allocator configured "sessions")
+        (path-join allocator
+                   (path-join allocator (cc-env-or allocator "HOME" "/tmp") ".claude")
+                   "sessions"))))
+
+;; The socket path a participant with this pid would bind in this realm.
+(defn cc-realm-socket-path [(realm (ptr CcRealm))
+                            (allocator (ptr Allocator))
+                            (pid i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (cc-push-decimal! (mut buffer) pid)
+    (sb-push-str! (mut buffer) ".sock")
+    (path-join allocator (load (field realm socket-dir)) (sb-str (load buffer)))))
+
+;; Create the realm's directories. Private realms own theirs, so this is how one
+;; comes into existence; for the claude-code realm the directories already exist
+;; and this is a no-op in practice.
+;;
+;; 0700 throughout: a unix socket path's permissions are the whole access
+;; boundary, and a world-listable registry would advertise every session on the
+;; machine to any local process.
+(defn cc-realm-ensure-directories! [(realm (ptr CcRealm))
+                                    (allocator (ptr Allocator))] (-> i64)
+  (directory-create-all allocator (load (field realm socket-dir)) 448)
+  (directory-create-all allocator (load (field realm sessions-dir)) 448)
+  0)

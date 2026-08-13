@@ -25,11 +25,13 @@
   0)
 
 (impl Transport ChunkedTransport
-  (transport-read [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+  (transport-read [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)]
+                  (-> i64)
                   (let [available (- (load (field self written)) (load (field self cursor)))
-                        bounded (if (< length (load (field self chunk)))
-                                    length
-                                    (load (field self chunk)))
+                        bounded
+                          (if (< length (load (field self chunk)))
+                              length
+                              (load (field self chunk)))
                         n (if (< available bounded) available bounded)
                         source (primitive/cast (ptr u8) (field self bytes))
                         destination (primitive/cast (ptr u8) buffer)
@@ -44,7 +46,8 @@
                                 (store! i (+ (load i) 1)))))
                     (store! (field self cursor) (+ (load (field self cursor)) n))
                     n))
-  (transport-write [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)] (-> i64)
+  (transport-write [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)]
+                   (-> i64)
                    (let [destination (primitive/cast (ptr u8) (field self bytes))
                          source (primitive/cast (ptr u8) buffer)
                          (mut i) 0]
