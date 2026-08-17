@@ -12,8 +12,7 @@
          (let [allocator (malloc-allocator)
                view (terminal-view (view-flow (RolePrimary) "❯ " "  " "ab界🙂cdef"))
                (mut laid-out) (view-layout allocator view 10)]
-           (assert (str-eq (render-frame-plain allocator (mut (field laid-out frame)))
-                           "❯ ab界🙂cd\n  ef\n"))))
+           (assert (= (render-frame-plain allocator (mut (field laid-out frame))) "❯ ab界🙂cd\n  ef\n"))))
 
 (deftest declarative-flow-layout-sanitizes-terminal-controls
          (let [allocator (malloc-allocator)
@@ -30,8 +29,7 @@
            (let [text (slice-new [u8] (index bytes 0) 9)
                  view (terminal-view (view-flow (RolePrimary) "" "" text))
                  (mut laid-out) (view-layout allocator view 40)]
-             (assert (str-eq (render-frame-plain allocator (mut (field laid-out frame)))
-                             "safe\\x1B[31m\n")))))
+             (assert (= (render-frame-plain allocator (mut (field laid-out frame))) "safe\\x1B[31m\n")))))
 
 (deftest declarative-tail-bounds-a-complete-child-layout
          (let [allocator (malloc-allocator)
@@ -42,6 +40,6 @@
            (view-stack-push! (mut rows) (view-flow (RolePrimary) "" "" "four"))
            (let [view (terminal-view (view-tail allocator 2 (load rows)))
                  (mut laid-out) (view-layout allocator view 40)]
-             (assert (str-eq (render-frame-plain allocator
-                                                 (mut (field laid-out frame)))
-                             "  … earlier live output\nfour\n")))))
+             (assert (= (render-frame-plain allocator
+                                            (mut (field laid-out frame)))
+                        "  … earlier live output\nfour\n")))))

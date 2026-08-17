@@ -25,9 +25,9 @@
                                      (not (str-eq data "done")))
                              (store! (load (field self valid)) 0)
                              0))
-                       (store! (load (field self count)) (+ position 1))
-                       (or (< (load (field self reject-after)) 0)
-                           (< position (load (field self reject-after)))))))
+                       (set! (load (field self count)) (+ position 1))
+                       (or (< (.reject-after self) 0)
+                           (< position (.reject-after self))))))
 
 (deftest decodes-frames-across-arbitrary-chunk-boundaries
          (let [allocator (malloc-allocator)

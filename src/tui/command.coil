@@ -37,26 +37,26 @@
                     (summary (slice u8))
                     (argument CommandArgument)] (-> CommandSpec)
   (let [spec (alloc/stack CommandSpec)]
-    (store! (field spec name) name)
-    (store! (field spec summary) summary)
-    (store! (field spec argument) argument)
+    (set! (.name spec) name)
+    (set! (.summary spec) summary)
+    (set! (.argument spec) argument)
     (load spec)))
 
 (defn command-registry-new [(allocator (ptr Allocator))] (-> CommandRegistry)
   (let [registry (alloc/stack CommandRegistry)]
-    (store! (field registry commands) (al-new [CommandSpec] allocator))
+    (set! (.commands registry) (al-new [CommandSpec] allocator))
     (load registry)))
 
 (defn command-register! [(registry (ptr CommandRegistry))
                          (spec CommandSpec)] (-> i64)
-  (al-push! [CommandSpec] (mut (field registry commands)) spec)
+  (al-push! [CommandSpec] (mut (.commands registry)) spec)
   0)
 
 (defn command-count [(registry (ptr CommandRegistry))] (-> i64)
-  (al-len [CommandSpec] (load (field registry commands))))
+  (al-len [CommandSpec] (.commands registry)))
 
 (defn command-at [(registry (ptr CommandRegistry)) (at i64)] (-> (ptr CommandSpec))
-  (al-elem [CommandSpec] (mut (field registry commands)) at))
+  (al-elem [CommandSpec] (mut (.commands registry)) at))
 
 ;; Registration order is display order: the list a user reads in `/help` and the
 ;; list they arrow through in the menu are the same list in the same order.
@@ -111,7 +111,7 @@
                                 (slice-get [u8] prefix (load i)))
                         (store! same false)
                         0)
-                      (store! i (+ (load i) 1)))))
+                      (set! i (+ (load i) 1)))))
           (load same)))))
 
 (defn command-exact [(registry (ptr CommandRegistry)) (name (slice u8))] (-> i64)
@@ -121,16 +121,16 @@
     (loop (if (or (>= (load i) n) (>= (load found) 0))
               (break)
               (do
-                (when (str-eq (load (field (command-at registry (load i)) name)) name)
+                (when (= (load (field (command-at registry (load i)) name)) name)
                   (store! found (load i))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 ;; `/exit` is accepted but not listed: it is a synonym nobody needs to be taught,
 ;; and putting it in the menu would show two rows that do the same thing.
 (defn command-known? [(registry (ptr CommandRegistry)) (name (slice u8))] (-> bool)
-  (or (>= (command-exact registry name) 0) (str-eq name "/exit")))
+  (or (>= (command-exact registry name) 0) (= name "/exit")))
 
 ;; Indices of every command whose name starts with `prefix`, in registration order.
 (defn command-matches [(allocator (ptr Allocator))
@@ -146,7 +146,7 @@
                                        prefix)
                   (al-push! [i64] (mut out) (load i))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load out)))
 
 ;; The longest prefix shared by every match, which is what Tab should extend to
@@ -158,15 +158,14 @@
   (let [count (al-len [i64] (load matches))]
     (if (= count 0)
         ""
-        (let [first-name (load (field (command-at registry (al-get [i64] (load matches) 0)) name))
+        (let [first-name (.name (command-at registry (al-get [i64] (load matches) 0)))
               (mut end) (slice-len [u8] first-name)
               (mut at) 1]
           (loop (if (>= (load at) count)
                     (break)
                     (let [name
-                            (load (field (command-at registry
-                                                     (al-get [i64] (load matches) (load at)))
-                                         name))
+                            (.name (command-at registry
+                                               (al-get [i64] (load matches) (load at))))
                           limit
                             (if (< (slice-len [u8] name) (load end))
                                 (slice-len [u8] name)
@@ -176,8 +175,8 @@
                                 (break)
                                 (if (= (slice-get [u8] first-name (load i))
                                        (slice-get [u8] name (load i)))
-                                    (store! i (+ (load i) 1))
+                                    (set! i (+ (load i) 1))
                                     (break))))
-                      (store! end (load i))
-                      (store! at (+ (load at) 1)))))
+                      (set! end (load i))
+                      (set! at (+ (load at) 1)))))
           (subslice [u8] first-name 0 (load end))))))

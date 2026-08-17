@@ -15,7 +15,7 @@
     (loop (if (or (>= (load i) n) (>= (load found) 0))
               (break)
               (let [span (al-elem [FrameSpan] spans (load i))]
-                (when (str-eq (load (field span text)) needle)
+                (when (= (load (field span text)) needle)
                   (store! found
                           (match (load (field span role))
                             (RolePrimary [] 0)
@@ -28,7 +28,7 @@
                             (RoleCodeComment [] 7)
                             (RoleCodeNumber [] 8)))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 ;; Concatenating every span must reproduce the input byte for byte. A highlighter
@@ -42,8 +42,8 @@
               (break)
               (do
                 (let [span (al-elem [FrameSpan] spans (load i))]
-                  (sb-push-str! (mut out) (load (field span text))))
-                (store! i (+ (load i) 1)))))
+                  (sb-push-str! (mut out) (.text span)))
+                (set! i (+ (load i) 1)))))
     (sb-finish! (mut out))))
 
 (deftest classifies-keywords-strings-numbers-and-comments
@@ -65,7 +65,7 @@
                line "  if (x >= 3) { return \"a b\"; } // trailing"]
            (store! language (syntax-language "c"))
            (let [(mut spans) (syntax-highlight-line allocator language line)]
-             (assert (str-eq (spans-text allocator (mut spans)) line)))))
+             (assert (= (spans-text allocator (mut spans)) line)))))
 
 (deftest a-keyword-substring-is-not-a-keyword
          (let [allocator (malloc-allocator)
@@ -83,7 +83,7 @@
            (store! language (syntax-language "python"))
            (let [(mut spans) (syntax-highlight-line allocator language line)]
              (assert-eq (role-of (mut spans) "\"still typ") 6)
-             (assert (str-eq (spans-text allocator (mut spans)) line)))))
+             (assert (= (spans-text allocator (mut spans)) line)))))
 
 (deftest an-escaped-quote-does-not-close-the-string
          (let [allocator (malloc-allocator)
@@ -91,7 +91,7 @@
                line "a = \"x\\\"y\" + b"]
            (store! language (syntax-language "python"))
            (let [(mut spans) (syntax-highlight-line allocator language line)]
-             (assert (str-eq (spans-text allocator (mut spans)) line))
+             (assert (= (spans-text allocator (mut spans)) line))
              (assert-eq (role-of (mut spans) "b") 0))))
 
 (deftest comment-syntax-follows-the-language
@@ -112,7 +112,7 @@
                line "if thing return 7"]
            (store! language (syntax-language "brainfuck"))
            (let [(mut spans) (syntax-highlight-line allocator language line)]
-             (assert (str-eq (spans-text allocator (mut spans)) line))
+             (assert (= (spans-text allocator (mut spans)) line))
              (assert-eq (role-of (mut spans) "if") 5)
              (assert-eq (role-of (mut spans) "thing") 0))))
 

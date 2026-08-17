@@ -69,7 +69,7 @@
                                                 (sb-push-str! (mut output) "paste-on;"))
                   (TerminalDisableBracketedPaste []
                                                  (sb-push-str! (mut output) "paste-off;")))
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     (sb-finish! (mut output))))
 
 (deftest rewrites-only-the-owned-live-region-and-commits-once
@@ -83,8 +83,8 @@
                    (inline-renderer-plan! (mut renderer)
                                           (mut empty)
                                           (mut first-live))]
-             (assert (str-eq (inline-test-trace allocator (mut first))
-                             "nl;up:1;role:primary;write:thinking;reset;nl;role:warning;write:tool;reset;")))
+             (assert (= (inline-test-trace allocator (mut first))
+                        "nl;up:1;role:primary;write:thinking;reset;nl;role:warning;write:tool;reset;")))
            (let [(mut committed) (frame-new allocator)
                  (mut second-live) (frame-new allocator)]
              (frame-push-line! (mut committed) "answer" 6 (RoleSuccess))
@@ -93,8 +93,8 @@
                      (inline-renderer-plan! (mut renderer)
                                             (mut committed)
                                             (mut second-live))]
-               (assert (str-eq (inline-test-trace allocator (mut second))
-                               "up:1;cr;erase;down:1;cr;erase;up:1;role:success;write:answer;reset;nl;role:warning;write:running;reset;"))
+               (assert (= (inline-test-trace allocator (mut second))
+                          "up:1;cr;erase;down:1;cr;erase;up:1;role:success;write:answer;reset;nl;role:warning;write:running;reset;"))
                (assert (= (load (field renderer previous-live-height)) 1))))))
 
 (deftest clearing-the-final-live-frame-leaves-no-owned-rows
@@ -106,8 +106,7 @@
            (let [(mut ignored) (inline-renderer-plan! (mut renderer) (mut empty) (mut live))]
              0)
            (let [(mut final) (inline-renderer-plan! (mut renderer) (mut empty) (mut empty))]
-             (assert (str-eq (inline-test-trace allocator (mut final))
-                             "cr;erase;"))
+             (assert (= (inline-test-trace allocator (mut final)) "cr;erase;"))
              (assert (= (load (field renderer previous-live-height)) 0)))))
 
 (deftest repeated-single-row-stream-updates-never-emit-a-line-break
@@ -129,12 +128,12 @@
                          (loop (if (>= (load at) count)
                                    (break)
                                    (do
-                                     (match-else (al-get [TerminalOperation]
-                                                         (load operations)
-                                                         (load at))
-                                                 (TerminalLineBreak []
-                                                                    (store! breaks (+ (load breaks) 1)))
-                                                 (_ 0))
+                                     (match (al-get [TerminalOperation]
+                                                    (load operations)
+                                                    (load at))
+                                            (TerminalLineBreak []
+                                                               (store! breaks (+ (load breaks) 1)))
+                                            (_ 0))
                                      (store! at (+ (load at) 1)))))
                          (assert (= (load breaks) 0)))
                        (store! update (+ (load update) 1)))))))
@@ -159,5 +158,5 @@
                    (inline-renderer-plan! (mut renderer)
                                           (mut committed)
                                           (mut live))]
-             (assert (str-eq (inline-test-trace allocator (mut operations))
-                             "role:muted;write:  tool: ;role:primary;write:bash;role:success;write:  done;reset;nl;")))))
+             (assert (= (inline-test-trace allocator (mut operations))
+                        "role:muted;write:  tool: ;role:primary;write:bash;role:success;write:  done;reset;nl;")))))

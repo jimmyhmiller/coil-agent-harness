@@ -21,19 +21,17 @@
 
 (defn presentation-payload-text [(allocator (ptr Allocator))
                                  (payload Json)] (-> (slice u8))
-  (match-else payload
-              (JsonString [text] text)
-              (_ (json-stringify allocator payload))))
+  (match payload (JsonString [text] text) (_ (json-stringify allocator payload))))
 
 (defn presentation-error-text [(payload Json)
                                (fallback (slice u8))] (-> (slice u8))
-  (match-else payload
-              (JsonString [text] text)
-              (_ (let [message (presentation-json-string payload "message")
-                       error (presentation-json-string payload "error")]
-                   (cond (> (slice-len [u8] message) 0) message
-                         (> (slice-len [u8] error) 0) error
-                         :else fallback)))))
+  (match payload
+         (JsonString [text] text)
+         (_ (let [message (presentation-json-string payload "message")
+                  error (presentation-json-string payload "error")]
+              (cond (> (slice-len [u8] message) 0) message
+                    (> (slice-len [u8] error) 0) error
+                    :else fallback)))))
 
 (defn presentation-event-action [(allocator (ptr Allocator))
                                  (event Json)] (-> PresentationAction)
@@ -41,36 +39,35 @@
         run-id (presentation-json-string event "run_id")
         operation-id (presentation-event-id event run-id)
         payload (json-get event "payload")]
-    (cond (str-eq kind "run.created")
-            (if (str-eq (presentation-json-string payload "actor") "agent-notification")
+    (cond (= kind "run.created")
+            (if (= (presentation-json-string payload "actor") "agent-notification")
                 (IgnoreEvent)
                 (SubmitUser run-id (presentation-json-string payload "prompt")))
-          (str-eq kind "model.request.started") (StartAssistant operation-id)
-          (str-eq kind "model.response.delta")
-            (match-else payload
-                        (JsonString [text] (AppendAssistant operation-id text))
-                        (_ (IgnoreEvent)))
-          (str-eq kind "model.request.completed") (FinishAssistant operation-id)
-          (str-eq kind "model.request.failed")
+          (= kind "model.request.started") (StartAssistant operation-id)
+          (= kind "model.response.delta")
+            (match payload (JsonString [text] (AppendAssistant operation-id text)) (_ (IgnoreEvent)))
+          (= kind "model.request.completed") (FinishAssistant operation-id)
+          (= kind "model.request.failed")
             (FailAssistant operation-id
                            (presentation-error-text payload "Model request failed."))
-          (str-eq kind "tool.call.proposed")
-            (ProposeTool operation-id
+          (= kind "tool.call.proposed")
+            (ProposeTool :id
+                         operation-id
+                         :name
                          (presentation-json-string payload "name")
+                         :arguments
                          (json-get payload "arguments"))
-          (str-eq kind "tool.call.started")
-            (match-else payload
-                        (JsonString [name] (StartTool operation-id name))
-                        (_ (StartTool operation-id "tool")))
-          (str-eq kind "tool.call.completed") (FinishTool operation-id payload)
-          (str-eq kind "tool.call.failed") (FailTool operation-id (presentation-payload-text allocator payload))
-          (str-eq kind "tool.call.rejected") (RejectTool operation-id (presentation-payload-text allocator payload))
-          (str-eq kind "agent.delegated")
+          (= kind "tool.call.started")
+            (match payload (JsonString [name] (StartTool operation-id name)) (_ (StartTool operation-id "tool")))
+          (= kind "tool.call.completed") (FinishTool operation-id payload)
+          (= kind "tool.call.failed") (FailTool operation-id (presentation-payload-text allocator payload))
+          (= kind "tool.call.rejected") (RejectTool operation-id (presentation-payload-text allocator payload))
+          (= kind "agent.delegated")
             (DelegateAgent (presentation-event-id event
                                                   (presentation-json-string event "agent_id")))
-          (str-eq kind "workflow.node.ready") (ReadyWorkflowNode operation-id)
-          (str-eq kind "run.failed") (FailRun run-id (presentation-error-text payload "Run failed."))
-          (str-eq kind "run.cancelled") (CancelRun run-id)
+          (= kind "workflow.node.ready") (ReadyWorkflowNode operation-id)
+          (= kind "run.failed") (FailRun run-id (presentation-error-text payload "Run failed."))
+          (= kind "run.cancelled") (CancelRun run-id)
           :else (IgnoreEvent))))
 
 (defn presentation-event-action-for-model [(model (ptr PresentationModel))
@@ -79,9 +76,9 @@
         run-id (presentation-json-string event "run_id")
         payload (json-get event "payload")]
     (if (>= (presentation-block-index model run-id (AgentBlock)) 0)
-        (cond (str-eq kind "run.completed") (FinishAgent run-id)
-              (str-eq kind "run.failed") (FailAgent run-id (presentation-error-text payload "Subagent failed."))
-              (str-eq kind "run.cancelled") (CancelAgent run-id)
+        (cond (= kind "run.completed") (FinishAgent run-id)
+              (= kind "run.failed") (FailAgent run-id (presentation-error-text payload "Subagent failed."))
+              (= kind "run.cancelled") (CancelAgent run-id)
               :else (IgnoreEvent))
         (presentation-event-action (load (field model allocator)) event))))
 
@@ -90,10 +87,10 @@
 (defn presentation-apply-event! [(model (ptr PresentationModel))
                                  (event Json)] (-> bool)
   (let [sequence (json-number-i64 (json-get event "sequence"))]
-    (if (<= sequence (load (field model last-sequence)))
+    (if (<= sequence (.last-sequence model))
         false
         (do
           (presentation-apply-action! model
                                       (presentation-event-action-for-model model event))
-          (store! (field model last-sequence) sequence)
+          (set! (.last-sequence model) sequence)
           true))))

@@ -1,6 +1,6 @@
 (module harness-event)
 
-(import "coil.alloc" :as alloc)
+(import "coil.alloc" :as alloc :use [unwrap-ptr create])
 (import "coil.atomic" :use *)
 (import "harness-json" :use *)
 
@@ -89,8 +89,8 @@
                          (next-sequence (ptr i64))] (-> EventEmitter)
   (let [emitter (alloc/stack EventEmitter)]
     (store! (field emitter sink) (alloc/box allocator (dyn EventSink) sink))
-    (store! (field emitter next-sequence) next-sequence)
-    (store! (field emitter publish-lock) 0)
+    (set! (.next-sequence emitter) next-sequence)
+    (set! (.publish-lock emitter) 0)
     (load emitter)))
 
 ;; Initialize long-lived emitters in their final storage. This avoids copying a
@@ -100,8 +100,8 @@
                            (sink (dyn EventSink))
                            (next-sequence (ptr i64))] (-> i64)
   (store! (field emitter sink) (alloc/box allocator (dyn EventSink) sink))
-  (store! (field emitter next-sequence) next-sequence)
-  (store! (field emitter publish-lock) 0)
+  (set! (.next-sequence emitter) next-sequence)
+  (set! (.publish-lock emitter) 0)
   0)
 
 (defn event-emitter-lock! [(emitter (ptr EventEmitter))] (-> i64)
@@ -128,17 +128,17 @@
   (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
         event (alloc/stack Event)
         sink (load (field emitter sink))]
-    (store! (field event version) 1)
-    (store! (field event sequence) sequence)
-    (store! (field event timestamp-ms) timestamp-ms)
-    (store! (field event kind) kind)
-    (store! (field event run-id) run-id)
-    (store! (field event agent-id) agent-id)
-    (store! (field event operation-id) operation-id)
-    (store! (field event parent-operation-id) parent-operation-id)
-    (store! (field event provider) provider)
-    (store! (field event model) model)
-    (store! (field event payload) payload)
+    (set! (.version event) 1)
+    (set! (.sequence event) sequence)
+    (set! (.timestamp-ms event) timestamp-ms)
+    (set! (.kind event) kind)
+    (set! (.run-id event) run-id)
+    (set! (.agent-id event) agent-id)
+    (set! (.operation-id event) operation-id)
+    (set! (.parent-operation-id event) parent-operation-id)
+    (set! (.provider event) provider)
+    (set! (.model event) model)
+    (set! (.payload event) payload)
     (let [publish-code (publish-event (load sink) event)]
       (event-emitter-unlock! emitter)
       (if (= publish-code 0) sequence -1))))
@@ -216,27 +216,27 @@
   (let [(mut record) (json-object allocator)]
     (json-object-put! (mut record)
                       "version"
-                      (json-integer allocator (load (field event version))))
+                      (json-integer allocator (.version event)))
     (json-object-put! (mut record)
                       "sequence"
-                      (json-integer allocator (load (field event sequence))))
+                      (json-integer allocator (.sequence event)))
     (json-object-put! (mut record)
                       "timestamp_ms"
-                      (json-integer allocator (load (field event timestamp-ms))))
+                      (json-integer allocator (.timestamp-ms event)))
     (json-object-put! (mut record)
                       "event"
-                      (JsonString (event-kind-name (load (field event kind)))))
-    (json-object-put! (mut record) "run_id" (JsonString (load (field event run-id))))
-    (json-object-put! (mut record) "agent_id" (JsonString (load (field event agent-id))))
+                      (JsonString (event-kind-name (.kind event))))
+    (json-object-put! (mut record) "run_id" (JsonString (.run-id event)))
+    (json-object-put! (mut record) "agent_id" (JsonString (.agent-id event)))
     (json-object-put! (mut record)
                       "operation_id"
-                      (JsonString (load (field event operation-id))))
+                      (JsonString (.operation-id event)))
     (json-object-put! (mut record)
                       "parent_operation_id"
-                      (JsonString (load (field event parent-operation-id))))
+                      (JsonString (.parent-operation-id event)))
     (json-object-put! (mut record)
                       "provider"
-                      (JsonString (load (field event provider))))
-    (json-object-put! (mut record) "model" (JsonString (load (field event model))))
-    (json-object-put! (mut record) "payload" (load (field event payload)))
+                      (JsonString (.provider event)))
+    (json-object-put! (mut record) "model" (JsonString (.model event)))
+    (json-object-put! (mut record) "payload" (.payload event))
     (load record)))

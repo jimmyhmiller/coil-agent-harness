@@ -19,7 +19,7 @@
                second (oauth-random-token allocator 32)]
            (assert (= (slice-len [u8] first) 43))
            (assert (= (slice-len [u8] second) 43))
-           (assert (not (str-eq first second)))))
+           (assert (not (= first second)))))
 
 (deftest oauth-url-and-query-encoding-round-trip
          (let [allocator (malloc-allocator)]
@@ -51,5 +51,4 @@
 
 (deftest oauth-callback-path-does-not-accept-prefix-lookalikes
          (assert-eq (oauth-target-path "/callback?code=ok") "/callback")
-         (assert (not (str-eq (oauth-target-path "/callback-evil?code=ok")
-                              "/callback"))))
+         (assert (not (= (oauth-target-path "/callback-evil?code=ok") "/callback"))))

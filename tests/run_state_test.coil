@@ -41,14 +41,10 @@
                  lost (project-run-after-restart events "lost")]
              (assert (load (field done valid)))
              (assert (load (field done terminal)))
-             (assert (match-else (load (field done status))
-                                 (RunSucceeded [] true)
-                                 (_ false)))
+             (assert (match (load (field done status)) (RunSucceeded [] true) (_ false)))
              (assert (load (field lost valid)))
              (assert (not (load (field lost terminal))))
-             (assert (match-else (load (field lost status))
-                                 (RunInterrupted [] true)
-                                 (_ false)))
+             (assert (match (load (field lost status)) (RunInterrupted [] true) (_ false)))
              (assert-eq (journal-command-sequence events "create-1") 1)
              (assert-eq (journal-command-sequence events "missing") 0))))
 
@@ -60,5 +56,4 @@
            (al-push! [Json] (mut events) (state-event allocator 2 "run.completed" "run-1" ""))
            (let [view (project-run events "run-1")]
              (assert (not (load (field view valid))))
-             (assert (str-eq (load (field view error))
-                             "run.completed from invalid state")))))
+             (assert (= (load (field view error)) "run.completed from invalid state")))))

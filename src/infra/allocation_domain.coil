@@ -83,23 +83,20 @@
       (Err [failure]
            (do
              (region/region-close! (field domain region))
-             (store! (field domain valid) false)))
+             (set! (.valid domain) false)))
       (Ok [mutex]
           (do
-            (store! (field (field domain allocator) alloc)
-                    (fnptr-of allocation-domain-alloc))
-            (store! (field (field domain allocator) resize)
-                    (fnptr-of allocation-domain-resize))
-            (store! (field (field domain allocator) free)
-                    (fnptr-of allocation-domain-free))
-            (store! (field (field domain allocator) ctx) (cast (ptr i8) domain))
-            (store! (field domain valid) true)
+            (set! (.alloc (.allocator domain)) (fnptr-of allocation-domain-alloc))
+            (set! (.resize (.allocator domain)) (fnptr-of allocation-domain-resize))
+            (set! (.free (.allocator domain)) (fnptr-of allocation-domain-free))
+            (set! (.ctx (.allocator domain)) (cast (ptr i8) domain))
+            (set! (.valid domain) true)
             (atomic-add (allocation-domain-count-cell) 1))))
     domain))
 
 (defn allocation-domain-valid? [(domain (ptr AllocationDomain))] (-> bool)
   (and (!= domain (cast (ptr AllocationDomain) 0))
-       (load (field domain valid))))
+       (.valid domain)))
 
 (defn allocation-domain-allocator [(domain (ptr AllocationDomain))] (-> (ptr Allocator))
   (field domain allocator))

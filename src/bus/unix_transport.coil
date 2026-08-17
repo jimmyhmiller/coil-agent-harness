@@ -28,7 +28,7 @@
 ;; Take ownership of a connection accepted elsewhere (the server side).
 (defn unix-transport-adopt! [(transport (ptr UnixTransport))
                              (connection socket/UnixConnection)] (-> i64)
-  (store! (field transport connection) connection)
+  (set! (.connection transport) connection)
   0)
 
 ;; Dial a peer (the client side). Returns 0, or a negative transport code.

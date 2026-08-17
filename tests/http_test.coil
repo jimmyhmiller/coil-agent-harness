@@ -20,8 +20,8 @@
                         (response (mut HttpResponse))]
                        (-> i64)
                        (do
-                         (store! (field self calls) (+ (load (field self calls)) 1))
-                         (let [payload (load (field self payload))
+                         (set! (.calls self) (+ (.calls self) 1))
+                         (let [payload (.payload self)
                                sink (field request chunks)]
                            (when (> (slice-len [u8] payload) 0)
                              (primitive/call-ptr (load (field sink consume))
@@ -29,15 +29,15 @@
                                                  (cast usize (slice-len [u8] payload))
                                                  (load (field sink context)))
                              0))
-                         (store! (field response transport-code) 0)
-                         (store! (field response status-code) (load (field self status)))
-                         (store! (field response body) (load (field self payload)))
-                         (store! (field response error) "fake transport error")
-                         (load (field self return-code)))))
+                         (set! (.transport-code response) 0)
+                         (set! (.status-code response) (.status self))
+                         (set! (.body response) (.payload self))
+                         (set! (.error response) "fake transport error")
+                         (.return-code self))))
 
 (defn accept-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
   (let [observed (cast (ptr i64) context)]
-    (store! observed (cast i64 length))
+    (set! observed (cast i64 length))
     length))
 
 (defn reject-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
@@ -59,7 +59,7 @@
                                                (cast (ptr i8) capture))
                       BODY-CONTINUE)
            (assert-eq (load observed) (slice-len [u8] input))
-           (assert (str-eq (al-slice [u8] (load (field capture body))) "stream"))
+           (assert (= (al-slice [u8] (load (field capture body))) "stream"))
            ;; A sink that accepts less than the chunk is asking to stop.
            (store! (field (field capture sink) consume) (fnptr-of reject-http-chunk))
            (assert-eq (capture-streaming-chunk (slice-data [u8] input)
@@ -93,8 +93,8 @@
              (assert-eq (load observed) 10)
              (assert-eq (load (field response transport-code)) 0)
              (assert-eq (load (field response status-code)) 202)
-             (assert (str-eq (load (field response body)) "two chunks")))
+             (assert (= (load (field response body)) "two chunks")))
            (store! (field transport return-code) -7)
            (let [failed (streaming-http-send transport allocator request)]
              (assert-eq (load (field failed transport-code)) -1)
-             (assert (str-eq (load (field failed error)) "fake transport error")))))
+             (assert (= (load (field failed error)) "fake transport error")))))

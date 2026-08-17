@@ -27,12 +27,11 @@
                        (sink (dyn SseEventSink))
                        (max-buffer-bytes i64)] (-> SseDecoder)
   (let [decoder (alloc/stack SseDecoder)]
-    (store! (field decoder allocator) allocator)
-    (store! (field decoder buffer) (al-new [u8] allocator))
-    (store! (field decoder sink) sink)
-    (store! (field decoder max-buffer-bytes)
-            (if (> max-buffer-bytes 0) max-buffer-bytes 1048576))
-    (store! (field decoder failed) false)
+    (set! (.allocator decoder) allocator)
+    (set! (.buffer decoder) (al-new [u8] allocator))
+    (set! (.sink decoder) sink)
+    (set! (.max-buffer-bytes decoder) (if (> max-buffer-bytes 0) max-buffer-bytes 1048576))
+    (set! (.failed decoder) false)
     (load decoder)))
 
 (defn sse-boundary [(bytes (slice u8))] (-> SseBoundary)
@@ -41,32 +40,32 @@
         (mut i) 0
         (mut last-was-newline) false
         (mut last-newline-index) -1]
-    (store! (field result found) false)
+    (set! (.found result) false)
     (loop (if (>= (load i) n)
               (break)
               (let [byte (cast i64 (slice-get [u8] bytes (load i)))]
                 (if (= byte 10)
                     (if (load last-was-newline)
                         (do
-                          (store! (field result found) true)
-                          (store! (field result block-end)
-                                  (if (and (> (load last-newline-index) 0)
-                                           (= (cast i64
-                                                    (slice-get [u8]
-                                                               bytes
-                                                               (- (load last-newline-index) 1)))
-                                              13))
-                                      (- (load last-newline-index) 1)
-                                      (load last-newline-index)))
-                          (store! (field result consumed) (+ (load i) 1))
+                          (set! (.found result) true)
+                          (set! (.block-end result)
+                                (if (and (> (load last-newline-index) 0)
+                                         (= (cast i64
+                                                  (slice-get [u8]
+                                                             bytes
+                                                             (- (load last-newline-index) 1)))
+                                            13))
+                                    (- (load last-newline-index) 1)
+                                    (load last-newline-index)))
+                          (set! (.consumed result) (+ (load i) 1))
                           (break))
                         (do
-                          (store! last-was-newline true)
-                          (store! last-newline-index (load i))
-                          (store! i (+ (load i) 1))))
+                          (set! last-was-newline true)
+                          (set! last-newline-index (load i))
+                          (set! i (+ (load i) 1))))
                     (do
                       (when (!= byte 13) (store! last-was-newline false) 0)
-                      (store! i (+ (load i) 1)))))))
+                      (set! i (+ (load i) 1)))))))
     (load result)))
 
 (defn sse-field-value [(line (slice u8)) (prefix-len i64)] (-> (slice u8))
@@ -90,7 +89,7 @@
                 (loop (if (or (>= (load end) n)
                               (= (cast i64 (slice-get [u8] frame (load end))) 10))
                           (break)
-                          (store! end (+ (load end) 1))))
+                          (set! end (+ (load end) 1))))
                 (let [trimmed-end
                         (if (and (> (load end) (load start))
                                  (= (cast i64 (slice-get [u8] frame (- (load end) 1))) 13))
@@ -106,10 +105,10 @@
                         :else 0))
                 (if (>= (load end) n)
                     (break)
-                    (store! start (+ (load end) 1))))))
+                    (set! start (+ (load end) 1))))))
     (let [accepted
             (if (> (load data-lines) 0)
-                (consume-sse-event (load (field decoder sink))
+                (consume-sse-event (.sink decoder)
                                    (load event-name)
                                    (sb-str (load data)))
                 true)]
@@ -127,39 +126,39 @@
                          (mut buffer)
                          (load i)
                          (al-get [u8] (load buffer) (+ count (load i))))
-                (store! i (+ (load i) 1)))))
-    (store! (field buffer len) remaining)
+                (set! i (+ (load i) 1)))))
+    (set! (.len buffer) remaining)
     remaining))
 
 (defn sse-decoder-drain! [(decoder (ptr SseDecoder))] (-> bool)
-  (let [boundary (sse-boundary (al-slice [u8] (load (field decoder buffer))))]
-    (if (not (load (field boundary found)))
+  (let [boundary (sse-boundary (al-slice [u8] (.buffer decoder)))]
+    (if (not (.found boundary))
         true
         (let [accepted
                 (sse-dispatch-block decoder
                                     (subslice [u8]
-                                              (al-slice [u8] (load (field decoder buffer)))
+                                              (al-slice [u8] (.buffer decoder))
                                               0
-                                              (load (field boundary block-end))))]
-          (sse-drop-prefix! (mut (field decoder buffer))
-                            (load (field boundary consumed)))
+                                              (.block-end boundary)))]
+          (sse-drop-prefix! (mut (.buffer decoder))
+                            (.consumed boundary))
           (if accepted
               (sse-decoder-drain! decoder)
-              (do (store! (field decoder failed) true) false))))))
+              (do (set! (.failed decoder) true) false))))))
 
 ;; Accept an arbitrary transport chunk. Frames may span chunks or share one chunk.
 ;; False is sticky and means either bounded-buffer overflow or downstream rejection.
 (defn sse-decoder-feed! [(decoder (ptr SseDecoder)) (chunk (slice u8))] (-> bool)
-  (if (load (field decoder failed))
+  (if (.failed decoder)
       false
       (do
         (al-extend! [u8]
-                    (mut (field decoder buffer))
+                    (mut (.buffer decoder))
                     (slice-data [u8] chunk)
                     (slice-len [u8] chunk))
-        (if (> (al-len [u8] (load (field decoder buffer)))
-               (load (field decoder max-buffer-bytes)))
-            (do (store! (field decoder failed) true) false)
+        (if (> (al-len [u8] (.buffer decoder))
+               (.max-buffer-bytes decoder))
+            (do (set! (.failed decoder) true) false)
             (sse-decoder-drain! decoder)))))
 
 (defn sse-http-chunk [(data (ptr u8)) (length usize) (context (ptr i8))] (-> usize)
@@ -169,7 +168,7 @@
       (cast usize 0)))
 
 (defn sse-decoder-failed? [(decoder (ptr SseDecoder))] (-> bool)
-  (load (field decoder failed)))
+  (.failed decoder))
 
 (defn sse-decoder-free! [(decoder (ptr SseDecoder))] (-> i64)
-  (al-free! [u8] (mut (field decoder buffer))))
+  (al-free! [u8] (mut (.buffer decoder))))

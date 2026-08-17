@@ -20,16 +20,16 @@
 
 (defn input-renderer-new [] (-> InputRenderer)
   (let [renderer (alloc/stack InputRenderer)]
-    (store! (field renderer previous-height) 0)
-    (store! (field renderer previous-cursor-row) 0)
-    (store! (field renderer previous-menu-rows) 0)
-    (store! (field renderer owner) (cast (ptr Allocator) 0))
-    (store! (field renderer has-retained) false)
+    (set! (.previous-height renderer) 0)
+    (set! (.previous-cursor-row renderer) 0)
+    (set! (.previous-menu-rows renderer) 0)
+    (set! (.owner renderer) (cast (ptr Allocator) 0))
+    (set! (.has-retained renderer) false)
     (load renderer)))
 
 (defn input-renderer-new-retaining [(owner (ptr Allocator))] (-> InputRenderer)
   (let [(mut renderer) (input-renderer-new)]
-    (store! (field renderer owner) owner)
+    (set! (.owner renderer) owner)
     (load renderer)))
 
 (defn input-renderer-release! [(renderer (ptr InputRenderer))] (-> i64)
@@ -49,12 +49,12 @@
           (if (not (allocation-domain-valid? domain))
               (do (input-renderer-release! renderer) 0)
               (let [old-domain (load (field renderer retained-domain))
-                    had-old (load (field renderer has-retained))
+                    had-old (.has-retained renderer)
                     clone (alloc/stack Frame)]
                 (frame-clone! (allocation-domain-allocator domain) frame clone)
-                (store! (field renderer retained) (load clone))
-                (store! (field renderer retained-domain) domain)
-                (store! (field renderer has-retained) true)
+                (set! (.retained renderer) (load clone))
+                (set! (.retained-domain renderer) domain)
+                (set! (.has-retained renderer) true)
                 (when had-old
                   (allocation-domain-close! owner old-domain)
                   0)
@@ -62,7 +62,7 @@
 
 (defn input-renderer-final-row! [(renderer (ptr InputRenderer))
                                  (operations (ptr (ArrayList TerminalOperation)))] (-> i64)
-  (let [height (load (field renderer previous-height))]
+  (let [height (.previous-height renderer)]
     (when (> height 0)
       (inline-push! operations (TerminalCarriageReturn))
       (let [rows (- (- height 1) (load (field renderer previous-cursor-row)))]
@@ -82,21 +82,21 @@
                                  (layout (ptr ViewLayout))
                                  (menu-rows i64)] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
-        frame (mut (field layout frame))
-        height (al-len [FrameLine] (load (field frame lines)))
-        cursor-row (load (field layout cursor-row))]
+        frame (mut (.frame layout))
+        height (al-len [FrameLine] (.lines frame))
+        cursor-row (.cursor-row layout)]
     (input-renderer-final-row! renderer (mut operations))
     ;; The cursor is now on the previous frame's last row, exactly the position
     ;; expected by the row diff. A normal keystroke therefore rewrites only the
     ;; row containing the edit instead of clearing and repainting the composer.
-    (if (and (load (field renderer has-retained))
-             (= (load (field renderer previous-height)) height))
+    (if (and (.has-retained renderer)
+             (= (.previous-height renderer) height))
         (plan-live-diff! (mut operations)
                          (field renderer retained)
                          (field layout frame))
         (do
           (inline-plan-clear-live! (mut operations)
-                                   (load (field renderer previous-height)))
+                                   (.previous-height renderer))
           (inline-plan-live-frame! (mut operations) frame)
           0))
     (let [rows (- (- height 1) cursor-row)]
@@ -105,10 +105,10 @@
         0))
     (inline-push! (mut operations) (TerminalCarriageReturn))
     (inline-push! (mut operations)
-                  (TerminalCursorRight (load (field layout cursor-column))))
-    (store! (field renderer previous-height) height)
-    (store! (field renderer previous-cursor-row) cursor-row)
-    (store! (field renderer previous-menu-rows) (if (< menu-rows 0) 0 menu-rows))
+                  (TerminalCursorRight (.cursor-column layout)))
+    (set! (.previous-height renderer) height)
+    (set! (.previous-cursor-row renderer) cursor-row)
+    (set! (.previous-menu-rows renderer) (if (< menu-rows 0) 0 menu-rows))
     (input-renderer-retain! renderer (field layout frame))
     (load operations)))
 
@@ -126,7 +126,7 @@
 (defn input-renderer-commit-plan! [(renderer (ptr InputRenderer))
                                    (scratch (ptr Allocator))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
-        menu-rows (load (field renderer previous-menu-rows))]
+        menu-rows (.previous-menu-rows renderer)]
     (input-renderer-final-row! renderer (mut operations))
     (when (> menu-rows 0)
       (let [(mut remaining) menu-rows]
@@ -142,9 +142,9 @@
       (inline-push! (mut operations) (TerminalCarriageReturn))
       (inline-push! (mut operations) (TerminalLineBreak))
       0)
-    (store! (field renderer previous-height) 0)
-    (store! (field renderer previous-cursor-row) 0)
-    (store! (field renderer previous-menu-rows) 0)
+    (set! (.previous-height renderer) 0)
+    (set! (.previous-cursor-row renderer) 0)
+    (set! (.previous-menu-rows renderer) 0)
     (input-renderer-release! renderer)
     (load operations)))
 
@@ -153,9 +153,9 @@
   (let [(mut operations) (inline-operations-new scratch)]
     (input-renderer-final-row! renderer (mut operations))
     (inline-plan-clear-live! (mut operations)
-                             (load (field renderer previous-height)))
-    (store! (field renderer previous-height) 0)
-    (store! (field renderer previous-cursor-row) 0)
-    (store! (field renderer previous-menu-rows) 0)
+                             (.previous-height renderer))
+    (set! (.previous-height renderer) 0)
+    (set! (.previous-cursor-row renderer) 0)
+    (set! (.previous-menu-rows renderer) 0)
     (input-renderer-release! renderer)
     (load operations)))

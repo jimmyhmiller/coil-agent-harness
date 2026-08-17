@@ -61,25 +61,25 @@
                              (path-join allocator
                                         path
                                         (al-get [(slice u8)] names (load i))))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     0))
 
 ;; Leftovers from an earlier run look exactly like stale peers, which is a state
 ;; some of these tests assert the absence of.
 (defn reset-realm! [(realm (ptr CcRealm)) (allocator (ptr Allocator))] (-> i64)
-  (clear-directory! allocator (load (field realm socket-dir)))
-  (clear-directory! allocator (load (field realm sessions-dir)))
+  (clear-directory! allocator (.socket-dir realm))
+  (clear-directory! allocator (.sessions-dir realm))
   0)
 
 (defn realm-socket-path [(realm (ptr CcRealm))
                          (allocator (ptr Allocator))
                          (name (slice u8))] (-> (slice u8))
-  (path-join allocator (load (field realm socket-dir)) name))
+  (path-join allocator (.socket-dir realm) name))
 
 (defn realm-session-path [(realm (ptr CcRealm))
                           (allocator (ptr Allocator))
                           (name (slice u8))] (-> (slice u8))
-  (path-join allocator (load (field realm sessions-dir)) name))
+  (path-join allocator (.sessions-dir realm) name))
 
 ;; Bind and keep listening. The caller owns the listener for the rest of the
 ;; test, which is what makes the probe see it as alive.
@@ -116,7 +116,7 @@
                   (store! out (load peer))
                   (store! found true)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 ;; ---------------------------------------------------------------------------
@@ -153,13 +153,13 @@
              (assert (find-peer (mut peers) 1001 peer))
              (assert (load (field peer alive)))
              (assert (load (field peer registered)))
-             (assert (str-eq (load (field peer name)) "alpha"))
-             (assert (str-eq (load (field peer session-id)) "sess-alpha"))
-             (assert (str-eq (load (field peer cwd)) "/tmp/alpha"))
-             (assert (str-eq (load (field peer status)) "idle"))
-             (assert (str-eq (load (field peer address))
-                             (cc-uds-address allocator
-                                             (realm-socket-path realm allocator "1001.sock"))))
+             (assert (= (load (field peer name)) "alpha"))
+             (assert (= (load (field peer session-id)) "sess-alpha"))
+             (assert (= (load (field peer cwd)) "/tmp/alpha"))
+             (assert (= (load (field peer status)) "idle"))
+             (assert (= (load (field peer address))
+                        (cc-uds-address allocator
+                                        (realm-socket-path realm allocator "1001.sock"))))
 
              ;; Unregistered, and still a first-class peer.
              (assert (find-peer (mut peers) 1002 peer))
@@ -175,7 +175,7 @@
              (assert (= (al-len [CcPeer] all) 3))
              (assert (find-peer (mut all) 1003 peer))
              (assert (not (load (field peer alive))))
-             (assert (str-eq (load (field peer name)) "ghost")))
+             (assert (= (load (field peer name)) "ghost")))
 
            (socket/unix-listener-close! named)
            (socket/unix-listener-close! anonymous)))
@@ -192,10 +192,10 @@
              (assert (write-file! allocator
                                   (realm-session-path realm allocator "1010.json")
                                   "{\"pid\":1010,\"sessionId\":\"sess-beta\",\"name\":\"beta-worker\"}"))
-             (assert (str-eq (cc-resolve realm allocator "beta-worker") wanted))
-             (assert (str-eq (cc-resolve realm allocator "1010") wanted))
-             (assert (str-eq (cc-resolve realm allocator "sess-beta") wanted))
-             (assert (str-eq (cc-resolve realm allocator "beta") wanted))
+             (assert (= (cc-resolve realm allocator "beta-worker") wanted))
+             (assert (= (cc-resolve realm allocator "1010") wanted))
+             (assert (= (cc-resolve realm allocator "sess-beta") wanted))
+             (assert (= (cc-resolve realm allocator "beta") wanted))
              (assert (= (slice-len [u8] (cc-resolve realm allocator "nobody")) 0))
              (socket/unix-listener-close! listener))))
 
@@ -208,14 +208,11 @@
            (redirect-environment! allocator)
            (realm-for realm allocator "claude-code")
            (reset-realm! realm allocator)
-           (assert (str-eq (cc-resolve realm allocator "uds:/tmp/anywhere/9.sock")
-                           "/tmp/anywhere/9.sock"))
-           (assert (str-eq (cc-resolve realm allocator "/tmp/anywhere/9.sock")
-                           "/tmp/anywhere/9.sock"))
+           (assert (= (cc-resolve realm allocator "uds:/tmp/anywhere/9.sock") "/tmp/anywhere/9.sock"))
+           (assert (= (cc-resolve realm allocator "/tmp/anywhere/9.sock") "/tmp/anywhere/9.sock"))
            ;; Percent-escaped addresses must come back as the real path, or we
            ;; would connect to a file that does not exist.
-           (assert (str-eq (cc-resolve realm allocator "uds:/tmp/a%20b/9.sock")
-                           "/tmp/a b/9.sock"))))
+           (assert (= (cc-resolve realm allocator "uds:/tmp/a%20b/9.sock") "/tmp/a b/9.sock"))))
 
 ;; A file in the socket directory that is not `<pid>.sock` belongs to something
 ;; else. Guessing at it would invent peers.
@@ -304,9 +301,9 @@
              (assert (= (al-len [CcPeer] shared-peers) 1))
              (assert (= (al-len [CcPeer] private-peers) 1))
              (assert (find-peer (mut shared-peers) 2001 peer))
-             (assert (str-eq (load (field peer name)) "in-claude-code"))
+             (assert (= (load (field peer name)) "in-claude-code"))
              (assert (find-peer (mut private-peers) 2001 peer))
-             (assert (str-eq (load (field peer name)) "in-lab")))
+             (assert (= (load (field peer name)) "in-lab")))
 
            ;; Names do not cross either.
            (assert (> (slice-len [u8] (cc-resolve shared allocator "in-claude-code")) 0))
@@ -345,14 +342,10 @@
            (cc-realm-init! private allocator "lab")
            (assert (load (field shared interop)))
            (assert (not (load (field private interop))))
-           (assert (not (str-eq (load (field shared socket-dir))
-                                (load (field private socket-dir)))))
-           (assert (not (str-eq (load (field shared sessions-dir))
-                                (load (field private sessions-dir)))))
-           (assert (str-eq (load (field shared socket-dir))
-                           (path-join allocator SCRATCH "cc-socks")))
-           (assert (str-eq (load (field private socket-dir))
-                           (path-join allocator SCRATCH "harness-socks-lab")))))
+           (assert (not (= (load (field shared socket-dir)) (load (field private socket-dir)))))
+           (assert (not (= (load (field shared sessions-dir)) (load (field private sessions-dir)))))
+           (assert (= (load (field shared socket-dir)) (path-join allocator SCRATCH "cc-socks")))
+           (assert (= (load (field private socket-dir)) (path-join allocator SCRATCH "harness-socks-lab")))))
 
 ;; An empty name means "whatever the environment says", so a caller with no
 ;; opinion and a caller given an explicit --realm go through one path.
@@ -361,12 +354,12 @@
                realm (alloc/stack CcRealm)]
            (redirect-environment! allocator)
            (cc-realm-init! realm allocator "")
-           (assert (str-eq (load (field realm name)) "claude-code"))
+           (assert (= (load (field realm name)) "claude-code"))
            (assert (load (field realm interop)))
 
            (os/env-set allocator "HARNESS_BUS_REALM" "lab" true)
            (cc-realm-init! realm allocator "")
-           (assert (str-eq (load (field realm name)) "lab"))
+           (assert (= (load (field realm name)) "lab"))
            (assert (not (load (field realm interop))))
 
            ;; An explicit name still wins over the environment.

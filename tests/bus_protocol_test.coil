@@ -24,19 +24,17 @@
 (defn round-trips? [(allocator (ptr Allocator)) (codec (dyn Codec))] (-> bool)
   (let [original (alloc/stack Envelope)
         slot (alloc/stack Envelope)]
-    (store! original (sample-envelope))
-    (match (codec-encode codec allocator original)
-      (Err [_] false)
-      (Ok [encoded]
-          (match (codec-decode codec allocator encoded slot)
-            (Err [_] false)
-            (Ok [_]
-                (and (and (= (load (field slot version)) 1)
-                          (str-eq (load (field slot id)) "msg-1"))
-                     (and (str-eq (load (field slot body)) "summarize the diff")
-                          (and (address-eq (load (field slot from)) (Agent "tui-7"))
-                               (address-eq (load (field slot to))
-                                           (Topic "run.chat-1")))))))))))
+    (set! original (sample-envelope))
+    (try (let [encoded (try-or! (codec-encode codec allocator original) false)]
+              (match (codec-decode codec allocator encoded slot)
+                (Err [_] false)
+                (Ok [_]
+                    (and (and (= (load (field slot version)) 1)
+                              (= (load (field slot id)) "msg-1"))
+                         (and (= (load (field slot body)) "summarize the diff")
+                              (and (address-eq (load (field slot from)) (Agent "tui-7"))
+                                   (address-eq (load (field slot to))
+                                               (Topic "run.chat-1")))))))))))
 
 (deftest an-envelope-survives-a-messagepack-round-trip
          (let [allocator (malloc-allocator)
@@ -62,7 +60,7 @@
                  (match (codec-encode json allocator envelope)
                    (Err [_] (assert false))
                    (Ok [text]
-                       (assert (not (str-eq binary text)))))))))
+                       (assert (not (= binary text)))))))))
 
 (deftest broadcast-reaches-every-participant
          (assert (address-matches? (Broadcast) (Agent "anyone")))
@@ -83,5 +81,5 @@
              ;; request was published on.
              (assert (address-eq (load (field reply to)) (Agent "tui-7")))
              (assert (match (load (field reply correlation))
-                       (Some [value] (str-eq value "msg-1"))
+                       (Some [value] (= value "msg-1"))
                        (None [] false))))))

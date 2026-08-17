@@ -57,18 +57,18 @@
    (version (slice u8))])
 
 (defn cc-peer-init! [(peer (ptr CcPeer))] (-> i64)
-  (store! (field peer socket-path) "")
-  (store! (field peer address) "")
-  (store! (field peer pid) 0)
-  (store! (field peer alive) false)
-  (store! (field peer registered) false)
-  (store! (field peer self) false)
-  (store! (field peer name) "")
-  (store! (field peer session-id) "")
-  (store! (field peer cwd) "")
-  (store! (field peer status) "")
-  (store! (field peer kind) "")
-  (store! (field peer version) "")
+  (set! (.socket-path peer) "")
+  (set! (.address peer) "")
+  (set! (.pid peer) 0)
+  (set! (.alive peer) false)
+  (set! (.registered peer) false)
+  (set! (.self peer) false)
+  (set! (.name peer) "")
+  (set! (.session-id peer) "")
+  (set! (.cwd peer) "")
+  (set! (.status peer) "")
+  (set! (.kind peer) "")
+  (set! (.version peer) "")
   0)
 
 ;; ---------------------------------------------------------------------------
@@ -128,16 +128,16 @@
     (None [] false)
     (Some [source]
           (let [result (json-parse allocator source)]
-            (if (not (load (field result ok)))
+            (if (not (.ok result))
                 false
-                (let [value (load (field result value))]
-                  (store! (field peer registered) true)
-                  (store! (field peer name) (cc-json-string-or value "name" ""))
-                  (store! (field peer session-id) (cc-json-string-or value "sessionId" ""))
-                  (store! (field peer cwd) (cc-json-string-or value "cwd" ""))
-                  (store! (field peer status) (cc-json-string-or value "status" ""))
-                  (store! (field peer kind) (cc-json-string-or value "kind" ""))
-                  (store! (field peer version) (cc-json-string-or value "version" ""))
+                (let [value (.value result)]
+                  (set! (.registered peer) true)
+                  (set! (.name peer) (cc-json-string-or value "name" ""))
+                  (set! (.session-id peer) (cc-json-string-or value "sessionId" ""))
+                  (set! (.cwd peer) (cc-json-string-or value "cwd" ""))
+                  (set! (.status peer) (cc-json-string-or value "status" ""))
+                  (set! (.kind peer) (cc-json-string-or value "kind" ""))
+                  (set! (.version peer) (cc-json-string-or value "version" ""))
                   true))))))
 
 ;; ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@
   (let [n (slice-len [u8] name)
         suffix-length 5]
     (if (or (<= n suffix-length)
-            (not (str-eq (substr name (- n suffix-length) n) ".sock")))
+            (not (= (substr name (- n suffix-length) n) ".sock")))
         -1
         (let [digits (substr name 0 (- n suffix-length))
               length (slice-len [u8] digits)
@@ -161,9 +161,9 @@
                     (break)
                     (let [byte (cast i64 (slice-get [u8] digits (load i)))]
                       (if (and (>= byte 48) (<= byte 57))
-                          (store! value (+ (* (load value) 10) (- byte 48)))
-                          (store! ok false))
-                      (store! i (+ (load i) 1)))))
+                          (set! value (+ (* (load value) 10) (- byte 48)))
+                          (set! ok false))
+                      (set! i (+ (load i) 1)))))
           (if (load ok) (load value) -1)))))
 
 ;; Every peer with a socket in the socket directory.
@@ -174,9 +174,9 @@
 (defn cc-discover [(realm (ptr CcRealm))
                    (allocator (ptr Allocator))
                    (include-dead bool)] (-> (ArrayList CcPeer))
-  (let [socket-dir (load (field realm socket-dir))
-        sessions-dir (load (field realm sessions-dir))
-        self-socket (load (field realm self-socket))
+  (let [socket-dir (.socket-dir realm)
+        sessions-dir (.sessions-dir realm)
+        self-socket (.self-socket realm)
         names (directory-entries-with-suffix allocator socket-dir ".sock")
         (mut peers) (al-new [CcPeer] allocator)
         (mut i) 0
@@ -195,7 +195,7 @@
                     (store! (field peer alive) (cc-probe-alive? allocator socket-path))
                     (store! (field peer self)
                             (and (> (slice-len [u8] self-socket) 0)
-                                 (str-eq socket-path self-socket)))
+                                 (= socket-path self-socket)))
                     ;; Names are an overlay, not a filter: a peer with no
                     ;; session file is still returned and still addressable.
                     (cc-apply-session-file! allocator
@@ -206,7 +206,7 @@
                       0)
                     0)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load peers)))
 
 (defn session-file-name [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
@@ -230,16 +230,16 @@
   (let [allocator (malloc-allocator)
         (mut buffer) (sb-new allocator)]
     (cc-push-decimal! (mut buffer) value)
-    (str-eq text (sb-str (load buffer)))))
+    (= text (sb-str (load buffer)))))
 
 ;; Does `query` name this peer? Matches the reference client's resolution
 ;; order: exact name, pid, session id, then name prefix.
 (defn cc-peer-matches? [(peer (ptr CcPeer)) (query (slice u8))] (-> bool)
-  (or (or (str-eq (load (field peer name)) query)
-          (cc-decimal-eq? query (load (field peer pid))))
-      (or (str-eq (load (field peer session-id)) query)
-          (and (> (slice-len [u8] (load (field peer name))) 0)
-               (starts-with (load (field peer name)) query)))))
+  (or (or (= (.name peer) query)
+          (cc-decimal-eq? query (.pid peer)))
+      (or (= (.session-id peer) query)
+          (and (> (slice-len [u8] (.name peer)) 0)
+               (starts-with (.name peer) query)))))
 
 ;; Resolve `query` to a socket path.
 ;;
@@ -264,7 +264,7 @@
                     (when (cc-peer-matches? peer query)
                       (store! found (load (field peer socket-path)))
                       0)
-                    (store! i (+ (load i) 1)))))
+                    (set! i (+ (load i) 1)))))
         (load found))))
 
 ;; Remove session files whose socket is gone and whose process is gone.
@@ -273,8 +273,8 @@
 ;; is starting up, and unlinking its entry would make a session that is about to
 ;; be reachable disappear from every roster. Returns the number reaped.
 (defn cc-reap-stale! [(realm (ptr CcRealm)) (allocator (ptr Allocator))] (-> i64)
-  (let [sessions-dir (load (field realm sessions-dir))
-        socket-dir (load (field realm socket-dir))
+  (let [sessions-dir (.sessions-dir realm)
+        socket-dir (.socket-dir realm)
         names (directory-entries-with-suffix allocator sessions-dir ".json")
         (mut reaped) 0
         (mut i) 0
@@ -296,12 +296,12 @@
                       0)
                     0)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load reaped)))
 
 (defn cc-pid-from-json-name [(name (slice u8))] (-> i64)
   (let [n (slice-len [u8] name)]
-    (if (or (<= n 5) (not (str-eq (substr name (- n 5) n) ".json")))
+    (if (or (<= n 5) (not (= (substr name (- n 5) n) ".json")))
         -1
         (let [(mut renamed) (sb-new (malloc-allocator))]
           (sb-push-str! (mut renamed) (substr name 0 (- n 5)))

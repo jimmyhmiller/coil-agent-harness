@@ -80,21 +80,21 @@
 
 (defn terminal-session-new [] (-> TerminalSession)
   (let [session (alloc/stack TerminalSession)]
-    (store! (field session saved) (zeroed TerminalAttributes))
-    (store! (field session raw) false)
-    (store! (field session paste-enabled) false)
+    (set! (.saved session) (zeroed TerminalAttributes))
+    (set! (.raw session) false)
+    (set! (.paste-enabled session) false)
     (load session)))
 
 (defn terminal-overrides-default [] (-> TerminalOverrides)
   (let [overrides (alloc/stack TerminalOverrides)]
-    (store! (field overrides force-plain) false)
-    (store! (field overrides screen-reader) false)
-    (store! (field overrides reduced-motion) false)
-    (store! (field overrides compact) false)
-    (store! (field overrides verbose) false)
-    (store! (field overrides color-mode) -1)
-    (store! (field overrides unicode-mode) -1)
-    (store! (field overrides width) 0)
+    (set! (.force-plain overrides) false)
+    (set! (.screen-reader overrides) false)
+    (set! (.reduced-motion overrides) false)
+    (set! (.compact overrides) false)
+    (set! (.verbose overrides) false)
+    (set! (.color-mode overrides) -1)
+    (set! (.unicode-mode overrides) -1)
+    (set! (.width overrides) 0)
     (load overrides)))
 
 (defn terminal-env-eq? [(allocator (ptr Allocator))
@@ -105,7 +105,7 @@
         (match maybe
           (Some [owned]
                 (let [(mut value) owned
-                      equal (str-eq (owned-string-slice (load value)) expected)]
+                      equal (= (owned-string-slice (load value)) expected)]
                   (owned-string-free allocator value)
                   equal))
           (None [] false)))
@@ -179,16 +179,11 @@
 
 (defn terminal-overrides-from-env [(allocator (ptr Allocator))] (-> TerminalOverrides)
   (let [(mut overrides) (terminal-overrides-default)]
-    (store! (field overrides force-plain)
-            (terminal-env-enabled? allocator "COIL_TUI_PLAIN"))
-    (store! (field overrides screen-reader)
-            (terminal-env-enabled? allocator "COIL_TUI_SCREEN_READER"))
-    (store! (field overrides reduced-motion)
-            (terminal-env-enabled? allocator "COIL_TUI_REDUCED_MOTION"))
-    (store! (field overrides compact)
-            (terminal-env-enabled? allocator "COIL_TUI_COMPACT"))
-    (store! (field overrides verbose)
-            (terminal-env-enabled? allocator "COIL_TUI_VERBOSE"))
+    (set! (.force-plain overrides) (terminal-env-enabled? allocator "COIL_TUI_PLAIN"))
+    (set! (.screen-reader overrides) (terminal-env-enabled? allocator "COIL_TUI_SCREEN_READER"))
+    (set! (.reduced-motion overrides) (terminal-env-enabled? allocator "COIL_TUI_REDUCED_MOTION"))
+    (set! (.compact overrides) (terminal-env-enabled? allocator "COIL_TUI_COMPACT"))
+    (set! (.verbose overrides) (terminal-env-enabled? allocator "COIL_TUI_VERBOSE"))
     (store! (field overrides color-mode)
             (cond (terminal-env-eq? allocator "COIL_TUI_COLOR" "always") 1
                   (terminal-env-eq? allocator "COIL_TUI_COLOR" "never") 0
@@ -197,8 +192,7 @@
             (cond (terminal-env-eq? allocator "COIL_TUI_UNICODE" "always") 1
                   (terminal-env-eq? allocator "COIL_TUI_UNICODE" "never") 0
                   :else -1))
-    (store! (field overrides width)
-            (terminal-env-int allocator "COIL_TUI_WIDTH"))
+    (set! (.width overrides) (terminal-env-int allocator "COIL_TUI_WIDTH"))
     (load overrides)))
 
 (defn terminal-layout-width [(physical-columns i64)] (-> i64)
@@ -206,20 +200,20 @@
 
 (defn terminal-query-width [(fd i32)] (-> i64)
   (let [size (alloc/stack TerminalWindowSize)]
-    (store! size (zeroed TerminalWindowSize))
+    (set! size (zeroed TerminalWindowSize))
     (if (= (ioctl fd (cast u64 TUI_TIOCGWINSZ) size) 0)
         ;; Do not write into the terminal's final column. Most terminals defer
         ;; autowrap until the next byte, so cursor bookkeeping cannot tell whether
         ;; a width-exact line has already advanced. Reserving one margin cell makes
         ;; physical rows match layout rows across xterm-compatible terminals.
-        (terminal-layout-width (cast i64 (load (field size columns))))
+        (terminal-layout-width (cast i64 (.columns size)))
         0)))
 
 (defn terminal-query-height [(fd i32)] (-> i64)
   (let [size (alloc/stack TerminalWindowSize)]
-    (store! size (zeroed TerminalWindowSize))
+    (set! size (zeroed TerminalWindowSize))
     (if (= (ioctl fd (cast u64 TUI_TIOCGWINSZ) size) 0)
-        (cast i64 (load (field size rows)))
+        (cast i64 (.rows size))
         0)))
 
 (defn terminal-detect-facts [(allocator (ptr Allocator))] (-> TerminalFacts)
@@ -227,70 +221,66 @@
         output-tty (= (isatty (cast i32 1)) 1)
         queried-width (if output-tty (terminal-query-width (cast i32 1)) 0)
         parsed-width (terminal-env-int allocator "COLUMNS")]
-    (store! (field facts input-tty) (= (isatty (cast i32 0)) 1))
-    (store! (field facts output-tty) output-tty)
-    (store! (field facts term-dumb)
-            (terminal-env-eq? allocator "TERM" "dumb"))
-    (store! (field facts no-color)
-            (terminal-env-nonempty? allocator "NO_COLOR"))
-    (store! (field facts unicode) (terminal-env-unicode? allocator))
-    (store! (field facts columns)
-            (if (>= queried-width 12)
-                queried-width
-                (if (>= parsed-width 12) parsed-width 80)))
+    (set! (.input-tty facts) (= (isatty (cast i32 0)) 1))
+    (set! (.output-tty facts) output-tty)
+    (set! (.term-dumb facts) (terminal-env-eq? allocator "TERM" "dumb"))
+    (set! (.no-color facts) (terminal-env-nonempty? allocator "NO_COLOR"))
+    (set! (.unicode facts) (terminal-env-unicode? allocator))
+    (set! (.columns facts)
+          (if (>= queried-width 12)
+              queried-width
+              (if (>= parsed-width 12) parsed-width 80)))
     (let [queried-height
             (if output-tty
                 (terminal-query-height (cast i32 1))
                 0)]
-      (store! (field facts rows)
-              (if (>= queried-height 6) queried-height 24)))
+      (set! (.rows facts) (if (>= queried-height 6) queried-height 24)))
     (load facts)))
 
 (defn terminal-profile-from [(facts (ref TerminalFacts))
                              (overrides (ref TerminalOverrides))] (-> TerminalProfile)
   (let [profile (alloc/stack TerminalProfile)
         plain
-          (or (load (field overrides force-plain))
-              (or (load (field overrides screen-reader))
-                  (or (not (load (field facts output-tty)))
-                      (load (field facts term-dumb)))))
+          (or (.force-plain overrides)
+              (or (.screen-reader overrides)
+                  (or (not (.output-tty facts))
+                      (.term-dumb facts))))
         interactive
-          (and (load (field facts input-tty))
-               (and (load (field facts output-tty)) (not plain)))
-        requested-width (load (field overrides width))
+          (and (.input-tty facts)
+               (and (.output-tty facts) (not plain)))
+        requested-width (.width overrides)
         width
           (if (>= requested-width 12)
               requested-width
-              (load (field facts columns)))
-        color-mode (load (field overrides color-mode))
-        unicode-mode (load (field overrides unicode-mode))]
-    (store! (field profile input-tty) (load (field facts input-tty)))
-    (store! (field profile output-tty) (load (field facts output-tty)))
-    (store! (field profile interactive) interactive)
-    (store! (field profile plain) plain)
-    (store! (field profile color)
-            (and (not plain)
-                 (if (= color-mode 1)
-                     true
-                     (and (!= color-mode 0)
-                          (not (load (field facts no-color)))))))
-    (store! (field profile unicode)
-            (and (not (load (field overrides screen-reader)))
-                 (if (= unicode-mode 1)
-                     true
-                     (and (!= unicode-mode 0)
-                          (load (field facts unicode))))))
-    (store! (field profile motion)
-            (and interactive (not (load (field overrides reduced-motion)))))
-    (store! (field profile compact)
-            (and (load (field overrides compact))
-                 (not (load (field overrides verbose)))))
-    (store! (field profile expanded) (load (field overrides verbose)))
-    (store! (field profile width) (if (< width 12) 80 width))
-    (store! (field profile height)
-            (if (< (load (field facts rows)) 6)
-                24
-                (load (field facts rows))))
+              (.columns facts))
+        color-mode (.color-mode overrides)
+        unicode-mode (.unicode-mode overrides)]
+    (set! (.input-tty profile) (.input-tty facts))
+    (set! (.output-tty profile) (.output-tty facts))
+    (set! (.interactive profile) interactive)
+    (set! (.plain profile) plain)
+    (set! (.color profile)
+          (and (not plain)
+               (if (= color-mode 1)
+                   true
+                   (and (!= color-mode 0)
+                        (not (.no-color facts))))))
+    (set! (.unicode profile)
+          (and (not (.screen-reader overrides))
+               (if (= unicode-mode 1)
+                   true
+                   (and (!= unicode-mode 0)
+                        (.unicode facts)))))
+    (set! (.motion profile) (and interactive (not (.reduced-motion overrides))))
+    (set! (.compact profile)
+          (and (.compact overrides)
+               (not (.verbose overrides))))
+    (set! (.expanded profile) (.verbose overrides))
+    (set! (.width profile) (if (< width 12) 80 width))
+    (set! (.height profile)
+          (if (< (.rows facts) 6)
+              24
+              (.rows facts)))
     (load profile)))
 
 (defn terminal-detect-profile [(allocator (ptr Allocator))
@@ -308,7 +298,7 @@
 
 (defn terminal-write-byte [(fd i64) (byte u8)] (-> i64)
   (let [value (alloc/stack (array u8 1))]
-    (store! (index value 0) byte)
+    (set! (index value 0) byte)
     (terminal-write-all fd (slice-new [u8] (index value 0) 1))))
 
 (defn terminal-control-sequence [(allocator (ptr Allocator))
@@ -334,13 +324,13 @@
     (sb-push-str! (mut sequence) "[")
     (loop (if (> (* (load divisor) 10) safe-number)
               (break)
-              (store! divisor (* (load divisor) 10))))
+              (set! divisor (* (load divisor) 10))))
     (loop (do
             (sb-push-byte! (mut sequence)
                            (cast u8 (+ 48 (% (/ safe-number (load divisor)) 10))))
             (if (= (load divisor) 1)
                 (break)
-                (store! divisor (/ (load divisor) 10)))))
+                (set! divisor (/ (load divisor) 10)))))
     (sb-push-str! (mut sequence) suffix)
     (terminal-write-all fd (sb-finish! (mut sequence)))))
 
@@ -366,59 +356,59 @@
     ;; Do not depend on the caller's output post-processing flags. Interactive
     ;; terminal rows always begin in column zero; sequential output remains LF-only.
     (TerminalLineBreak []
-                       (if (load (field profile interactive))
+                       (if (.interactive profile)
                            (do
                              (terminal-write-byte fd (cast u8 13))
                              (terminal-write-byte fd (cast u8 10)))
                            (terminal-write-byte fd (cast u8 10))))
     (TerminalCarriageReturn []
-                            (if (load (field profile interactive))
+                            (if (.interactive profile)
                                 (terminal-write-byte fd (cast u8 13))
                                 0))
     (TerminalCursorUp [rows]
-                      (if (and (load (field profile interactive)) (> rows 0))
+                      (if (and (.interactive profile) (> rows 0))
                           (terminal-write-csi-number allocator fd rows "A")
                           0))
     (TerminalCursorDown [rows]
-                        (if (and (load (field profile interactive)) (> rows 0))
+                        (if (and (.interactive profile) (> rows 0))
                             (terminal-write-csi-number allocator fd rows "B")
                             0))
     (TerminalCursorRight [columns]
-                         (if (and (load (field profile interactive)) (> columns 0))
+                         (if (and (.interactive profile) (> columns 0))
                              (terminal-write-csi-number allocator fd columns "C")
                              0))
     (TerminalEraseLine []
-                       (if (load (field profile interactive))
+                       (if (.interactive profile)
                            (terminal-write-control allocator fd "[2K")
                            0))
     (TerminalClearScreen []
-                         (if (load (field profile interactive))
+                         (if (.interactive profile)
                              (do
                                (terminal-write-control allocator fd "[2J")
                                (terminal-write-control allocator fd "[H"))
                              0))
     (TerminalSetRole [role]
-                     (if (load (field profile color))
+                     (if (.color profile)
                          (terminal-write-all fd (terminal-role-sgr allocator role))
                          0))
     (TerminalResetStyle []
-                        (if (load (field profile color))
+                        (if (.color profile)
                             (terminal-write-control allocator fd "[0m")
                             0))
     (TerminalHideCursor []
-                        (if (load (field profile interactive))
+                        (if (.interactive profile)
                             (terminal-write-control allocator fd "[?25l")
                             0))
     (TerminalShowCursor []
-                        (if (load (field profile interactive))
+                        (if (.interactive profile)
                             (terminal-write-control allocator fd "[?25h")
                             0))
     (TerminalEnableBracketedPaste []
-                                  (if (load (field profile interactive))
+                                  (if (.interactive profile)
                                       (terminal-write-control allocator fd "[?2004h")
                                       0))
     (TerminalDisableBracketedPaste []
-                                   (if (load (field profile interactive))
+                                   (if (.interactive profile)
                                        (terminal-write-control allocator fd "[?2004l")
                                        0))))
 
@@ -428,28 +418,27 @@
     (loop (if (>= (load at) 32)
               (break)
               (do
-                (store! (index (field destination storage) (load at))
-                        (load (index (field source storage) (load at))))
-                (store! at (+ (load at) 1)))))
+                (set! (index (field destination storage) (load at)) (load (index (field source storage) (load at))))
+                (set! at (+ (load at) 1)))))
     0))
 
 (defn terminal-session-enter! [(allocator (ptr Allocator))
                                (session (ptr TerminalSession))
                                (profile (ref TerminalProfile))] (-> bool)
-  (if (not (load (field profile interactive)))
+  (if (not (.interactive profile))
       false
       (let [raw (alloc/stack TerminalAttributes)]
-        (if (!= (tcgetattr (cast i32 0) (mut (field session saved))) (cast i32 0))
+        (if (!= (tcgetattr (cast i32 0) (mut (.saved session))) (cast i32 0))
             false
             (do
-              (terminal-attributes-copy! raw (mut (field session saved)))
+              (terminal-attributes-copy! raw (mut (.saved session)))
               (cfmakeraw raw)
               (if (!= (tcsetattr (cast i32 0) (cast i32 TCSAFLUSH) raw) (cast i32 0))
                   false
                   (do
-                    (store! (field session raw) true)
+                    (set! (.raw session) true)
                     (terminal-execute! allocator 1 profile (TerminalEnableBracketedPaste))
-                    (store! (field session paste-enabled) true)
+                    (set! (.paste-enabled session) true)
                     true)))))))
 
 (defn terminal-session-restore! [(allocator (ptr Allocator))

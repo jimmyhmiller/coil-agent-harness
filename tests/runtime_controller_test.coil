@@ -45,10 +45,10 @@
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
                  (let [(mut response) (response-empty allocator)]
-                   (store! (field response provider) "fake")
-                   (store! (field response model) (load (field request model)))
-                   (store! (field response response-id) "fake-response")
-                   (store! (field response output-text) "done")
+                   (set! (.provider response) "fake")
+                   (set! (.model response) (.model request))
+                   (set! (.response-id response) "fake-response")
+                   (set! (.output-text response) "done")
                    (ModelOk (load response)))))
 
 (defstruct ControllerFakeProviderFactory
@@ -65,7 +65,7 @@
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))
                             (if (str-eq provider-name "fake")
-                                (Some (load (field self provider)))
+                                (Some (.provider self))
                                 (None [(dyn ModelProvider)]))))
 
 (defstruct QueuedProviderState
@@ -95,10 +95,10 @@
                    (sleep-ms 40)
                    (atomic-add (load (field state active)) -1)
                    (let [(mut response) (response-empty allocator)]
-                     (store! (field response provider) "queued-fake")
-                     (store! (field response model) (load (field request model)))
-                     (store! (field response response-id) "queued-response")
-                     (store! (field response output-text) "done")
+                     (set! (.provider response) "queued-fake")
+                     (set! (.model response) (.model request))
+                     (set! (.response-id response) "queued-response")
+                     (set! (.output-text response) "done")
                      (ModelOk (load response))))))
 
 (defstruct QueuedProviderFactory
@@ -115,7 +115,7 @@
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))
                             (if (str-eq provider-name "queued-fake")
-                                (Some (load (field self provider)))
+                                (Some (.provider self))
                                 (None [(dyn ModelProvider)]))))
 
 (defn controller-command [(allocator (ptr Allocator))] (-> Json)
@@ -160,16 +160,14 @@
                                                 path))
                  command (controller-command allocator)
                  request (runtime-model-request controller command allocator)]
-             (assert (str-eq (load (field request run-id)) "controller-run"))
-             (assert (str-eq (load (field request instructions)) "test instructions"))
+             (assert (= (load (field request run-id)) "controller-run"))
+             (assert (= (load (field request instructions)) "test instructions"))
              (assert (> (str-len (load (field request cache-key))) 0))
-             (assert (str-eq (load (field request prompt-cache-key))
-                             "fake/fake-model/controller-run"))
+             (assert (= (load (field request prompt-cache-key)) "fake/fake-model/controller-run"))
              (let [(mut scoped) (controller-command allocator)]
                (json-put-string! (mut scoped) "conversation_id" "conversation-42")
                (let [scoped-request (runtime-model-request controller (load scoped) allocator)]
-                 (assert (str-eq (load (field scoped-request prompt-cache-key))
-                                 "fake/fake-model/conversation-42"))))
+                 (assert (= (load (field scoped-request prompt-cache-key)) "fake/fake-model/conversation-42"))))
              (let [(mut continued) command]
                (json-put-string! (mut continued) "previous_response_id" "response-1")
                (json-put-string! (mut continued)
@@ -218,12 +216,12 @@
            (let [recovery (event-journal-recover allocator path)]
              (assert (load (field recovery ok)))
              (assert-eq (al-len [Json] (load (field recovery events))) 2)
-             (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 0)
-                                             "event")
-                             "run.started"))
-             (assert (str-eq (command-string (al-get [Json] (load (field recovery events)) 1)
-                                             "event")
-                             "run.completed")))
+             (assert (= (command-string (al-get [Json] (load (field recovery events)) 0)
+                                        "event")
+                        "run.started"))
+             (assert (= (command-string (al-get [Json] (load (field recovery events)) 1)
+                                        "event")
+                        "run.completed")))
            (event-journal-close! journal)))
 
 (deftest completed-child-injects-a-contextual-parent-notification-run
@@ -283,14 +281,13 @@
                              (load (field controller pending))
                              0)
                    command (load (field notification command))]
-               (assert (str-eq (command-string command "run_id")
-                               "notification:notification-child"))
-               (assert (str-eq (command-string command "actor") "agent-notification"))
-               (assert (str-eq (command-string command "conversation_id") "conversation-1"))
-               (assert (str-eq (match-else (json-array-get (json-get command "depends_on") 0)
-                                           (JsonString [dependency] dependency)
-                                           (_ ""))
-                               "notification-parent"))))
+               (assert (= (command-string command "run_id") "notification:notification-child"))
+               (assert (= (command-string command "actor") "agent-notification"))
+               (assert (= (command-string command "conversation_id") "conversation-1"))
+               (assert (= (match (json-array-get (json-get command "depends_on") 0)
+                                 (JsonString [dependency] dependency)
+                                 (_ ""))
+                          "notification-parent"))))
            (let [recovery (event-journal-recover allocator path)
                  events (field recovery events)
                  (mut saw-message) false
@@ -299,11 +296,10 @@
              (loop (if (>= (load i) (al-len [Json] (load events)))
                        (break)
                        (let [event (al-get [Json] (load events) (load i))]
-                         (when (str-eq (command-string event "event") "agent.message.received")
+                         (when (= (command-string event "event") "agent.message.received")
                            (store! saw-message true)
                            0)
-                         (when (str-eq (command-string event "run_id")
-                                       "notification:notification-child")
+                         (when (= (command-string event "run_id") "notification:notification-child")
                            (store! saw-notification true)
                            0)
                          (store! i (+ (load i) 1)))))
@@ -462,8 +458,8 @@
                    (loop (if (>= (load i) n)
                              (break)
                              (let [event (al-get [Json] (load (field recovery events)) (load i))]
-                               (when (and (str-eq (command-string event "run_id") "queued-run-two")
-                                          (str-eq (command-string event "event") "workflow.node.ready"))
+                               (when (and (= (command-string event "run_id") "queued-run-two")
+                                          (= (command-string event "event") "workflow.node.ready"))
                                  (store! saw-ready true)
                                  0)
                                (store! i (+ (load i) 1)))))
@@ -494,8 +490,8 @@
                  (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
-                (let [(mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
-                  (store! (field result output) (load (field call arguments)))
+                (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
+                  (set! (.output result) (.arguments call))
                   (load result))))
 
 (defn tool-plane-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
@@ -504,14 +500,14 @@
                       "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false}")
         definition (alloc/stack ToolDefinition)
         implementation (box allocator ToolPlaneEchoTool (zeroed ToolPlaneEchoTool))]
-    (store! (field (field definition spec) name) "plane_echo")
-    (store! (field (field definition spec) description) "Return the supplied text.")
-    (store! (field (field definition spec) input-schema) (load (field parsed value)))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (ReadOnly))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 1000)
-    (store! (field definition implementation) implementation)
+    (set! (.name (.spec definition)) "plane_echo")
+    (set! (.description (.spec definition)) "Return the supplied text.")
+    (set! (.input-schema (.spec definition)) (.value parsed))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 1000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn tool-plane-command [(allocator (ptr Allocator))
@@ -561,47 +557,46 @@
                (assert-eq (json-number-i64 (json-get catalog "version")) 1)
                (assert-eq (json-array-length tools) 1)
                (let [entry (json-array-get tools 0)]
-                 (assert (str-eq (command-string entry "name") "plane_echo"))
-                 (assert (str-eq (command-string entry "effect") "read_only"))
+                 (assert (= (command-string entry "name") "plane_echo"))
+                 (assert (= (command-string entry "effect") "read_only"))
                  (assert-eq (json-number-i64 (json-get entry "timeout_ms")) 1000)
                  (assert (match (json-bool-value (json-get entry "idempotent"))
                            (Some [value] value)
                            (None [] false)))
-                 (assert (str-eq (command-string (json-get entry "input_schema") "type")
-                                 "object"))))
+                 (assert (= (command-string (json-get entry "input_schema") "type") "object"))))
              (json-put-string! (mut arguments) "text" "hello")
              (let [command (tool-plane-command allocator "plane_echo" (load arguments))]
                (assert (tool-plane-authorized? (runtime-controller-authorize-tool controller
                                                                                   command
                                                                                   allocator)))
                (let [result (runtime-controller-invoke-tool controller command allocator)]
-                 (assert (str-eq (command-string result "status") "succeeded"))
-                 (assert (str-eq (command-string result "session_id") "sdk-session"))
-                 (assert (str-eq (command-string (json-get result "output") "text") "hello"))
+                 (assert (= (command-string result "status") "succeeded"))
+                 (assert (= (command-string result "session_id") "sdk-session"))
+                 (assert (= (command-string (json-get result "output") "text") "hello"))
                  ;; Absent a call ID the tool name identifies the operation, so
                  ;; the journaled events still name what ran.
-                 (assert (str-eq (command-string result "call_id") "plane_echo"))))
+                 (assert (= (command-string result "call_id") "plane_echo"))))
              ;; A tool the model invented is reported as a tool result, not a
              ;; transport failure it cannot act on.
              (let [unknown (tool-plane-command allocator "missing" (json-object allocator))
                    decision (runtime-controller-authorize-tool controller unknown allocator)]
                (assert (not (tool-plane-authorized? decision)))
-               (assert (str-eq (command-string decision "reason") "unknown tool"))
-               (assert (str-eq (command-string (runtime-controller-invoke-tool controller
-                                                                               unknown
-                                                                               allocator)
-                                               "status")
-                               "unknown")))
+               (assert (= (command-string decision "reason") "unknown tool"))
+               (assert (= (command-string (runtime-controller-invoke-tool controller
+                                                                          unknown
+                                                                          allocator)
+                                          "status")
+                          "unknown")))
              ;; Arguments that miss the schema are refused before the tool runs.
              (let [malformed (tool-plane-command allocator "plane_echo" (json-object allocator))]
                (assert (not (tool-plane-authorized? (runtime-controller-authorize-tool controller
                                                                                        malformed
                                                                                        allocator))))
-               (assert (str-eq (command-string (runtime-controller-invoke-tool controller
-                                                                               malformed
-                                                                               allocator)
-                                               "status")
-                               "denied"))))
+               (assert (= (command-string (runtime-controller-invoke-tool controller
+                                                                          malformed
+                                                                          allocator)
+                                          "status")
+                          "denied"))))
            (let [recovery (event-journal-recover allocator path)
                  events (field recovery events)
                  (mut completed) 0
@@ -610,9 +605,9 @@
              (loop (if (>= (load i) (al-len [Json] (load events)))
                        (break)
                        (let [event (al-get [Json] (load events) (load i))]
-                         (when (and (str-eq (command-string event "event") "tool.call.completed")
-                                    (str-eq (command-string event "run_id") "sdk-session"))
-                           (assert (str-eq (command-string event "provider") "agent-sdk"))
+                         (when (and (= (command-string event "event") "tool.call.completed")
+                                    (= (command-string event "run_id") "sdk-session"))
+                           (assert (= (command-string event "provider") "agent-sdk"))
                            (store! completed (+ (load completed) 1))
                            0)
                          (store! i (+ (load i) 1)))))

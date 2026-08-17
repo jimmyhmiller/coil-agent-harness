@@ -115,14 +115,14 @@
         words (alloc/stack (array i64 64))
         hash (alloc/stack (array i64 8))
         (mut block) 0]
-    (store! (index hash 0) 1779033703)
-    (store! (index hash 1) 3144134277)
-    (store! (index hash 2) 1013904242)
-    (store! (index hash 3) 2773480762)
-    (store! (index hash 4) 1359893119)
-    (store! (index hash 5) 2600822924)
-    (store! (index hash 6) 528734635)
-    (store! (index hash 7) 1541459225)
+    (set! (index hash 0) 1779033703)
+    (set! (index hash 1) 3144134277)
+    (set! (index hash 2) 1013904242)
+    (set! (index hash 3) 2773480762)
+    (set! (index hash 4) 1359893119)
+    (set! (index hash 5) 2600822924)
+    (set! (index hash 6) 528734635)
+    (set! (index hash 7) 1541459225)
     (loop (if (>= (load block) total)
               (break)
               (do
@@ -130,11 +130,11 @@
                   (loop (if (>= (load index) 16)
                             (break)
                             (do
-                              (store! (index words (load index))
-                                      (oauth-sha256-word message
-                                                         total
-                                                         (+ (load block) (* (load index) 4))))
-                              (store! index (+ (load index) 1)))))
+                              (set! (index words (load index))
+                                    (oauth-sha256-word message
+                                                       total
+                                                       (+ (load block) (* (load index) 4))))
+                              (set! index (+ (load index) 1)))))
                   (loop (if (>= (load index) 64)
                             (break)
                             (let [x (load (index words (- (load index) 15)))
@@ -147,11 +147,11 @@
                                     (primitive/ixor (oauth-rotr32 y 17)
                                                     (primitive/ixor (oauth-rotr32 y 19)
                                                                     (primitive/ishr y 10)))]
-                              (store! (index words (load index))
-                                      (oauth-m32 (+ (+ (+ (load (index words (- (load index) 16))) s0)
-                                                       (load (index words (- (load index) 7))))
-                                                    s1)))
-                              (store! index (+ (load index) 1))))))
+                              (set! (index words (load index))
+                                    (oauth-m32 (+ (+ (+ (load (index words (- (load index) 16))) s0)
+                                                     (load (index words (- (load index) 7))))
+                                                  s1)))
+                              (set! index (+ (load index) 1))))))
                 (let [(mut a) (load (index hash 0))
                       (mut b) (load (index hash 1))
                       (mut c) (load (index hash 2))
@@ -183,34 +183,34 @@
                                                     (primitive/ixor (primitive/iand (load a) (load c))
                                                                     (primitive/iand (load b) (load c))))
                                   t2 (oauth-m32 (+ s0 majority))]
-                              (store! h (load g))
-                              (store! g (load f))
-                              (store! f (load e))
-                              (store! e (oauth-m32 (+ (load d) t1)))
-                              (store! d (load c))
-                              (store! c (load b))
-                              (store! b (load a))
-                              (store! a (oauth-m32 (+ t1 t2)))
-                              (store! round (+ (load round) 1)))))
-                  (store! (index hash 0) (oauth-m32 (+ (load (index hash 0)) (load a))))
-                  (store! (index hash 1) (oauth-m32 (+ (load (index hash 1)) (load b))))
-                  (store! (index hash 2) (oauth-m32 (+ (load (index hash 2)) (load c))))
-                  (store! (index hash 3) (oauth-m32 (+ (load (index hash 3)) (load d))))
-                  (store! (index hash 4) (oauth-m32 (+ (load (index hash 4)) (load e))))
-                  (store! (index hash 5) (oauth-m32 (+ (load (index hash 5)) (load f))))
-                  (store! (index hash 6) (oauth-m32 (+ (load (index hash 6)) (load g))))
-                  (store! (index hash 7) (oauth-m32 (+ (load (index hash 7)) (load h)))))
-                (store! block (+ (load block) 64)))))
+                              (set! h (load g))
+                              (set! g (load f))
+                              (set! f (load e))
+                              (set! e (oauth-m32 (+ (load d) t1)))
+                              (set! d (load c))
+                              (set! c (load b))
+                              (set! b (load a))
+                              (set! a (oauth-m32 (+ t1 t2)))
+                              (set! round (+ (load round) 1)))))
+                  (set! (index hash 0) (oauth-m32 (+ (load (index hash 0)) (load a))))
+                  (set! (index hash 1) (oauth-m32 (+ (load (index hash 1)) (load b))))
+                  (set! (index hash 2) (oauth-m32 (+ (load (index hash 2)) (load c))))
+                  (set! (index hash 3) (oauth-m32 (+ (load (index hash 3)) (load d))))
+                  (set! (index hash 4) (oauth-m32 (+ (load (index hash 4)) (load e))))
+                  (set! (index hash 5) (oauth-m32 (+ (load (index hash 5)) (load f))))
+                  (set! (index hash 6) (oauth-m32 (+ (load (index hash 6)) (load g))))
+                  (set! (index hash 7) (oauth-m32 (+ (load (index hash 7)) (load h)))))
+                (set! block (+ (load block) 64)))))
     (let [(mut index) 0]
       (loop (if (>= (load index) 32)
                 (break)
                 (do
-                  (store! (index output (load index))
-                          (cast u8
-                                (primitive/iand (primitive/ishr (load (index hash (/ (load index) 4)))
-                                                                (* 8 (- 3 (% (load index) 4))))
-                                                255)))
-                  (store! index (+ (load index) 1))))))
+                  (set! (index output (load index))
+                        (cast u8
+                              (primitive/iand (primitive/ishr (load (index hash (/ (load index) 4)))
+                                                              (* 8 (- 3 (% (load index) 4))))
+                                              255)))
+                  (set! index (+ (load index) 1))))))
     0))
 
 (defn oauth-base64-char [(value i64) (url-safe bool)] (-> u8)
@@ -248,7 +248,7 @@
                                      (oauth-base64-char (primitive/iand c 63) url-safe)
                                      (cast u8 61)))
                   0)
-                (store! index (+ (load index) 3)))))
+                (set! index (+ (load index) 3)))))
     (sb-finish! (mut output))))
 
 (defn oauth-pkce-challenge [(allocator (ptr Allocator))
@@ -265,7 +265,7 @@
               (Ok [opened]
                   (let [file (alloc/stack fs/File)
                         reader (alloc/stack io/Reader)]
-                    (store! file opened)
+                    (set! file opened)
                     (let [result
                             (io/read-exact (fs/file-reader reader file)
                                            (cast (ptr i8) bytes)
@@ -300,7 +300,7 @@
                       (sb-push-byte! (mut output) (cast u8 37))
                       (sb-push-byte! (mut output) (oauth-hex-upper (/ byte 16)))
                       (sb-push-byte! (mut output) (oauth-hex-upper (% byte 16)))))
-                (store! index (+ (load index) 1)))))
+                (set! index (+ (load index) 1)))))
     (sb-finish! (mut output))))
 
 (defn oauth-hex-value [(byte i64)] (-> i64)
@@ -345,7 +345,7 @@
     (loop (if (or (>= (load index) length)
                   (= (cast i64 (slice-get [u8] target (load index))) 63))
               (break)
-              (store! index (+ (load index) 1))))
+              (set! index (+ (load index) 1))))
     (when (< (load index) length) (store! index (+ (load index) 1)) 0)
     (loop (if (or (>= (load index) length) (> (slice-len [u8] (load result)) 0))
               (break)
@@ -359,9 +359,9 @@
                                        (= (cast i64 (slice-get [u8] target (load index))) 61))
                               (store! equals (load index))
                               0)
-                            (store! index (+ (load index) 1)))))
+                            (set! index (+ (load index) 1)))))
                 (when (and (> (load equals) start)
-                           (str-eq (substr target start (load equals)) wanted))
+                           (= (substr target start (load equals)) wanted))
                   (store! result
                           (oauth-url-decode allocator
                                             (substr target (+ (load equals) 1) (load index))))
@@ -390,8 +390,8 @@
                       (if (< (load index) right-length)
                           (cast i64 (slice-get [u8] right (load index)))
                           0)]
-                (store! difference (primitive/ior (load difference) (primitive/ixor a b)))
-                (store! index (+ (load index) 1)))))
+                (set! difference (primitive/ior (load difference) (primitive/ixor a b)))
+                (set! index (+ (load index) 1)))))
     (= (load difference) 0)))
 
 (defn oauth-base64-value [(byte i64)] (-> i64)
@@ -414,14 +414,13 @@
               (break)
               (let [byte (cast i64 (slice-get [u8] value (load index)))]
                 (if (= byte 61)
-                    (store! index length)
+                    (set! index length)
                     (let [decoded (oauth-base64-value byte)]
                       (if (< decoded 0)
-                          (store! valid false)
+                          (set! valid false)
                           (do
-                            (store! accumulator
-                                    (primitive/ior (primitive/ishl (load accumulator) 6) decoded))
-                            (store! bits (+ (load bits) 6))
+                            (set! accumulator (primitive/ior (primitive/ishl (load accumulator) 6) decoded))
+                            (set! bits (+ (load bits) 6))
                             (when (>= (load bits) 8)
                               (store! bits (- (load bits) 8))
                               (sb-push-byte! (mut output)
@@ -429,7 +428,7 @@
                                                    (primitive/iand (primitive/ishr (load accumulator) (load bits))
                                                                    255)))
                               0)
-                            (store! index (+ (load index) 1)))))))))
+                            (set! index (+ (load index) 1)))))))))
     (if (load valid) (sb-finish! (mut output)) "")))
 
 (defn oauth-jwt-claims [(allocator (ptr Allocator)) (token (slice u8))] (-> Json)
@@ -445,14 +444,14 @@
                       (store! first (load index))
                       (do (store! second (load index)) (break)))
                   0)
-                (store! index (+ (load index) 1)))))
+                (set! index (+ (load index) 1)))))
     (if (or (< (load first) 0) (< (load second) 0))
         (JsonNull)
         (let [decoded
                 (oauth-base64-decode allocator
                                      (substr token (+ (load first) 1) (load second)))
               parsed (json-parse allocator decoded)]
-          (if (load (field parsed ok)) (load (field parsed value)) (JsonNull))))))
+          (if (.ok parsed) (.value parsed) (JsonNull))))))
 
 (defn oauth-write-line [(fd i64) (value (slice u8))] (-> i64)
   (let [writer (alloc/stack io/Writer)
@@ -469,7 +468,7 @@
                                (url (slice u8))] (-> i64)
   (let [child (alloc/stack subprocess/Child)
         args (alloc/stack (array (slice u8) 1))]
-    (store! (index args 0) url)
+    (set! (index args 0) url)
     (match (subprocess/spawn allocator
                              child
                              command
@@ -527,15 +526,15 @@
                       (match (time/duration-seconds 180)
                         (Err [failure] 0)
                         (Ok [duration]
-                            (match (selectors/wait-fd-for (cast i32 (load (field listener fd)))
+                            (match (selectors/wait-fd-for (cast i32 (.fd listener))
                                                           (selectors/interest-readable)
                                                           duration)
                               (Err [failure] 0)
                               (Ok [available]
                                   (let [ready-events available]
-                                    (store! ready
-                                            (or (load (field ready-events readable))
-                                                (load (field ready-events hangup)))))))))
+                                    (set! ready
+                                          (or (.readable ready-events)
+                                              (.hangup ready-events))))))))
                       (when (load ready)
                         (let [client-fd (http-listener-accept (mut listener))]
                           (when (>= client-fd 0)
@@ -550,7 +549,7 @@
                                                          target (load (field accepted target))
                                                          returned-state (oauth-query-value allocator target "state")
                                                          returned-code (oauth-query-value allocator target "code")]
-                                                     (if (and (str-eq (oauth-target-path target) path)
+                                                     (if (and (= (oauth-target-path target) path)
                                                               (oauth-secure-eq returned-state expected-state)
                                                               (> (slice-len [u8] returned-code) 0))
                                                          (do

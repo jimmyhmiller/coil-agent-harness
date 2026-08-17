@@ -28,9 +28,7 @@
           ;; Serialization happens after execute-search-text has freed its RunResult.
           ;; This catches returning a borrowed slice into the subprocess capture.
           serialized (json-stringify allocator output)]
-      (assert (match-else (load (field result status))
-                          (ToolSucceeded [] true)
-                          (_ false)))
+      (assert (match (load (field result status)) (ToolSucceeded [] true) (_ false)))
       (assert (match (str-find serialized "1:(module harness-search-tool)")
                 (Some [position] true)
                 (None [] false)))

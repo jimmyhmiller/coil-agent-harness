@@ -32,28 +32,28 @@
 (defn cancellation-token-new [(allocator (ptr Allocator))] (-> (ptr CancellationToken))
   (let [token (box allocator CancellationToken (zeroed CancellationToken))]
     (match (native-cancellation/cancellation-init (field token native))
-      (Ok [opened] (store! (field token initialized) true))
-      (Err [failure] (store! (field token initialized) false)))
+      (Ok [opened] (set! (.initialized token) true))
+      (Err [failure] (set! (.initialized token) false)))
     token))
 
 (defn cancellation-request! [(token (ptr CancellationToken))] (-> i64)
   (if (= token (cast (ptr CancellationToken) 0))
       0
-      (if (load (field token initialized))
+      (if (.initialized token)
           (native-cancellation/cancellation-request! (field token native))
           0)))
 
 (defn cancellation-requested? [(token (ptr CancellationToken))] (-> bool)
   (and (!= token (cast (ptr CancellationToken) 0))
-       (and (load (field token initialized))
+       (and (.initialized token)
             (native-cancellation/cancellation-requested? (field token native)))))
 
 (defn cancellation-token-close! [(token (ptr CancellationToken))] (-> i64)
   (if (or (= token (cast (ptr CancellationToken) 0))
-          (not (load (field token initialized))))
+          (not (.initialized token)))
       0
       (do
-        (store! (field token initialized) false)
+        (set! (.initialized token) false)
         (native-cancellation/cancellation-close! (field token native)))))
 
 (defstruct ToolExecutionContext
@@ -116,24 +116,24 @@
 
 (defn tool-registry-new [(allocator (ptr Allocator))] (-> ToolRegistry)
   (let [registry (alloc/stack ToolRegistry)]
-    (store! (field registry definitions) (al-new [ToolDefinition] allocator))
+    (set! (.definitions registry) (al-new [ToolDefinition] allocator))
     (load registry)))
 
 ;; Register a tool. Names must be unique; false means an existing name was left
 ;; unchanged.
 (defn tool-register! [(registry (mut ToolRegistry)) (definition ToolDefinition)] (-> bool)
-  (let [name (load (field (field definition spec) name))
+  (let [name (.name (.spec definition))
         (mut i) 0
-        n (al-len [ToolDefinition] (load (field registry definitions)))
+        n (al-len [ToolDefinition] (.definitions registry))
         (mut unique) true]
     (loop (if (>= (load i) n)
               (break)
-              (let [existing (al-get [ToolDefinition] (load (field registry definitions)) (load i))]
-                (if (str-eq (load (field (field existing spec) name)) name)
-                    (do (store! unique false) (break))
-                    (store! i (+ (load i) 1))))))
-    (if (and (load unique) (tool-spec-valid? (load (field definition spec))))
-        (do (al-push! [ToolDefinition] (mut (field registry definitions)) definition) true)
+              (let [existing (al-get [ToolDefinition] (.definitions registry) (load i))]
+                (if (= (.name (.spec existing)) name)
+                    (do (set! unique false) (break))
+                    (set! i (+ (load i) 1))))))
+    (if (and (load unique) (tool-spec-valid? (.spec definition)))
+        (do (al-push! [ToolDefinition] (mut (.definitions registry)) definition) true)
         false)))
 
 (defn tool-find [(registry ToolRegistry) (name (slice u8))] (-> (Option ToolDefinition))
@@ -145,19 +145,19 @@
     (loop (if (>= (load i) n)
               (break)
               (let [definition (al-get [ToolDefinition] (load definitions) (load i))]
-                (if (str-eq (load (field (field definition spec) name)) name)
-                    (do (store! result definition) (store! found true) (break))
-                    (store! i (+ (load i) 1))))))
+                (if (= (.name (.spec definition)) name)
+                    (do (set! result definition) (set! found true) (break))
+                    (set! i (+ (load i) 1))))))
     (if (load found) (Some (load result)) (None [ToolDefinition]))))
 
 (defn tool-result-empty [(call-id (slice u8)) (status ToolStatus)] (-> ToolResult)
   (let [result (alloc/stack ToolResult)]
-    (store! (field result call-id) call-id)
-    (store! (field result status) status)
-    (store! (field result output) (JsonNull))
-    (store! (field result error) "")
-    (store! (field result started-at-ms) 0)
-    (store! (field result finished-at-ms) 0)
+    (set! (.call-id result) call-id)
+    (set! (.status result) status)
+    (set! (.output result) (JsonNull))
+    (set! (.error result) "")
+    (set! (.started-at-ms result) 0)
+    (set! (.finished-at-ms result) 0)
     (load result)))
 
 ;; Promotion helpers make arena crossings explicit. A copied tagged Json value is
@@ -165,41 +165,34 @@
 (defn tool-call-clone-into [(target (ptr Allocator))
                             (source ToolCall)] (-> ToolCall)
   (let [result (alloc/stack ToolCall)]
-    (store! (field result id)
-            (json-copy-string target (load (field source id))))
-    (store! (field result name)
-            (json-copy-string target (load (field source name))))
-    (store! (field result arguments)
-            (json-clone target (load (field source arguments))))
-    (store! (field result raw-arguments)
-            (json-copy-string target (load (field source raw-arguments))))
+    (set! (.id result) (json-copy-string target (.id source)))
+    (set! (.name result) (json-copy-string target (.name source)))
+    (set! (.arguments result) (json-clone target (.arguments source)))
+    (set! (.raw-arguments result) (json-copy-string target (.raw-arguments source)))
     (load result)))
 
 (defn tool-result-clone-into [(target (ptr Allocator))
                               (source ToolResult)] (-> ToolResult)
   (let [result (alloc/stack ToolResult)]
-    (store! (field result call-id)
-            (json-copy-string target (load (field source call-id))))
-    (store! (field result status) (load (field source status)))
-    (store! (field result output)
-            (json-clone target (load (field source output))))
-    (store! (field result error)
-            (json-copy-string target (load (field source error))))
-    (store! (field result started-at-ms) (load (field source started-at-ms)))
-    (store! (field result finished-at-ms) (load (field source finished-at-ms)))
+    (set! (.call-id result) (json-copy-string target (.call-id source)))
+    (set! (.status result) (.status source))
+    (set! (.output result) (json-clone target (.output source)))
+    (set! (.error result) (json-copy-string target (.error source)))
+    (set! (.started-at-ms result) (.started-at-ms source))
+    (set! (.finished-at-ms result) (.finished-at-ms source))
     (load result)))
 
 ;; Validate the cross-provider subset required by strict function tools. Provider
 ;; adapters may impose additional restrictions and report them separately.
 (defn tool-spec-valid? [(spec ToolSpec)] (-> bool)
-  (let [name (load (field spec name))]
+  (let [name (.name spec)]
     (and (> (slice-len [u8] name) 0)
          (and (<= (slice-len [u8] name) 64)
-              (match-else (load (field spec input-schema))
-                          (JsonObject [keys values]
-                                      (match-else (json-string-at (load (field spec input-schema)) "type")
-                                                  (Some [kind] (str-eq kind "object"))
-                                                  (_ false)))
-                          (_ false))
-              (or (not (load (field spec strict)))
-                  (json-schema-strict-compatible? (load (field spec input-schema))))))))
+              (match (.input-schema spec)
+                     (JsonObject [keys values]
+                                 (match (json-string-at (.input-schema spec) "type")
+                                        (Some [kind] (= kind "object"))
+                                        (_ false)))
+                     (_ false))
+              (or (not (.strict spec))
+                  (json-schema-strict-compatible? (.input-schema spec)))))))

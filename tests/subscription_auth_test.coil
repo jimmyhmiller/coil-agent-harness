@@ -1,6 +1,6 @@
 (module harness-subscription-auth-test)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :use * :as alloc)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
 (import "coil.slice" :use *)
@@ -72,9 +72,8 @@
                        (CodexCredentialsFailed [message] false)
                        (CodexCredentialsLoaded [loaded]
                                                (let [credentials loaded]
-                                                 (and (str-eq (load (field credentials access-token)) access)
-                                                      (str-eq (load (field credentials account-id))
-                                                              "account-test")))))))
+                                                 (and (= (load (field credentials access-token)) access)
+                                                      (= (load (field credentials account-id)) "account-test")))))))
            (os/env-unset allocator "HARNESS_AUTH_DIR")))
 
 (deftest native-claude-credentials-load-without-refreshing-valid-token
@@ -97,8 +96,7 @@
                        (ClaudeCredentialsFailed [message] false)
                        (ClaudeCredentialsLoaded [loaded]
                                                 (let [credentials loaded]
-                                                  (str-eq (load (field credentials access-token))
-                                                          "claude-access"))))))
+                                                  (= (load (field credentials access-token)) "claude-access"))))))
            (os/env-unset allocator "HARNESS_AUTH_DIR")))
 
 (deftest codex-refresh-window-is-derived-from-native-jwt-claims
@@ -123,7 +121,7 @@
                listener (box allocator HttpListener (zeroed HttpListener))
                received (box allocator (slice u8) "")
                job (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
-               worker (stack Thread)]
+               worker (alloc/stack Thread)]
            (match (http-listener-open allocator 0)
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
@@ -192,7 +190,7 @@
                listener (box allocator HttpListener (zeroed HttpListener))
                received (box allocator (slice u8) "")
                job (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
-               worker (stack Thread)]
+               worker (alloc/stack Thread)]
            (match (http-listener-open allocator 0)
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
@@ -222,7 +220,7 @@
            (let [listener-two (box allocator HttpListener (zeroed HttpListener))
                  received-two (box allocator (slice u8) "")
                  job-two (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
-                 worker-two (stack Thread)]
+                 worker-two (alloc/stack Thread)]
              (match (http-listener-open allocator 0)
                (ListenerOpenFailed [message] (assert false))
                (ListenerOpened [opened] (store! listener-two opened)))

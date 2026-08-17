@@ -36,7 +36,7 @@
 (defn tui-output-write-frame [(allocator (ptr Allocator))
                               (frame (ptr Frame))
                               (profile (ref TerminalProfile))] (-> i64)
-  (if (load (field profile interactive))
+  (if (.interactive profile)
       (let [(mut renderer) (inline-renderer-new)
             (mut empty) (frame-new allocator)]
         (tui-output-inline-update! (mut renderer)
@@ -60,7 +60,7 @@
                                    (al-get [TerminalOperation]
                                            (load operations)
                                            (load at)))
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     0))
 
 ;; A repaint walks the cursor across every row it rewrites. Hiding it for the

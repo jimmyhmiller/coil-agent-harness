@@ -24,7 +24,7 @@
                    (slot (ptr Frame))
                    (rows i64)
                    (changed-row i64)] (-> i64)
-  (store! slot (frame-new allocator))
+  (set! slot (frame-new allocator))
   (let [(mut i) 0]
     (loop (if (>= (load i) rows)
               (break)
@@ -32,7 +32,7 @@
                 (push-row! slot
                            (if (= (load i) changed-row) "CHANGED" "steady row")
                            (RolePrimary))
-                (store! i (+ (load i) 1))))))
+                (set! i (+ (load i) 1))))))
   0)
 
 (defn count-kind [(operations (ArrayList TerminalOperation))
@@ -46,7 +46,7 @@
                 (when (= (operation-index (al-get [TerminalOperation] operations (load i)))
                          wanted)
                   (store! found (+ (load found) 1)))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 (const OP_WRITE 0)
@@ -56,12 +56,12 @@
 (const OP_OTHER 4)
 
 (defn operation-index [(operation TerminalOperation)] (-> i64)
-  (match-else operation
-              (TerminalWrite [_] OP_WRITE)
-              (TerminalEraseLine [] OP_ERASE)
-              (TerminalCursorUp [_] OP_UP)
-              (TerminalCursorDown [_] OP_DOWN)
-              (_ OP_OTHER)))
+  (match operation
+         (TerminalWrite [_] OP_WRITE)
+         (TerminalEraseLine [] OP_ERASE)
+         (TerminalCursorUp [_] OP_UP)
+         (TerminalCursorDown [_] OP_DOWN)
+         (_ OP_OTHER)))
 
 ;; Net vertical movement must be zero: the planner is documented to leave the
 ;; cursor where it found it, on the last live row. If that drifts, the next
@@ -73,11 +73,11 @@
     (loop (if (>= (load i) count)
               (break)
               (do
-                (match-else (al-get [TerminalOperation] operations (load i))
-                            (TerminalCursorUp [rows] (store! net (- (load net) rows)))
-                            (TerminalCursorDown [rows] (store! net (+ (load net) rows)))
-                            (_ 0))
-                (store! i (+ (load i) 1)))))
+                (match (al-get [TerminalOperation] operations (load i))
+                       (TerminalCursorUp [rows] (set! net (- (load net) rows)))
+                       (TerminalCursorDown [rows] (set! net (+ (load net) rows)))
+                       (_ 0))
+                (set! i (+ (load i) 1)))))
     (load net)))
 
 (deftest an-unchanged-frame-costs-no-terminal-work

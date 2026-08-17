@@ -11,7 +11,7 @@
 
 (defn transcript-policy-new [] (-> TranscriptPolicy)
   (let [policy (alloc/stack TranscriptPolicy)]
-    (store! (field policy committed-count) 0)
+    (set! (.committed-count policy) 0)
     (load policy)))
 
 (defn presentation-state-stable? [(state PresentationState)] (-> bool)
@@ -27,22 +27,22 @@
 ;; remains live while an earlier assistant block is still streaming.
 (defn transcript-advance! [(policy (ptr TranscriptPolicy))
                            (model (ptr PresentationModel))] (-> i64)
-  (let [(mut at) (load (field policy committed-count))
-        count (al-len [PresentationBlock] (load (field model blocks)))]
+  (let [(mut at) (.committed-count policy)
+        count (al-len [PresentationBlock] (.blocks model))]
     (loop (if (>= (load at) count)
               (break)
               (let [block
                       (al-get [PresentationBlock]
-                              (load (field model blocks))
+                              (.blocks model)
                               (load at))]
-                (if (presentation-state-stable? (load (field block state)))
-                    (store! at (+ (load at) 1))
+                (if (presentation-state-stable? (.state block))
+                    (set! at (+ (load at) 1))
                     (break)))))
-    (let [advanced (- (load at) (load (field policy committed-count)))]
-      (store! (field policy committed-count) (load at))
+    (let [advanced (- (load at) (.committed-count policy))]
+      (set! (.committed-count policy) (load at))
       advanced)))
 
 (defn transcript-live-count [(policy (ptr TranscriptPolicy))
                              (model (ptr PresentationModel))] (-> i64)
-  (- (al-len [PresentationBlock] (load (field model blocks)))
-     (load (field policy committed-count))))
+  (- (al-len [PresentationBlock] (.blocks model))
+     (.committed-count policy)))

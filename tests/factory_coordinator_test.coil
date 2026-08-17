@@ -1,6 +1,6 @@
 (module harness-factory-coordinator-test)
 
-(import "coil.alloc" :use *)
+(import "coil.alloc" :use * :as alloc)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
 (import "coil.slice" :use *)
@@ -19,7 +19,7 @@
 (deftest factory-request-preserves-opaque-reasoning
          (let [allocator (malloc-allocator)
                registry (box allocator ToolRegistry (tool-registry-new allocator))
-               request (stack ModelRequest)]
+               request (alloc/stack ModelRequest)]
            (store! request
                    (factory-request allocator
                                     registry
@@ -38,15 +38,9 @@
                             (let [(mut registry) (tool-registry-new allocator)
                                   loaded definition]
                               (factory-register-configured-tools! (mut registry) allocator "." loaded)
-                              (assert (match-else (tool-find (load registry) "read_text_file")
-                                                  (Some [tool] true)
-                                                  (_ false)))
-                              (assert (match-else (tool-find (load registry) "search_text")
-                                                  (Some [tool] true)
-                                                  (_ false)))
-                              (assert (match-else (tool-find (load registry) "bash")
-                                                  (Some [tool] true)
-                                                  (_ false))))))))
+                              (assert (match (tool-find (load registry) "read_text_file") (Some [tool] true) (_ false)))
+                              (assert (match (tool-find (load registry) "search_text") (Some [tool] true) (_ false)))
+                              (assert (match (tool-find (load registry) "bash") (Some [tool] true) (_ false))))))))
 
 (deftest workflow-decisions-can-complete-skip-and-jump-backward
          (let [allocator (malloc-allocator)

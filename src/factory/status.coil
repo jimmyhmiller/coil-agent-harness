@@ -26,24 +26,24 @@
   (!= (atomic-load (field status ready)) 0))
 
 (defn factory-status-error [(call (ptr ToolCall)) (message (slice u8))] (-> ToolResult)
-  (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
-    (store! (field result error) message)
+  (let [(mut result) (tool-result-empty (.id call) (ToolErrored))]
+    (set! (.error result) message)
     (load result)))
 
 (defn execute-factory-status [(self (ptr FactoryStatusTool))
                               (call (ptr ToolCall))
                               (allocator (ptr Allocator))] (-> ToolResult)
-  (match (json-bool-value (json-get (load (field call arguments)) "ready"))
+  (match (json-bool-value (json-get (.arguments call) "ready"))
     (None [] (factory-status-error call "ready must be true or false"))
     (Some [ready]
           (let [(mut output) (json-object allocator)
-                (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))
+                (mut result) (tool-result-empty (.id call) (ToolSucceeded))
                 status (load (field self status))]
             (atomic-store (field status ready) (if ready 1 0))
             (atomic-store (field status reported) 1)
             (json-put-bool! (mut output) "recorded" true)
             (json-put-bool! (mut output) "ready" ready)
-            (store! (field result output) (load output))
+            (set! (.output result) (load output))
             (load result)))))
 
 (impl ToolImplementation FactoryStatusTool
@@ -81,14 +81,14 @@
                                      (status (ptr FactoryWorkerStatus))] (-> bool)
   (let [definition (alloc/stack ToolDefinition)
         implementation (box allocator FactoryStatusTool (zeroed FactoryStatusTool))]
-    (store! (field implementation status) status)
-    (store! (field (field definition spec) name) "report_worker_status")
-    (store! (field (field definition spec) description)
-            "Report whether this worker has completed and validated its Markdown assignment. Use ready=false when it is not ready; include a concise summary and optional evidence.")
-    (store! (field (field definition spec) input-schema) (factory-status-schema allocator))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (ReadOnly))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 0)
-    (store! (field definition implementation) implementation)
+    (set! (.status implementation) status)
+    (set! (.name (.spec definition)) "report_worker_status")
+    (set! (.description (.spec definition))
+          "Report whether this worker has completed and validated its Markdown assignment. Use ready=false when it is not ready; include a concise summary and optional evidence.")
+    (set! (.input-schema (.spec definition)) (factory-status-schema allocator))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 0)
+    (set! (.implementation definition) implementation)
     (tool-register! (mut registry) (load definition))))

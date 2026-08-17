@@ -20,9 +20,7 @@
            (store! (field call name) "report_worker_status")
            (store! (field call arguments) (load arguments))
            (let [result (execute-factory-status tool call allocator)]
-             (assert (match-else (load (field result status))
-                                 (ToolSucceeded [] true)
-                                 (_ false)))
+             (assert (match (load (field result status)) (ToolSucceeded [] true) (_ false)))
              (assert (factory-worker-status-reported? status))
              (assert (factory-worker-status-ready? status)))
            (factory-worker-status-reset! status)
@@ -38,6 +36,4 @@
                status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
                (mut registry) (tool-registry-new allocator)]
            (assert (register-factory-status-tool! (mut registry) allocator status))
-           (assert (match-else (tool-find (load registry) "report_worker_status")
-                               (Some [tool] true)
-                               (_ false)))))
+           (assert (match (tool-find (load registry) "report_worker_status") (Some [tool] true) (_ false)))))

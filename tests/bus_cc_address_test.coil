@@ -15,25 +15,23 @@
 
 (deftest an-ordinary-socket-path-needs-no-escaping
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (cc-uds-address allocator "/tmp/cc-socks/39194.sock")
-                           "uds:/tmp/cc-socks/39194.sock"))))
+           (assert (= (cc-uds-address allocator "/tmp/cc-socks/39194.sock") "uds:/tmp/cc-socks/39194.sock"))))
 
 ;; A space is the common case -- macOS home directories and project paths have
 ;; them -- and it is outside the safe set.
 (deftest bytes-outside-the-safe-set-are-percent-escaped-in-upper-case-hex
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (cc-encode-address allocator "/tmp/my sock") "/tmp/my%20sock"))
-           (assert (str-eq (cc-encode-address allocator "a?b") "a%3Fb"))
-           (assert (str-eq (cc-encode-address allocator "a[b]") "a%5Bb%5D"))))
+           (assert (= (cc-encode-address allocator "/tmp/my sock") "/tmp/my%20sock"))
+           (assert (= (cc-encode-address allocator "a?b") "a%3Fb"))
+           (assert (= (cc-encode-address allocator "a[b]") "a%5Bb%5D"))))
 
 ;; Percent itself must be escaped or decoding would not be injective: without
 ;; this, "%41" and "A" would encode to the same address.
 (deftest percent-is-not-safe-and-round-trips-through-decode
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (cc-encode-address allocator "100%") "100%25"))
-           (assert (str-eq (cc-decode-address allocator "100%25") "100%"))
-           (assert (str-eq (cc-decode-address allocator (cc-encode-address allocator "%41"))
-                           "%41"))))
+           (assert (= (cc-encode-address allocator "100%") "100%25"))
+           (assert (= (cc-decode-address allocator "100%25") "100%"))
+           (assert (= (cc-decode-address allocator (cc-encode-address allocator "%41")) "%41"))))
 
 (deftest the-safe-set-matches-the-reference-escape-class
          (assert (cc-address-safe-byte? 58))
@@ -52,16 +50,16 @@
 ;; Multi-byte UTF-8 escapes per byte, not per code point.
 (deftest a-multibyte-character-escapes-each-byte
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (cc-encode-address allocator "café") "caf%C3%A9"))
-           (assert (str-eq (cc-decode-address allocator "caf%C3%A9") "café"))))
+           (assert (= (cc-encode-address allocator "café") "caf%C3%A9"))
+           (assert (= (cc-decode-address allocator "caf%C3%A9") "café"))))
 
 ;; A truncated or non-hex escape is data, not an error: the receiver would have
 ;; accepted the address, so refusing it locally loses a deliverable message.
 (deftest a-malformed-escape-decodes-verbatim
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (cc-decode-address allocator "a%") "a%"))
-           (assert (str-eq (cc-decode-address allocator "a%4") "a%4"))
-           (assert (str-eq (cc-decode-address allocator "a%zz") "a%zz"))))
+           (assert (= (cc-decode-address allocator "a%") "a%"))
+           (assert (= (cc-decode-address allocator "a%4") "a%4"))
+           (assert (= (cc-decode-address allocator "a%zz") "a%zz"))))
 
 (deftest validation-mirrors-the-receivers-own-check
          (assert (cc-address-valid? "uds:/tmp/cc-socks/1.sock"))
@@ -89,17 +87,17 @@
                target (alloc/stack (slice u8))]
            (cc-parse-address allocator "uds:/tmp/cc-socks/7.sock" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcUds)))
-           (assert (str-eq (load target) "/tmp/cc-socks/7.sock"))
+           (assert (= (load target) "/tmp/cc-socks/7.sock"))
 
            (cc-parse-address allocator "bridge:abc123" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcBridge)))
-           (assert (str-eq (load target) "abc123"))
+           (assert (= (load target) "abc123"))
 
            ;; A did: address keeps its prefix -- the whole string identifies the
            ;; peer, so stripping it would lose the identifier.
            (cc-parse-address allocator "did:key:z6Mk" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcDid)))
-           (assert (str-eq (load target) "did:key:z6Mk"))
+           (assert (= (load target) "did:key:z6Mk"))
 
            (cc-parse-address allocator "whatever" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcOther)))))
@@ -111,7 +109,7 @@
                target (alloc/stack (slice u8))]
            (cc-parse-address allocator "/tmp/cc-socks/7.sock" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcUds)))
-           (assert (str-eq (load target) "/tmp/cc-socks/7.sock"))
+           (assert (= (load target) "/tmp/cc-socks/7.sock"))
            (assert (cc-address-local? "/tmp/cc-socks/7.sock"))
            (assert (cc-address-local? "uds:/tmp/cc-socks/7.sock"))
            (assert (not (cc-address-local? "bridge:abc")))))
@@ -123,11 +121,11 @@
                scheme (alloc/stack CcScheme)
                target (alloc/stack (slice u8))
                address (cc-uds-address allocator "/tmp/cc socks/7.sock")]
-           (assert (str-eq address "uds:/tmp/cc%20socks/7.sock"))
+           (assert (= address "uds:/tmp/cc%20socks/7.sock"))
            (cc-parse-address allocator address scheme target)
-           (assert (str-eq (load target) "/tmp/cc socks/7.sock"))))
+           (assert (= (load target) "/tmp/cc socks/7.sock"))))
 
 (deftest the-socket-path-is-the-pid-under-the-socket-directory
          (let [allocator (malloc-allocator)
                path (cc-socket-path allocator 39194)]
-           (assert (str-eq path "/tmp/cc-socks/39194.sock"))))
+           (assert (= path "/tmp/cc-socks/39194.sock"))))

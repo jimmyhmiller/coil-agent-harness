@@ -20,7 +20,7 @@
   (start-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
                      (-> i64)
                      (do
-                       (store! (field self starts) (+ (load (field self starts)) 1))
+                       (set! (.starts self) (+ (.starts self) 1))
                        0))
   (request-cancel-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
                               (-> i64)
@@ -54,21 +54,19 @@
   (let [call (alloc/stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-put-string! (mut arguments) "run_id" run-id)
-    (when (not (str-eq name "spawn_subagents"))
+    (when (not (= name "spawn_subagents"))
       (json-put-string! (mut arguments) "provider" "fake")
       (json-put-string! (mut arguments) "model" "fake-model")
       0)
     (json-put-string! (mut arguments) "prompt" prompt)
-    (store! (field call id) id)
-    (store! (field call name) name)
-    (store! (field call arguments) (load arguments))
-    (store! (field call raw-arguments) "")
+    (set! (.id call) id)
+    (set! (.name call) name)
+    (set! (.arguments call) (load arguments))
+    (set! (.raw-arguments call) "")
     (load call)))
 
 (defn orchestration-succeeded? [(result ToolResult)] (-> bool)
-  (match-else (load (field result status))
-              (ToolSucceeded [] true)
-              (_ false)))
+  (match (.status result) (ToolSucceeded [] true) (_ false)))
 
 (defn batch-agent [(allocator (ptr Allocator))
                    (run-id (slice u8))
@@ -97,10 +95,10 @@
                  notify (notify-async-schema allocator)]
              (assert (json-object-has? (json-get start "properties") "tool_name"))
              (assert (json-object-has? (json-get start "properties") "arguments"))
-             (assert (str-eq (command-string (json-get (json-get start "properties")
-                                                       "arguments")
-                                             "type")
-                             "string"))
+             (assert (= (command-string (json-get (json-get start "properties")
+                                                  "arguments")
+                                        "type")
+                        "string"))
              (assert (json-object-has? (json-get notify "properties") "handles"))
              (assert (not (json-object-has? (json-get notify "properties") "mode")))
              (assert-eq (json-array-length (json-get notify "required")) 2))))
@@ -193,8 +191,7 @@
                (store! (field async-call arguments) (load arguments)))
              (let [result (execute-start-async async-tool (mut async-call) context allocator)]
                (assert (orchestration-succeeded? result))
-               (assert (str-eq (command-string (load (field result output)) "status")
-                               "queued"))))
+               (assert (= (command-string (load (field result output)) "status") "queued"))))
            (let [workflow-tool (alloc/stack CreateWorkflowNodeTool)
                  root-call (alloc/stack ToolCall)
                  child-call (alloc/stack ToolCall)]
@@ -250,8 +247,8 @@
                  events (json-get (load (field child body)) "events")
                  created (json-array-get events 0)
                  payload (json-get created "payload")]
-             (assert (str-eq (command-string payload "provider") "fake"))
-             (assert (str-eq (command-string payload "model") "fake-model"))
+             (assert (= (command-string payload "provider") "fake"))
+             (assert (= (command-string payload "model") "fake-model"))
              (assert (match (json-bool-value (json-get payload "notify_parent"))
                        (Some [enabled] (not enabled))
                        (None [] false))))
@@ -259,22 +256,22 @@
                  events (json-get (load (field child body)) "events")
                  created (json-array-get events 0)
                  payload (json-get created "payload")]
-             (assert (str-eq (command-string payload "provider") "fake-override"))
-             (assert (str-eq (command-string payload "model") "override-model")))
+             (assert (= (command-string payload "provider") "fake-override"))
+             (assert (= (command-string payload "model") "override-model")))
            (let [async-run (service-query-events service "async-bash-run" 0)
                  events (json-get (load (field async-run body)) "events")
                  payload (json-get (json-array-get events 0) "payload")]
-             (assert (str-eq (command-string payload "provider") "async-tool"))
-             (assert (str-eq (command-string payload "model") "async-tool")))
+             (assert (= (command-string payload "provider") "async-tool"))
+             (assert (= (command-string payload "model") "async-tool")))
            (let [workflow (service-query-workflow service "workflow-tools")]
              (assert-eq (load (field workflow status)) 200)
              (assert-eq (json-array-length (json-get (load (field workflow body)) "nodes")) 2))
            (let [notification (service-query-events service "notification:agent-batch" 0)
                  events (json-get (load (field notification body)) "events")
                  payload (json-get (json-array-get events 0) "payload")]
-             (assert (str-eq (command-string payload "dependency_policy") "terminal"))
+             (assert (= (command-string payload "dependency_policy") "terminal"))
              (assert-eq (json-array-length (json-get payload "depends_on")) 3)
-             (assert (str-eq (command-string payload "conversation_id")
-                             (command-string (orchestration-parent-command service "parent-run")
-                                             "conversation_id"))))
+             (assert (= (command-string payload "conversation_id")
+                        (command-string (orchestration-parent-command service "parent-run")
+                                        "conversation_id"))))
            (event-journal-close! journal)))

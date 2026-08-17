@@ -27,10 +27,10 @@
                               (summary (slice u8))
                               (preview (slice u8))] (-> ToolPresentation)
   (let [presentation (alloc/stack ToolPresentation)]
-    (store! (field presentation label) label)
-    (store! (field presentation subject) subject)
-    (store! (field presentation summary) summary)
-    (store! (field presentation preview) preview)
+    (set! (.label presentation) label)
+    (set! (.subject presentation) subject)
+    (set! (.summary presentation) summary)
+    (set! (.preview presentation) preview)
     (load presentation)))
 
 (defn tool-presentation-new [(label (slice u8))
@@ -57,7 +57,7 @@
                       (= byte (cast u8 13)) (sb-push-str! (mut out) "\\r")
                       (= byte (cast u8 9)) (sb-push-str! (mut out) "\\t")
                       :else (sb-push-byte! (mut out) byte))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (sb-finish! (mut out))))
 
 (const TOOL_PREVIEW_MAX_ROWS 4)
@@ -73,7 +73,7 @@
                   (break)
                   (do
                     (al-push! [i64] (mut digits) (% (load remaining) 10))
-                    (store! remaining (/ (load remaining) 10)))))
+                    (set! remaining (/ (load remaining) 10)))))
         (let [n (al-len [i64] (load digits))
               (mut i) 0]
           (loop (if (>= (load i) n)
@@ -85,7 +85,7 @@
                                               (al-get [i64]
                                                       (load digits)
                                                       (- (- n 1) (load i))))))
-                      (store! i (+ (load i) 1))))))
+                      (set! i (+ (load i) 1))))))
         (sb-finish! (mut buffer)))))
 
 (defn tool-count-lines [(text (slice u8))] (-> i64)
@@ -96,11 +96,11 @@
     (loop (if (>= (load i) n)
               (break)
               (do
-                (store! saw true)
+                (set! saw true)
                 (when (= (slice-get [u8] text (load i)) (cast u8 10))
                   (store! lines (+ (load lines) 1))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (if (and (load saw) (!= (slice-get [u8] text (- n 1)) (cast u8 10)))
         (+ (load lines) 1)
         (load lines))))
@@ -135,7 +135,7 @@
                               (do
                                 (sb-push-byte! (mut out) byte)
                                 (store! column (+ (load column) 1))))
-                      (store! i (+ (load i) 1)))))
+                      (set! i (+ (load i) 1)))))
           (let [total (tool-count-lines text)
                 shown (if (> total TOOL_PREVIEW_MAX_ROWS) TOOL_PREVIEW_MAX_ROWS total)
                 remaining (- total shown)]
@@ -171,9 +171,7 @@
         ;; A running call has no result yet, so `exit_code` is absent and reads
         ;; back as 0. Only report an exit status once the result is a real object.
         settled
-          (match-else result
-                      (JsonObject [keys values] true)
-                      (_ false))
+          (match result (JsonObject [keys values] true) (_ false))
         summary
           (if (and settled failed)
               (concat-or-empty allocator "exit " (tool-decimal allocator exit-code))
@@ -200,8 +198,8 @@
                     (name (slice u8))
                     (arguments Json)
                     (result Json)] (-> ToolPresentation)
-  (cond (str-eq name "bash") (tool-bash-presentation allocator arguments result)
-        (str-eq name "read_text_file")
+  (cond (= name "bash") (tool-bash-presentation allocator arguments result)
+        (= name "read_text_file")
           (tool-file-presentation allocator
                                   "Read"
                                   arguments
@@ -212,7 +210,7 @@
                                                          (tool-decimal allocator bytes)
                                                          " bytes")
                                         "")))
-        (str-eq name "write_text_file")
+        (= name "write_text_file")
           (tool-file-presentation allocator
                                   "Write"
                                   arguments
@@ -223,27 +221,27 @@
                                                          (tool-decimal allocator bytes)
                                                          " bytes written")
                                         "")))
-        (str-eq name "create_directory") (tool-file-presentation allocator "Mkdir" arguments result "")
-        (str-eq name "delete_file") (tool-file-presentation allocator "Delete" arguments result "")
-        (str-eq name "remove_directory") (tool-file-presentation allocator "Rmdir" arguments result "")
-        (str-eq name "spawn_subagents")
+        (= name "create_directory") (tool-file-presentation allocator "Mkdir" arguments result "")
+        (= name "delete_file") (tool-file-presentation allocator "Delete" arguments result "")
+        (= name "remove_directory") (tool-file-presentation allocator "Rmdir" arguments result "")
+        (= name "spawn_subagents")
           (tool-presentation-full "Subagents"
                                   "batch"
                                   "delegated"
                                   "")
-        (str-eq name "create_workflow_node")
+        (= name "create_workflow_node")
           (tool-presentation-full "Workflow"
                                   (tool-inline-text allocator
                                                     (tool-json-string arguments "node_id"))
                                   "node created"
                                   "")
-        (str-eq name "query_run")
+        (= name "query_run")
           (tool-presentation-full "Status"
                                   (tool-inline-text allocator
                                                     (tool-json-string arguments "run_id"))
                                   "queried"
                                   "")
-        (str-eq name "query_workflow")
+        (= name "query_workflow")
           (tool-presentation-full "Workflow"
                                   (tool-inline-text allocator
                                                     (tool-json-string arguments "workflow_id"))

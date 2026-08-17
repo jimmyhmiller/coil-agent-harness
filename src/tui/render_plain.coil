@@ -11,11 +11,11 @@
                           (frame (ptr Frame))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut at) 0
-        count (al-len [FrameLine] (load (field frame lines)))]
+        count (al-len [FrameLine] (.lines frame))]
     (loop (if (>= (load at) count)
               (break)
-              (let [line (al-get [FrameLine] (load (field frame lines)) (load at))]
-                (sb-push-str! (mut output) (load (field line text)))
+              (let [line (al-get [FrameLine] (.lines frame) (load at))]
+                (sb-push-str! (mut output) (.text line))
                 (sb-push-str! (mut output) "\n")
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     (sb-finish! (mut output))))

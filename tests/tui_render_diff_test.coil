@@ -24,13 +24,13 @@
                   (slot (ptr Frame))
                   (rows i64)
                   (changed-row i64)] (-> i64)
-  (store! slot (frame-new allocator))
+  (set! slot (frame-new allocator))
   (let [(mut i) 0]
     (loop (if (>= (load i) rows)
               (break)
               (do
                 (push-row! slot (if (= (load i) changed-row) "CHANGED" "steady row"))
-                (store! i (+ (load i) 1))))))
+                (set! i (+ (load i) 1))))))
   0)
 
 (defn count-writes [(operations (ArrayList TerminalOperation))] (-> i64)
@@ -40,10 +40,10 @@
     (loop (if (>= (load i) count)
               (break)
               (do
-                (match-else (al-get [TerminalOperation] operations (load i))
-                            (TerminalWrite [_] (store! found (+ (load found) 1)))
-                            (_ 0))
-                (store! i (+ (load i) 1)))))
+                (match (al-get [TerminalOperation] operations (load i))
+                       (TerminalWrite [_] (set! found (+ (load found) 1)))
+                       (_ 0))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 (defn count-erases [(operations (ArrayList TerminalOperation))] (-> i64)
@@ -53,10 +53,10 @@
     (loop (if (>= (load i) count)
               (break)
               (do
-                (match-else (al-get [TerminalOperation] operations (load i))
-                            (TerminalEraseLine [] (store! found (+ (load found) 1)))
-                            (_ 0))
-                (store! i (+ (load i) 1)))))
+                (match (al-get [TerminalOperation] operations (load i))
+                       (TerminalEraseLine [] (set! found (+ (load found) 1)))
+                       (_ 0))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 ;; The first plan has nothing retained, so it must repaint -- and the second,

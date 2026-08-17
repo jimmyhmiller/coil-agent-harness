@@ -52,16 +52,16 @@
                         (router (ptr Router))
                         (observer (ptr BusObserverSink))
                         (codec (dyn Codec))] (-> i64)
-  (store! (field server allocator) allocator)
-  (store! (field server router) router)
-  (store! (field server observer) observer)
+  (set! (.allocator server) allocator)
+  (set! (.router server) router)
+  (set! (.observer server) observer)
   (store! (field server codec) (alloc/box allocator (dyn Codec) codec))
-  (store! (field server subscribers) (al-new [Subscriber] allocator))
-  (store! (field server next-id) 1)
+  (set! (.subscribers server) (al-new [Subscriber] allocator))
+  (set! (.next-id server) 1)
   0)
 
 (defn bus-server-subscriber-count [(server (ptr BusServer))] (-> i64)
-  (al-len [Subscriber] (load (field server subscribers))))
+  (al-len [Subscriber] (.subscribers server)))
 
 (defn bus-server-subscriber [(server (ptr BusServer)) (index i64)] (-> (ptr Subscriber))
   (primitive/index (load (field (field server subscribers) data)) index))
@@ -75,7 +75,7 @@
               (do
                 (when (load (field (bus-server-subscriber server (load i)) alive))
                   (store! live (+ (load live) 1)))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load live)))
 
 ;; Decimal formatting for generated subscriber identities. Same reason as in the
@@ -92,7 +92,7 @@
                     (break)
                     (do
                       (al-push! [i64] (mut digits) (% (load remaining) 10))
-                      (store! remaining (/ (load remaining) 10)))))
+                      (set! remaining (/ (load remaining) 10)))))
           (let [count (al-len [i64] (load digits))
                 (mut i) 0]
             (loop (if (>= (load i) count)
@@ -104,7 +104,7 @@
                                                 (al-get [i64]
                                                         (load digits)
                                                         (- (- count 1) (load i))))))
-                        (store! i (+ (load i) 1))))))))
+                        (set! i (+ (load i) 1))))))))
     (sb-str (load buffer))))
 
 ;; Drop a subscriber: close its socket and stop routing to it. Detaching from
@@ -119,14 +119,12 @@
 ;; True when `transport` has data to read within the handshake timeout.
 ;; The read that follows can then only block on bytes already in flight.
 (defn handshake-readable? [(transport (ptr UnixTransport))] (-> bool)
-  (match (time/duration-millis HANDSHAKE_TIMEOUT_MS)
-    (Err [_] false)
-    (Ok [timeout]
-        (match (selectors/wait-fd-for (load (field (field transport connection) fd))
-                                      (selectors/interest-readable)
-                                      timeout)
-          (Err [_] false)
-          (Ok [_] true)))))
+  (try (let [timeout (try-or! (time/duration-millis HANDSHAKE_TIMEOUT_MS) false)]
+            (match (selectors/wait-fd-for (load (field (field transport connection) fd))
+                                          (selectors/interest-readable)
+                                          timeout)
+              (Err [_] false)
+              (Ok [_] true)))))
 
 ;; Accept one pending connection and complete its Subscribe handshake.
 ;; Returns 1 if a subscriber was added, 0 if nothing was pending, -1 on a
@@ -140,56 +138,55 @@
                               (accept-timeout-ms i64)] (-> i64)
   (let [allocator (load (field server allocator))
         accepted (alloc/stack socket/UnixConnection)]
-    (match (time/duration-millis accept-timeout-ms)
-      (Err [_] -1)
-      (Ok [timeout]
-          (match (socket/unix-accept-for listener accepted timeout)
-            ;; No pending connection is the common case, not a failure.
-            (Err [_] 0)
-            (Ok [_]
-                (let [transport (alloc/box allocator UnixTransport (zeroed UnixTransport))
-                      envelope (alloc/stack Envelope)
-                      out (alloc/stack (slice u8))]
-                  (unix-transport-adopt! transport (load accepted))
-                  (if (not (handshake-readable? transport))
-                      ;; Connected and went quiet. Refusing is the only safe
-                      ;; option: waiting on it would stall every other client.
-                      (do (transport-close! transport) -1)
-                      (if (!= (frame-read transport allocator out) FRAME_OK)
-                          ;; Connected and said nothing, or died mid-handshake.
+    (try (let [timeout (try-or! (time/duration-millis accept-timeout-ms)
+                                -1)]
+              (match (socket/unix-accept-for listener accepted timeout)
+                ;; No pending connection is the common case, not a failure.
+                (Err [_] 0)
+                (Ok [_]
+                    (let [transport (alloc/box allocator UnixTransport (zeroed UnixTransport))
+                          envelope (alloc/stack Envelope)
+                          out (alloc/stack (slice u8))]
+                      (unix-transport-adopt! transport (load accepted))
+                      (if (not (handshake-readable? transport))
+                          ;; Connected and went quiet. Refusing is the only safe
+                          ;; option: waiting on it would stall every other client.
                           (do (transport-close! transport) -1)
-                          (match (codec-decode (load (load (field server codec)))
-                                               allocator
-                                               (load out)
-                                               envelope)
-                            (Err [_] (do (transport-close! transport) -1))
-                            (Ok [_]
-                                (match-else (load (field envelope kind))
-                                            (Subscribe []
-                                                       (let [topic (load (field envelope body))
-                                                             name
-                                                               (subscriber-name allocator
-                                                                                (load (field server next-id)))
-                                                             handle
-                                                               (router-attach! (load (field server router))
-                                                                               (Agent name))
-                                                             subscriber (alloc/stack Subscriber)]
-                                                         (store! (field server next-id)
-                                                                 (+ (load (field server next-id)) 1))
-                                                         (router-subscribe! (load (field server router))
-                                                                            handle
-                                                                            topic)
-                                                         (store! (field subscriber transport) transport)
-                                                         (store! (field subscriber handle) handle)
-                                                         (store! (field subscriber alive) true)
-                                                         (al-push! [Subscriber]
-                                                                   (mut (field server subscribers))
-                                                                   (load subscriber))
-                                                         1))
-                                            ;; Anything else is a client that does not speak
-                                            ;; the handshake. Refuse it rather than guessing
-                                            ;; what it wanted.
-                                            (_ (do (transport-close! transport) -1))))))))))))))
+                          (if (!= (frame-read transport allocator out) FRAME_OK)
+                              ;; Connected and said nothing, or died mid-handshake.
+                              (do (transport-close! transport) -1)
+                              (match (codec-decode (load (load (field server codec)))
+                                                   allocator
+                                                   (load out)
+                                                   envelope)
+                                (Err [_] (do (transport-close! transport) -1))
+                                (Ok [_]
+                                    (match (load (field envelope kind))
+                                           (Subscribe []
+                                                      (let [topic (load (field envelope body))
+                                                            name
+                                                              (subscriber-name allocator
+                                                                               (load (field server next-id)))
+                                                            handle
+                                                              (router-attach! (load (field server router))
+                                                                              (Agent name))
+                                                            subscriber (alloc/stack Subscriber)]
+                                                        (store! (field server next-id)
+                                                                (+ (load (field server next-id)) 1))
+                                                        (router-subscribe! (load (field server router))
+                                                                           handle
+                                                                           topic)
+                                                        (store! (field subscriber transport) transport)
+                                                        (store! (field subscriber handle) handle)
+                                                        (store! (field subscriber alive) true)
+                                                        (al-push! [Subscriber]
+                                                                  (mut (field server subscribers))
+                                                                  (load subscriber))
+                                                        1))
+                                           ;; Anything else is a client that does not speak
+                                           ;; the handshake. Refuse it rather than guessing
+                                           ;; what it wanted.
+                                           (_ (do (transport-close! transport) -1))))))))))))))
 
 ;; Accept with the default handshake timeout, for callers that own the thread.
 (defn bus-server-accept! [(server (ptr BusServer))
@@ -238,7 +235,7 @@
                                                   (store! s (+ (load s) 1)))))
                                       (store! r (+ (load r) 1)))))
                           0))))
-                (store! queued (+ (load queued) 1)))))
+                (set! queued (+ (load queued) 1)))))
     (bus-observer-clear! observer)
     (load written)))
 
@@ -249,5 +246,5 @@
               (break)
               (do
                 (retire-subscriber! server (bus-server-subscriber server (load i)))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     0))

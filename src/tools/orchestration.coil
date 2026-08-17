@@ -33,15 +33,14 @@
 (defn orchestration-result [(call (ptr ToolCall))
                             (response ServiceResponse)] (-> ToolResult)
   (let [ok
-          (and (>= (load (field response status)) 200)
-               (< (load (field response status)) 300))
+          (and (>= (.status response) 200)
+               (< (.status response) 300))
         (mut result)
-          (tool-result-empty (load (field call id))
+          (tool-result-empty (.id call)
                              (if ok (ToolSucceeded) (ToolErrored)))]
     (if ok
-        (store! (field result output) (load (field response body)))
-        (store! (field result error)
-                (orchestration-string (load (field response body)) "message")))
+        (set! (.output result) (.body response))
+        (set! (.error result) (orchestration-string (.body response) "message")))
     (load result)))
 
 (defn orchestration-run-exists? [(service (ptr RunService))
@@ -54,8 +53,8 @@
         (loop (if (>= (load at) count)
                   (break)
                   (let [event (al-get [Json] (load (field recovery events)) (load at))]
-                    (if (and (str-eq (orchestration-string event "event") "run.created")
-                             (str-eq (orchestration-string event "run_id") run-id))
+                    (if (and (= (orchestration-string event "event") "run.created")
+                             (= (orchestration-string event "run_id") run-id))
                         (do (store! found true) (break))
                         (store! at (+ (load at) 1)))))))
       0)
@@ -64,15 +63,15 @@
 (defn orchestration-base-command [(allocator (ptr Allocator))
                                   (call (ptr ToolCall))
                                   (context (ptr ToolExecutionContext))] (-> Json)
-  (let [arguments (load (field call arguments))
-        parent-run-id (load (field context run-id))
+  (let [arguments (.arguments call)
+        parent-run-id (.run-id context)
         (mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
     (json-put-string! (mut command)
                       "command_id"
                       (orchestration-command-id allocator
                                                 parent-run-id
-                                                (load (field call id))))
+                                                (.id call)))
     (json-put-string! (mut command) "run_id" (orchestration-string arguments "run_id"))
     (json-put-string! (mut command) "parent_run_id" parent-run-id)
     (json-put-string! (mut command) "provider" (orchestration-string arguments "provider"))
@@ -84,12 +83,12 @@
                                (call (ptr ToolCall))
                                (context (ptr ToolExecutionContext))
                                (allocator (ptr Allocator))] (-> ToolResult)
-  (let [agents (json-get (load (field call arguments)) "agents")
+  (let [agents (json-get (.arguments call) "agents")
         (mut handles) (json-array allocator)
         (mut ok) true
         (mut error) ""]
     (match (json-array-items agents)
-      (None [] (do (store! ok false) (store! error "agents must be an array")))
+      (None [] (do (set! ok false) (set! error "agents must be an array")))
       (Some [items]
             (let [(mut at) 0
                   count (al-len [Json] (load items))]
@@ -103,13 +102,13 @@
                               (mut duplicate) false]
                           (loop (if (>= (load earlier) (load at))
                                     (break)
-                                    (if (str-eq run-id
-                                                (orchestration-string (al-get [Json]
-                                                                              (load items)
-                                                                              (load earlier))
-                                                                      "run_id"))
-                                        (do (store! duplicate true) (break))
-                                        (store! earlier (+ (load earlier) 1)))))
+                                    (if (= run-id
+                                           (orchestration-string (al-get [Json]
+                                                                         (load items)
+                                                                         (load earlier))
+                                                                 "run_id"))
+                                        (do (set! duplicate true) (break))
+                                        (set! earlier (+ (load earlier) 1)))))
                           (when (or (= (str-len run-id) 0)
                                     (or (load duplicate)
                                         (orchestration-run-exists? (load (field self service))
@@ -122,8 +121,8 @@
                                                          "run_id is not unique: "
                                                          run-id)))
                             0)
-                          (store! at (+ (load at) 1)))))
-              (store! at 0)
+                          (set! at (+ (load at) 1)))))
+              (set! at 0)
               (loop (if (or (>= (load at) count) (not (load ok)))
                         (break)
                         (let [agent (al-get [Json] (load items) (load at))
@@ -134,13 +133,13 @@
                                             "command_id"
                                             (concat-or-empty allocator
                                                              (orchestration-command-id allocator
-                                                                                       (load (field context run-id))
-                                                                                       (load (field call id)))
+                                                                                       (.run-id context)
+                                                                                       (.id call))
                                                              (concat-or-empty allocator ":" run-id)))
                           (json-put-string! (mut command) "run_id" run-id)
                           (json-put-string! (mut command)
                                             "parent_run_id"
-                                            (load (field context run-id)))
+                                            (.run-id context))
                           (json-put-string! (mut command)
                                             "provider"
                                             (orchestration-string agent "provider"))
@@ -156,24 +155,24 @@
                                                       (mut command)
                                                       (concat-or-empty allocator
                                                                        "agent:"
-                                                                       (load (field context run-id))))]
-                            (if (and (>= (load (field response status)) 200)
-                                     (< (load (field response status)) 300))
+                                                                       (.run-id context)))]
+                            (if (and (>= (.status response) 200)
+                                     (< (.status response) 300))
                                 (do
                                   (json-array-push! (mut handles) (JsonString run-id))
                                   0)
                                 (do
-                                  (store! ok false)
-                                  (store! error
-                                          (orchestration-string (load (field response body))
-                                                                "message")))))
-                          (store! at (+ (load at) 1))))))))
+                                  (set! ok false)
+                                  (set! error
+                                        (orchestration-string (.body response)
+                                                              "message")))))
+                          (set! at (+ (load at) 1))))))))
     (let [(mut result)
-            (tool-result-empty (load (field call id))
+            (tool-result-empty (.id call)
                                (if (load ok) (ToolSucceeded) (ToolErrored)))
           (mut output) (json-object allocator)]
       (json-object-put! (mut output) "handles" (load handles))
-      (store! (field result output) (load output))
+      (set! (.output result) (load output))
       (when (not (load ok))
         (store! (field result error) (load error))
         0)
@@ -183,9 +182,9 @@
                                     (call (ptr ToolCall))
                                     (context (ptr ToolExecutionContext))
                                     (allocator (ptr Allocator))] (-> ToolResult)
-  (let [arguments (load (field call arguments))
+  (let [arguments (.arguments call)
         (mut command) (orchestration-base-command allocator call context)
-        actor (concat-or-empty allocator "agent:" (load (field context run-id)))]
+        actor (concat-or-empty allocator "agent:" (.run-id context))]
     (json-put-string! (mut command) "workflow_id" (orchestration-string arguments "workflow_id"))
     (json-object-put! (mut command) "workflow_version" (json-integer allocator 1))
     (json-put-string! (mut command) "node_id" (orchestration-string arguments "node_id"))
@@ -203,7 +202,7 @@
                               (allocator (ptr Allocator))] (-> ToolResult)
   (orchestration-result call
                         (service-query-workflow (load (field self service))
-                                                (orchestration-string (load (field call arguments))
+                                                (orchestration-string (.arguments call)
                                                                       "workflow_id"))))
 
 (defn execute-query-run [(self (ptr QueryRunTool))
@@ -212,7 +211,7 @@
                          (allocator (ptr Allocator))] (-> ToolResult)
   (orchestration-result call
                         (service-query-events (load (field self service))
-                                              (orchestration-string (load (field call arguments))
+                                              (orchestration-string (.arguments call)
                                                                     "run_id")
                                               0)))
 
@@ -230,8 +229,8 @@
                             (al-get [Json]
                                     (load (field recovery events))
                                     (load i))]
-                      (when (and (str-eq (orchestration-string event "event") "run.created")
-                                 (str-eq (orchestration-string event "run_id") run-id))
+                      (when (and (= (orchestration-string event "event") "run.created")
+                                 (= (orchestration-string event "run_id") run-id))
                         (store! found (json-get event "payload"))
                         (break)))))))
       0)
@@ -241,13 +240,13 @@
                            (call (ptr ToolCall))
                            (context (ptr ToolExecutionContext))
                            (allocator (ptr Allocator))] (-> ToolResult)
-  (let [arguments (load (field call arguments))
+  (let [arguments (.arguments call)
         tool-name (orchestration-string arguments "tool_name")]
-    (if (or (str-eq tool-name "start_async_tool")
-            (or (str-eq tool-name "spawn_subagents")
-                (str-eq tool-name "notify_async")))
-        (let [(mut result) (tool-result-empty (load (field call id)) (ToolDenied))]
-          (store! (field result error) "asynchronous orchestration tools cannot wrap themselves")
+    (if (or (= tool-name "start_async_tool")
+            (or (= tool-name "spawn_subagents")
+                (= tool-name "notify_async")))
+        (let [(mut result) (tool-result-empty (.id call) (ToolDenied))]
+          (set! (.error result) "asynchronous orchestration tools cannot wrap themselves")
           (load result))
         (let [encoded-arguments (json-get arguments "arguments")
               decoded-arguments
@@ -257,21 +256,19 @@
                   ;; request to the local async-tool provider.
                   (JsonString [text]
                               (let [parsed (json-parse allocator text)]
-                                (if (load (field parsed ok))
-                                    (load (field parsed value))
+                                (if (.ok parsed)
+                                    (.value parsed)
                                     (JsonNull))))
                   (_ (JsonNull)))]
-          (if (match-else decoded-arguments
-                          (JsonObject [_ _] false)
-                          (_ true))
-              (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
-                (store! (field result error) "arguments must encode a JSON object")
+          (if (match decoded-arguments (JsonObject [_ _] false) (_ true))
+              (let [(mut result) (tool-result-empty (.id call) (ToolErrored))]
+                (set! (.error result) "arguments must encode a JSON object")
                 (load result))
               (let [(mut spec) (json-object allocator)
                     (mut command) (json-object allocator)
                     parent
                       (orchestration-parent-command (load (field self service))
-                                                    (load (field context run-id)))
+                                                    (.run-id context))
                     run-id (orchestration-string arguments "run_id")]
                 (json-put-string! (mut spec) "tool_name" tool-name)
                 (json-object-put! (mut spec)
@@ -281,12 +278,12 @@
                 (json-put-string! (mut command)
                                   "command_id"
                                   (orchestration-command-id allocator
-                                                            (load (field context run-id))
-                                                            (load (field call id))))
+                                                            (.run-id context)
+                                                            (.id call)))
                 (json-put-string! (mut command) "run_id" run-id)
                 (json-put-string! (mut command)
                                   "parent_run_id"
-                                  (load (field context run-id)))
+                                  (.run-id context))
                 (json-put-string! (mut command) "provider" "async-tool")
                 (json-put-string! (mut command) "model" "async-tool")
                 (json-put-string! (mut command)
@@ -301,7 +298,7 @@
                                                           (mut command)
                                                           (concat-or-empty allocator
                                                                            "agent:"
-                                                                           (load (field context run-id)))))))))))
+                                                                           (.run-id context))))))))))
 
 (defn notify-async-command [(allocator (ptr Allocator))
                             (call (ptr ToolCall))
@@ -321,14 +318,14 @@
                       "command_id"
                       (concat-or-empty allocator
                                        (orchestration-command-id allocator
-                                                                 (load (field context run-id))
-                                                                 (load (field call id)))
+                                                                 (.run-id context)
+                                                                 (.id call))
                                        (concat-or-empty allocator ":" node-id)))
     (json-put-string! (mut command) "run_id" notification-id)
     (json-put-string! (mut command) "provider" (orchestration-string parent "provider"))
     (json-put-string! (mut command) "model" (orchestration-string parent "model"))
     (json-put-string! (mut command) "conversation_id" (orchestration-string parent "conversation_id"))
-    (json-put-string! (mut command) "notification_parent_run_id" (load (field context run-id)))
+    (json-put-string! (mut command) "notification_parent_run_id" (.run-id context))
     (json-put-string! (mut command) "prompt" (sb-finish! (mut prompt)))
     (json-put-string! (mut command) "workflow_id" group-id)
     (json-object-put! (mut command) "workflow_version" (json-integer allocator 1))
@@ -342,12 +339,12 @@
                             (call (ptr ToolCall))
                             (context (ptr ToolExecutionContext))
                             (allocator (ptr Allocator))] (-> ToolResult)
-  (let [arguments (load (field call arguments))
+  (let [arguments (.arguments call)
         group-id (orchestration-string arguments "group_id")
         handles (json-get arguments "handles")
         parent
           (orchestration-parent-command (load (field self service))
-                                        (load (field context run-id)))
+                                        (.run-id context))
         (mut registrations) (json-array allocator)
         (mut ok) true
         (mut error) ""]
@@ -365,21 +362,21 @@
             (service-submit-run (load (field self service))
                                 (mut command)
                                 "agent-notification")]
-      (if (and (>= (load (field response status)) 200)
-               (< (load (field response status)) 300))
+      (if (and (>= (.status response) 200)
+               (< (.status response) 300))
           (do
             (json-array-push! (mut registrations) (JsonString notification-id))
             0)
           (do
-            (store! ok false)
-            (store! error (orchestration-string (load (field response body)) "message")))))
+            (set! ok false)
+            (set! error (orchestration-string (.body response) "message")))))
     (let [(mut result)
-            (tool-result-empty (load (field call id))
+            (tool-result-empty (.id call)
                                (if (load ok) (ToolSucceeded) (ToolErrored)))
           (mut output) (json-object allocator)]
       (json-put-string! (mut output) "group_id" group-id)
       (json-object-put! (mut output) "notifications" (load registrations))
-      (store! (field result output) (load output))
+      (set! (.output result) (load output))
       (when (not (load ok))
         (store! (field result error)
                 (if (> (str-len (load error)) 0)
@@ -613,15 +610,14 @@
                                 (effect ToolEffect)
                                 (implementation (dyn ToolImplementation))] (-> ToolDefinition)
   (let [definition (alloc/stack ToolDefinition)]
-    (store! (field (field definition spec) name) name)
-    (store! (field (field definition spec) description) description)
-    (store! (field (field definition spec) input-schema) schema)
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) effect)
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms)
-            (if (str-eq name "spawn_subagents") 0 30000))
-    (store! (field definition implementation) implementation)
+    (set! (.name (.spec definition)) name)
+    (set! (.description (.spec definition)) description)
+    (set! (.input-schema (.spec definition)) schema)
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) effect)
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) (if (= name "spawn_subagents") 0 30000))
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn register-orchestration-tools! [(registry (mut ToolRegistry))

@@ -62,14 +62,14 @@
     (loop (if (or (>= (load length) DIRENT_NAME_MAX)
                   (= (primitive/cast i64 (load (primitive/index start (load length)))) 0))
               (break)
-              (store! length (+ (load length) 1))))
+              (set! length (+ (load length) 1))))
     (let [(mut buffer) (sb-new allocator)
           (mut i) 0]
       (loop (if (>= (load i) (load length))
                 (break)
                 (do
                   (sb-push-byte! (mut buffer) (load (primitive/index start (load i))))
-                  (store! i (+ (load i) 1)))))
+                  (set! i (+ (load i) 1)))))
       (sb-finish! (mut buffer)))))
 
 (defn dirent-type [(entry (ptr i8))] (-> i64)
@@ -90,7 +90,7 @@
               (if (= (primitive/cast i64 entry) 0)
                   (break)
                   (let [name (dirent-name allocator entry)]
-                    (when (not (or (str-eq name ".") (str-eq name "..")))
+                    (when (not (or (= name ".") (= name "..")))
                       (al-push! [(slice u8)] (mut names) name)
                       0)
                     0))))
@@ -114,10 +114,10 @@
               (let [name (al-get [(slice u8)] all (load i))
                     length (slice-len [u8] name)]
                 (when (and (>= length suffix-length)
-                           (str-eq (substr name (- length suffix-length) length) suffix))
+                           (= (substr name (- length suffix-length) length) suffix))
                   (al-push! [(slice u8)] (mut matched) name)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load matched)))
 
 (defn directory-create [(allocator (ptr Allocator))
@@ -161,7 +161,7 @@
                           (= (primitive/cast i64 (slice-get [u8] path (load i))) 47))
                   (directory-create allocator (substr path 0 (load i)) mode)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (if (path-exists? allocator path) 0 -1)))
 
 ;; Join two path components with a single separator.

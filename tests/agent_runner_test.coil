@@ -39,15 +39,15 @@
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
                  (let [call (+ (atomic-add (load (field self calls)) 1) 1)]
-                   (if (<= call (load (field self failures-before-success)))
+                   (if (<= call (.failures-before-success self))
                        (model-failure "flaky"
-                                      (load (field self status))
+                                      (.status self)
                                       "temporary provider failure")
                        (let [(mut response) (response-empty allocator)]
-                         (store! (field response provider) "flaky")
-                         (store! (field response model) "fake-model")
-                         (store! (field response response-id) "recovered")
-                         (store! (field response output-text) "done")
+                         (set! (.provider response) "flaky")
+                         (set! (.model response) "fake-model")
+                         (set! (.response-id response) "recovered")
+                         (set! (.output-text response) "done")
                          (ModelOk (load response)))))))
 
 (impl ModelProvider SlowProvider
@@ -61,19 +61,19 @@
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
                  (do
-                   (sleep-ms (load (field self delay-ms)))
+                   (sleep-ms (.delay-ms self))
                    (let [(mut response) (response-empty allocator)]
-                     (store! (field response provider) "slow")
-                     (store! (field response model) (load (field request model)))
-                     (store! (field response response-id) "slow-response")
-                     (store! (field response output-text) "too late")
+                     (set! (.provider response) "slow")
+                     (set! (.model response) (.model request))
+                     (set! (.response-id response) "slow-response")
+                     (set! (.output-text response) "too late")
                      (ModelOk (load response))))))
 
 (defn execute-fake-tool [(self (ptr FakeTool))
                          (call (ptr ToolCall))
                          (allocator (ptr Allocator))] (-> ToolResult)
-  (let [(mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
-    (store! (field result output) (load (field call arguments)))
+  (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
+    (set! (.output result) (.arguments call))
     (load result)))
 
 (impl ToolImplementation FakeTool
@@ -90,23 +90,22 @@
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
         definition (alloc/stack ToolDefinition)
         implementation (box allocator FakeTool (zeroed FakeTool))]
-    (store! (field (field definition spec) name) "fake")
-    (store! (field (field definition spec) description) "fake")
-    (store! (field (field definition spec) input-schema)
-            (load (field parsed value)))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (ReadOnly))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 1000)
-    (store! (field definition implementation) implementation)
+    (set! (.name (.spec definition)) "fake")
+    (set! (.description (.spec definition)) "fake")
+    (set! (.input-schema (.spec definition)) (.value parsed))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 1000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn fake-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
   (let [call (alloc/stack ToolCall)]
-    (store! (field call id) id)
-    (store! (field call name) "fake")
-    (store! (field call arguments) (json-object allocator))
-    (store! (field call raw-arguments) "{}")
+    (set! (.id call) id)
+    (set! (.name call) "fake")
+    (set! (.arguments call) (json-object allocator))
+    (set! (.raw-arguments call) "{}")
     (load call)))
 
 (defn fake-provider-execute [(state (ptr FakeProviderState))
@@ -116,24 +115,21 @@
   (let [call-number (+ (atomic-add (load (field state calls)) 1) 1)
         (mut response) (response-empty allocator)]
     (if (= call-number 1)
-        (store! (field state first-operation-id)
-                (load (field request operation-id)))
-        (store! (field state second-operation-id)
-                (load (field request operation-id))))
-    (store! (field response provider) "fake")
-    (store! (field response model) "fake-model")
+        (set! (.first-operation-id state) (.operation-id request))
+        (set! (.second-operation-id state) (.operation-id request)))
+    (set! (.provider response) "fake")
+    (set! (.model response) "fake-model")
     (if (= call-number 1)
         (do
-          (store! (field response response-id) "first-response")
+          (set! (.response-id response) "first-response")
           ;; Both values are turn-owned and must be promoted before the provider
           ;; scratch region closes.
-          (store! (field response raw-output)
-                  (JsonString (json-copy-string allocator "opaque-provider-state")))
+          (set! (.raw-output response) (JsonString (json-copy-string allocator "opaque-provider-state")))
           (al-push! [ToolCall]
-                    (mut (field response tool-calls))
+                    (mut (.tool-calls response))
                     (fake-call allocator "call-a"))
           (al-push! [ToolCall]
-                    (mut (field response tool-calls))
+                    (mut (.tool-calls response))
                     (fake-call allocator "call-b")))
         (do
           (when (and (load (field (field request continuation) present))
@@ -143,9 +139,8 @@
                         2))
             (atomic-store (load (field state observed-continuation)) 1)
             0)
-          (store! (field response response-id) "final-response")
-          (store! (field response output-text)
-                  (json-copy-string allocator "done"))))
+          (set! (.response-id response) "final-response")
+          (set! (.output-text response) (json-copy-string allocator "done"))))
     (ModelOk (load response))))
 
 (impl ModelProvider FakeProviderState
@@ -177,14 +172,14 @@
                  (-> i64)
                  (do
                    (atomic-add (load (field self count)) 1)
-                   (match-else (load (field event kind))
-                               (RunCompleted []
-                                             (atomic-add (load (field self terminal-count)) 1))
-                               (RunFailed []
-                                          (atomic-add (load (field self terminal-count)) 1))
-                               (RunCancelled []
-                                             (atomic-add (load (field self terminal-count)) 1))
-                               (_ 0))
+                   (match (.kind event)
+                          (RunCompleted []
+                                        (atomic-add (load (field self terminal-count)) 1))
+                          (RunFailed []
+                                     (atomic-add (load (field self terminal-count)) 1))
+                          (RunCancelled []
+                                        (atomic-add (load (field self terminal-count)) 1))
+                          (_ 0))
                    0)))
 
 (deftest successful-notification-registration-short-circuits-model-continuation
@@ -254,10 +249,8 @@
              (assert (agent-run-finished? (mut handle)))
              (assert-eq (atomic-load calls) 2)
              (assert-eq (atomic-load observed) 1)
-             (assert (str-eq (load (field state first-operation-id))
-                             "model:model:1"))
-             (assert (str-eq (load (field state second-operation-id))
-                             "model:model:2"))
+             (assert (= (load (field state first-operation-id)) "model:model:1"))
+             (assert (= (load (field state second-operation-id)) "model:model:2"))
              ;; run.started, proposed/started/completed for each of the two tool
              ;; calls, and run.completed. No authorization step.
              (assert-eq (atomic-load events) 8)
@@ -265,7 +258,7 @@
              (assert (match result
                        (ModelOk [response]
                                 (let [final response]
-                                  (str-eq (load (field final output-text)) "done")))
+                                  (= (load (field final output-text)) "done")))
                        (ModelErr [failure] false))))))
 
 (deftest retries-transient-provider-failure-without-consuming-model-turn
@@ -296,7 +289,7 @@
              (assert (match result
                        (ModelOk [response]
                          (let [completed response]
-                           (str-eq (load (field completed output-text)) "done")))
+                           (= (load (field completed output-text)) "done")))
                        (ModelErr [failure] false))))))
 
 (deftest does-not-retry-nontransient-provider-failure
@@ -363,9 +356,7 @@
                          (ModelOk [response] false)
                          (ModelErr [failure]
                                    (let [failed failure]
-                                     (match-else (load (field failed kind))
-                                                 (CancelledFailure [] true)
-                                                 (_ false))))))
+                                     (match (load (field failed kind)) (CancelledFailure [] true) (_ false))))))
                (assert-eq (atomic-load events) 2)
                (assert-eq (atomic-load terminals) 1)))))
 
@@ -402,8 +393,6 @@
                        (ModelOk [response] false)
                        (ModelErr [failure]
                                  (let [failed failure]
-                                   (match-else (load (field failed kind))
-                                               (TimeoutFailure [] true)
-                                               (_ false))))))
+                                   (match (load (field failed kind)) (TimeoutFailure [] true) (_ false))))))
              (assert-eq (atomic-load events) 2)
              (assert-eq (atomic-load terminals) 1))))

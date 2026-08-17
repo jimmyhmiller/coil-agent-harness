@@ -73,14 +73,13 @@
     (if (< fd (cast i32 0))
         (JournalOpenFailed "could not open event journal")
         (let [journal (alloc/stack EventJournal)]
-          (store! (field journal allocator) allocator)
-          (store! (field journal fd) (cast i64 fd))
+          (set! (.allocator journal) allocator)
+          (set! (.fd journal) (cast i64 fd))
           (store! (field journal lock) (box allocator i64 0))
           (store! (field journal failed) (box allocator i64 0))
-          (store! (field journal scratch-domain)
-                  (allocation-domain-open allocator))
-          (store! (field journal path) (json-copy-string allocator path))
-          (store! (field journal sync-each-event) sync-each-event)
+          (set! (.scratch-domain journal) (allocation-domain-open allocator))
+          (set! (.path journal) (json-copy-string allocator path))
+          (set! (.sync-each-event journal) sync-each-event)
           (JournalOpened (load journal))))))
 
 (defn event-journal-append-bytes! [(allocator (ptr Allocator))
@@ -107,7 +106,7 @@
 
 (defn event-journal-close! [(journal (ptr EventJournal))] (-> i64)
   (journal-lock! (load (field journal lock)))
-  (let [fd (load (field journal fd))]
+  (let [fd (.fd journal)]
     (when (>= fd 0)
       (os/close (cast i32 fd))
       (store! (field journal fd) -1)
@@ -126,7 +125,7 @@
     (let [allocator (region/region-allocator cycle)]
       (journal-lock! (load (field journal lock)))
       (let [writer (alloc/stack io/Writer)
-            fd (load (field journal fd))
+            fd (.fd journal)
             (mut result) -1]
         (if (< fd 0)
             (atomic-store (load (field journal failed)) 1)
@@ -135,10 +134,10 @@
                 (Err [failure]
                      (atomic-store (load (field journal failed)) 1))
                 (Ok [written]
-                    (if (and (load (field journal sync-each-event))
+                    (if (and (.sync-each-event journal)
                              (!= (cast i64 (fsync (cast i32 fd))) 0))
                         (atomic-store (load (field journal failed)) 1)
-                        (store! result 0))))))
+                        (set! result 0))))))
         (journal-unlock! (load (field journal lock)))
         (region/region-close! cycle)
         (load result)))))
@@ -154,12 +153,12 @@
 
 (defn journal-recovery-empty [(allocator (ptr Allocator))] (-> JournalRecovery)
   (let [recovery (alloc/stack JournalRecovery)]
-    (store! (field recovery ok) true)
-    (store! (field recovery events) (al-new [Json] allocator))
-    (store! (field recovery backing-bytes) "")
-    (store! (field recovery last-sequence) 0)
-    (store! (field recovery ignored-torn-tail) false)
-    (store! (field recovery error) "")
+    (set! (.ok recovery) true)
+    (set! (.events recovery) (al-new [Json] allocator))
+    (set! (.backing-bytes recovery) "")
+    (set! (.last-sequence recovery) 0)
+    (set! (.ignored-torn-tail recovery) false)
+    (set! (.error recovery) "")
     (load recovery)))
 
 (defn event-journal-recover [(allocator (ptr Allocator))
@@ -168,44 +167,42 @@
     (match (fs/read-file allocator path)
       (Err [failure]
            (do
-             (store! (field recovery ok) false)
-             (store! (field recovery error) "could not read event journal")))
+             (set! (.ok recovery) false)
+             (set! (.error recovery) "could not read event journal")))
       (Ok [bytes]
           (do
-            (store! (field recovery backing-bytes) bytes)
+            (set! (.backing-bytes recovery) bytes)
             (let [(mut lines) (str-split allocator bytes "\n")
                   count (al-len [(slice u8)] (load lines))
                   complete-count (if (journal-ends-in-newline? bytes) (- count 1) (- count 1))
                   (mut i) 0]
-              (al-reserve! [Json] (mut (field recovery events)) complete-count)
+              (al-reserve! [Json] (mut (.events recovery)) complete-count)
               (when (and (> count 0) (not (journal-ends-in-newline? bytes)))
                 (store! (field recovery ignored-torn-tail) true)
                 0)
               (loop (if (or (>= (load i) complete-count)
-                            (not (load (field recovery ok))))
+                            (not (.ok recovery)))
                         (break)
                         (let [line (al-get [(slice u8)] (load lines) (load i))
                               parsed (json-parse allocator line)]
-                          (if (not (load (field parsed ok)))
+                          (if (not (.ok parsed))
                               (do
-                                (store! (field recovery ok) false)
-                                (store! (field recovery error)
-                                        "event journal contains invalid JSON"))
-                              (let [event (load (field parsed value))
+                                (set! (.ok recovery) false)
+                                (set! (.error recovery) "event journal contains invalid JSON"))
+                              (let [event (.value parsed)
                                     version (json-number-i64 (json-get event "version"))
                                     sequence (json-number-i64 (json-get event "sequence"))]
                                 (if (or (!= version 1)
-                                        (<= sequence (load (field recovery last-sequence))))
+                                        (<= sequence (.last-sequence recovery)))
                                     (do
-                                      (store! (field recovery ok) false)
-                                      (store! (field recovery error)
-                                              "event journal violates version or ordering"))
+                                      (set! (.ok recovery) false)
+                                      (set! (.error recovery) "event journal violates version or ordering"))
                                     (do
                                       (al-push! [Json]
-                                                (mut (field recovery events))
+                                                (mut (.events recovery))
                                                 event)
-                                      (store! (field recovery last-sequence) sequence)))))
-                          (store! i (+ (load i) 1)))))
+                                      (set! (.last-sequence recovery) sequence)))))
+                          (set! i (+ (load i) 1)))))
               (al-free! [(slice u8)] (mut lines))))))
     (load recovery)))
 

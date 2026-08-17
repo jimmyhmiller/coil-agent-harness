@@ -54,22 +54,22 @@
 
 (defn input-reader-lifecycle-new [] (-> InputReaderLifecycle)
   (let [lifecycle (alloc/stack InputReaderLifecycle)]
-    (store! (field lifecycle terminal) (terminal-session-new))
-    (store! (field lifecycle signals-open) false)
+    (set! (.terminal lifecycle) (terminal-session-new))
+    (set! (.signals-open lifecycle) false)
     (load lifecycle)))
 
 (defn input-reader-lifecycle-enter! [(allocator (ptr Allocator))
                                      (lifecycle (ptr InputReaderLifecycle))
                                      (profile (ref TerminalProfile))] (-> bool)
   (let [numbers (alloc/stack (array i32 2))]
-    (store! (index numbers 0) (cast i32 2))
-    (store! (index numbers 1) (cast i32 15))
+    (set! (index numbers 0) (cast i32 2))
+    (set! (index numbers 1) (cast i32 15))
     (match (signals/signal-subscribe (field lifecycle signals)
                                      (slice-new [i32] (index numbers 0) 2))
-      (Ok [subscription] (store! (field lifecycle signals-open) true))
-      (Err [failure] (store! (field lifecycle signals-open) false)))
+      (Ok [subscription] (set! (.signals-open lifecycle) true))
+      (Err [failure] (set! (.signals-open lifecycle) false)))
     (if (terminal-session-enter! allocator
-                                 (mut (field lifecycle terminal))
+                                 (mut (.terminal lifecycle))
                                  profile)
         true
         (do
@@ -87,7 +87,7 @@
 (defn input-reader-menu [(allocator (ptr Allocator))
                          (editor (ptr InputEditor))
                          (overflow (ptr i64))] (-> (ptr (ArrayList ViewMenuEntry)))
-  (store! overflow 0)
+  (set! overflow 0)
   (if (not (input-editor-menu-open? editor))
       (cast (ptr (ArrayList ViewMenuEntry)) 0)
       (let [registry (load (field editor commands))
@@ -102,26 +102,26 @@
                   0)
             entries (box allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] allocator))
             (mut at) 0]
-        (store! overflow (- count shown))
+        (set! overflow (- count shown))
         (loop (if (>= (load at) shown)
                   (break)
                   (let [index (+ start (load at))
                         spec (command-at registry (al-get [i64] (load matches) index))
                         detail
-                          (match (load (field spec argument))
-                            (CommandNoArgument [] (load (field spec summary)))
+                          (match (.argument spec)
+                            (CommandNoArgument [] (.summary spec))
                             (CommandPrompts [hint]
                                             (concat-or-empty allocator
-                                                             (load (field spec summary))
+                                                             (.summary spec)
                                                              (concat-or-empty allocator
                                                                               "  — asks for "
                                                                               hint))))]
                     (al-push! [ViewMenuEntry]
                               entries
-                              (view-menu-entry (load (field spec name))
+                              (view-menu-entry (.name spec)
                                                detail
                                                (= index selected)))
-                    (store! at (+ (load at) 1)))))
+                    (set! at (+ (load at) 1)))))
         entries)))
 
 ;; While reverse search is active the composer shows the query and the matched
@@ -169,7 +169,7 @@
                     0
                     (+ (al-len [ViewMenuEntry] (load rows))
                        (if (> (load overflow) 0) 1 0))))
-          status (load (field editor status))
+          status (.status editor)
           visible-rows
             (if (= (slice-len [u8] status) 0)
                 rows
@@ -185,22 +185,22 @@
           node
             (view-input-with-menu (input-reader-prompt cycle-allocator editor prompt)
                                   (input-editor-text editor)
-                                  (load (field editor cursor))
+                                  (.cursor editor)
                                   height
                                   visible-rows
                                   (if (> (slice-len [u8] hint) 0) 0 (load overflow)))]
-      (match-else node
-                  (ViewInputNode [input]
-                                 (let [(mut declarative) (view-layout-input cycle-allocator input width)]
-                                   (let [(mut operations)
-                                           (input-renderer-plan-with! renderer
-                                                                      cycle-allocator
-                                                                      (mut declarative)
-                                                                      menu-rows)]
-                                     (tui-output-execute-plan! cycle-allocator
-                                                               profile
-                                                               (mut operations)))))
-                  (_ 0))
+      (match node
+             (ViewInputNode [input]
+                            (let [(mut declarative) (view-layout-input cycle-allocator input width)]
+                              (let [(mut operations)
+                                      (input-renderer-plan-with! renderer
+                                                                 cycle-allocator
+                                                                 (mut declarative)
+                                                                 menu-rows)]
+                                (tui-output-execute-plan! cycle-allocator
+                                                          profile
+                                                          (mut operations)))))
+             (_ 0))
       ;; Streaming hides the cursor (see the render cycle); the composer is the
       ;; only thing with a meaningful place to put one, so it takes it back on
       ;; every redraw rather than depending on who hid it.
@@ -244,13 +244,13 @@
                          (lifecycle (ptr InputReaderLifecycle))
                          (idle-timeout i64)] (-> i64)
   (let [timeout
-          (if (> (al-len [u8] (load (field decoder escape))) 0)
+          (if (> (al-len [u8] (.escape decoder)) 0)
               35
               idle-timeout)
         wait-ms (if (> timeout 50) 50 timeout)
         signal-fd
-          (if (load (field lifecycle signals-open))
-              (load (field (field lifecycle signals) read-fd))
+          (if (.signals-open lifecycle)
+              (.read-fd (.signals lifecycle))
               -1)]
     (block :ready
            (when (load (field lifecycle signals-open))
@@ -285,7 +285,7 @@
                             (lifecycle (ptr InputReaderLifecycle))
                             (profile (ref TerminalProfile))] (-> i64)
   (terminal-session-restore! allocator
-                             (mut (field lifecycle terminal))
+                             (mut (.terminal lifecycle))
                              profile)
   (when (load (field lifecycle signals-open))
     (signals/signal-close! (field lifecycle signals))
@@ -316,8 +316,8 @@
 
 (defn choice-entry [(label (slice u8)) (detail (slice u8))] (-> ChoiceEntry)
   (let [entry (alloc/stack ChoiceEntry)]
-    (store! (field entry label) label)
-    (store! (field entry detail) detail)
+    (set! (.label entry) label)
+    (set! (.detail entry) detail)
     (load entry)))
 
 (defn input-choice-redraw! [(allocator (ptr Allocator))
@@ -348,10 +348,10 @@
                                  (al-get [i64] (load filtered) index))]
                   (al-push! [ViewMenuEntry]
                             rows
-                            (view-menu-entry (load (field entry label))
-                                             (load (field entry detail))
+                            (view-menu-entry (.label entry)
+                                             (.detail entry)
                                              (= index selected)))
-                  (store! at (+ (load at) 1)))))
+                  (set! at (+ (load at) 1)))))
       (let [node
               (view-input-with-menu prompt
                                     query
@@ -359,19 +359,19 @@
                                     height
                                     rows
                                     (if (> overflow 0) overflow 0))]
-        (match-else node
-                    (ViewInputNode [input]
-                                   (let [(mut declarative) (view-layout-input cycle-allocator input width)]
-                                     (let [(mut operations)
-                                             (input-renderer-plan-with! renderer
-                                                                        cycle-allocator
-                                                                        (mut declarative)
-                                                                        (+ shown
-                                                                           (if (> overflow 0) 1 0)))]
-                                       (tui-output-execute-plan! cycle-allocator
-                                                                 profile
-                                                                 (mut operations)))))
-                    (_ 0)))
+        (match node
+               (ViewInputNode [input]
+                              (let [(mut declarative) (view-layout-input cycle-allocator input width)]
+                                (let [(mut operations)
+                                        (input-renderer-plan-with! renderer
+                                                                   cycle-allocator
+                                                                   (mut declarative)
+                                                                   (+ shown
+                                                                      (if (> overflow 0) 1 0)))]
+                                  (tui-output-execute-plan! cycle-allocator
+                                                            profile
+                                                            (mut operations)))))
+               (_ 0)))
       (region/region-close! cycle)
       0)))
 
@@ -392,8 +392,8 @@
     (loop (if (>= (load i) count)
               (break)
               (let [entry (al-elem [ChoiceEntry] entries (load i))
-                    label-score (fuzzy-score query (load (field entry label)))
-                    detail-score (fuzzy-score query (load (field entry detail)))
+                    label-score (fuzzy-score query (.label entry))
+                    detail-score (fuzzy-score query (.detail entry))
                     ;; A detail match is real but weaker evidence than a name
                     ;; match, so it never outranks one.
                     best
@@ -422,7 +422,7 @@
                                     (al-set! [i64] scores (- (load at) 1) best)
                                     (store! at (- (load at) 1)))))))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     0))
 
 (defn input-choice-query [(query (ptr (ArrayList u8)))] (-> (slice u8))
@@ -430,25 +430,25 @@
 
 ;; Apply a key to the filter query. Returns whether the query changed.
 (defn input-choice-edit! [(query (ptr (ArrayList u8))) (key InputKey)] (-> bool)
-  (match-else key
-              (InputInsert [text]
-                           (let [n (slice-len [u8] text)
-                                 (mut at) 0]
-                             (loop (if (>= (load at) n)
-                                       (break)
-                                       (do
-                                         (al-push! [u8] query (slice-get [u8] text (load at)))
-                                         (store! at (+ (load at) 1)))))
-                             (> n 0)))
-              (InputBackspace []
-                              (if (<= (al-len [u8] (load query)) 0)
-                                  false
-                                  (do (al-pop! [u8] query) true)))
-              (InputKillToStart []
-                                (if (<= (al-len [u8] (load query)) 0)
-                                    false
-                                    (do (al-clear! [u8] query) true)))
-              (_ false)))
+  (match key
+         (InputInsert [text]
+                      (let [n (slice-len [u8] text)
+                            (mut at) 0]
+                        (loop (if (>= (load at) n)
+                                  (break)
+                                  (do
+                                    (al-push! [u8] query (slice-get [u8] text (load at)))
+                                    (set! at (+ (load at) 1)))))
+                        (> n 0)))
+         (InputBackspace []
+                         (if (<= (al-len [u8] (load query)) 0)
+                             false
+                             (do (al-pop! [u8] query) true)))
+         (InputKillToStart []
+                           (if (<= (al-len [u8] (load query)) 0)
+                               false
+                               (do (al-clear! [u8] query) true)))
+         (_ false)))
 
 ;; What a key means to a picker. Collapsing the key to a small code keeps the
 ;; read loop flat -- the alternative nests a return-from inside a match arm
@@ -465,15 +465,15 @@
 (const CHOICE_ACTION_CLOSED 5)
 
 (defn input-choice-action [(key InputKey)] (-> i64)
-  (match-else key
-              (InputHistoryPrevious [] CHOICE_ACTION_UP)
-              (InputHistoryNext [] CHOICE_ACTION_DOWN)
-              (InputSubmit [] CHOICE_ACTION_ACCEPT)
-              (InputComplete [] CHOICE_ACTION_ACCEPT)
-              (InputDismiss [] CHOICE_ACTION_CANCEL)
-              (InputInterrupt [] CHOICE_ACTION_CANCEL)
-              (InputEndOfFile [] CHOICE_ACTION_CLOSED)
-              (_ CHOICE_ACTION_IGNORE)))
+  (match key
+         (InputHistoryPrevious [] CHOICE_ACTION_UP)
+         (InputHistoryNext [] CHOICE_ACTION_DOWN)
+         (InputSubmit [] CHOICE_ACTION_ACCEPT)
+         (InputComplete [] CHOICE_ACTION_ACCEPT)
+         (InputDismiss [] CHOICE_ACTION_CANCEL)
+         (InputInterrupt [] CHOICE_ACTION_CANCEL)
+         (InputEndOfFile [] CHOICE_ACTION_CLOSED)
+         (_ CHOICE_ACTION_IGNORE)))
 
 ;; Returns the chosen index into the ORIGINAL entry list. Cancellation is a
 ;; distinct result rather than an index of -1, so a caller cannot mistake "the
@@ -498,12 +498,12 @@
         (mut selected) 0
         (mut width)
           (let [queried (terminal-query-width (cast i32 1))]
-            (if (>= queried 12) queried (load (field profile width))))
+            (if (>= queried 12) queried (.width profile)))
         (mut height)
           (let [queried (terminal-query-height (cast i32 1))]
-            (if (>= queried 6) queried (load (field profile height))))]
+            (if (>= queried 6) queried (.height profile)))]
     (input-choice-filter! entries "" (mut filtered) (mut scores))
-    (store! selected (if (or (< initial 0) (>= initial count)) 0 initial))
+    (set! selected (if (or (< initial 0) (>= initial count)) 0 initial))
     (if (<= count 0)
         (ChoiceCancelled)
         (if (not (input-reader-lifecycle-enter! allocator (mut lifecycle) profile))
@@ -527,16 +527,14 @@
                                        (< byte 0) (InputDecoded (InputEndOfFile))
                                        :else (input-decoder-feed! (mut decoder) (cast u8 byte)))
                                action
-                                 (match-else decoded
-                                             (InputDecoded [key] (input-choice-action key))
-                                             (_ CHOICE_ACTION_IGNORE))
+                                 (match decoded (InputDecoded [key] (input-choice-action key)) (_ CHOICE_ACTION_IGNORE))
                                edited
                                  (if (!= action CHOICE_ACTION_IGNORE)
                                      false
-                                     (match-else decoded
-                                                 (InputDecoded [key]
-                                                               (input-choice-edit! (mut query) key))
-                                                 (_ false)))
+                                     (match decoded
+                                            (InputDecoded [key]
+                                                          (input-choice-edit! (mut query) key))
+                                            (_ false)))
                                visible (al-len [i64] (load filtered))]
                            (when edited
                              ;; A query that matches nothing keeps the last useful
@@ -609,10 +607,10 @@
         (mut quit-deadline) 0
         (mut width)
           (let [queried (terminal-query-width (cast i32 1))]
-            (if (>= queried 12) queried (load (field profile width))))
+            (if (>= queried 12) queried (.width profile)))
         (mut height)
           (let [queried (terminal-query-height (cast i32 1))]
-            (if (>= queried 6) queried (load (field profile height))))]
+            (if (>= queried 6) queried (.height profile)))]
     (if (not (input-reader-lifecycle-enter! allocator
                                             (mut lifecycle)
                                             profile))

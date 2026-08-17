@@ -15,9 +15,9 @@
 ;; it cancels -- the same thing Ctrl-C does. The decoder stays neutral and each
 ;; reader decides, rather than the decoder guessing which mode it is in.
 (defn busy-input-intent [(key InputKey)] (-> BusyInputIntent)
-  (match-else key
-              (InputInterrupt [] (BusyInputCancel))
-              (InputDismiss [] (BusyInputCancel))
-              (InputSuspend [] (BusyInputSuspend))
-              (InputEndOfFile [] (BusyInputClose))
-              (_ (BusyInputIgnore))))
+  (match key
+         (InputInterrupt [] (BusyInputCancel))
+         (InputDismiss [] (BusyInputCancel))
+         (InputSuspend [] (BusyInputSuspend))
+         (InputEndOfFile [] (BusyInputClose))
+         (_ (BusyInputIgnore))))

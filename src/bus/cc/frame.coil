@@ -56,7 +56,7 @@
     (Ok [opened]
         (let [file (alloc/stack fs/File)
               reader (alloc/stack io/Reader)]
-          (store! file opened)
+          (set! file opened)
           (let [source (fs/file-reader reader file)
                 outcome (io/read-exact source (cast (ptr i8) buffer) length)]
             (fs/file-close file)
@@ -78,10 +78,8 @@
         ""
         (do
           ;; Version 4 and the RFC 4122 variant, as the format requires.
-          (store! (index raw 6)
-                  (cast u8 (primitive/ior (primitive/iand (cast i64 (load (index raw 6))) 15) 64)))
-          (store! (index raw 8)
-                  (cast u8 (primitive/ior (primitive/iand (cast i64 (load (index raw 8))) 63) 128)))
+          (set! (index raw 6) (cast u8 (primitive/ior (primitive/iand (cast i64 (load (index raw 6))) 15) 64)))
+          (set! (index raw 8) (cast u8 (primitive/ior (primitive/iand (cast i64 (load (index raw 8))) 63) 128)))
           (let [(mut buffer) (sb-new allocator)
                 (mut i) 0]
             (loop (if (>= (load i) 16)
@@ -94,7 +92,7 @@
                         (let [byte (cast i64 (load (index raw (load i))))]
                           (sb-push-byte! (mut buffer) (cc-hex-lower (/ byte 16)))
                           (sb-push-byte! (mut buffer) (cc-hex-lower (% byte 16))))
-                        (store! i (+ (load i) 1)))))
+                        (set! i (+ (load i) 1)))))
             (sb-finish! (mut buffer)))))))
 
 ;; ---------------------------------------------------------------------------
@@ -206,16 +204,16 @@
    (original-id (slice u8))])
 
 (defn cc-frame-init! [(frame (ptr CcFrame))] (-> i64)
-  (store! (field frame kind) (CcUnknownFrame))
-  (store! (field frame message-id) "")
-  (store! (field frame content) "")
-  (store! (field frame from) "")
-  (store! (field frame priority) "")
-  (store! (field frame session-id) "")
-  (store! (field frame action) "")
-  (store! (field frame status) "")
-  (store! (field frame name) "")
-  (store! (field frame original-id) "")
+  (set! (.kind frame) (CcUnknownFrame))
+  (set! (.message-id frame) "")
+  (set! (.content frame) "")
+  (set! (.from frame) "")
+  (set! (.priority frame) "")
+  (set! (.session-id frame) "")
+  (set! (.action frame) "")
+  (set! (.status frame) "")
+  (set! (.name frame) "")
+  (set! (.original-id frame) "")
   0)
 
 (defn cc-json-string-or [(value Json) (key (slice u8)) (fallback (slice u8))] (-> (slice u8))
@@ -231,15 +229,15 @@
                       (out (ptr CcFrame))] (-> bool)
   (cc-frame-init! out)
   (let [result (json-parse allocator line)]
-    (if (not (load (field result ok)))
+    (if (not (.ok result))
         false
-        (let [value (load (field result value))]
+        (let [value (.value result)]
           (if (not (json-object-has? value "type"))
               false
               (let [kind (cc-json-string-or value "type" "")]
-                (store! (field out message-id) (cc-json-string-or value "msg_id" ""))
-                (store! (field out from) (cc-json-string-or value "from" ""))
-                (cond (str-eq kind "user")
+                (set! (.message-id out) (cc-json-string-or value "msg_id" ""))
+                (set! (.from out) (cc-json-string-or value "from" ""))
+                (cond (= kind "user")
                         (do
                           (store! (field out kind) (CcUserFrame))
                           (store! (field out priority)
@@ -251,7 +249,7 @@
                           ;; An empty or non-string content is ignored by the
                           ;; receiver, so treat it as a frame we cannot act on.
                           (> (slice-len [u8] (load (field out content))) 0))
-                      (str-eq kind "control")
+                      (= kind "control")
                         (do
                           (store! (field out kind) (CcControlFrame))
                           (store! (field out action) (cc-json-string-or value "action" ""))

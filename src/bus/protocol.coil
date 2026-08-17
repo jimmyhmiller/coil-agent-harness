@@ -116,13 +116,13 @@
                     (kind MessageKind)
                     (body (slice u8))] (-> Envelope)
   (let [envelope (alloc/stack Envelope)]
-    (store! (field envelope version) PROTOCOL_VERSION)
-    (store! (field envelope id) id)
-    (store! (field envelope correlation) (None [(slice u8)]))
-    (store! (field envelope from) from)
-    (store! (field envelope to) to)
-    (store! (field envelope kind) kind)
-    (store! (field envelope body) body)
+    (set! (.version envelope) PROTOCOL_VERSION)
+    (set! (.id envelope) id)
+    (set! (.correlation envelope) (None [(slice u8)]))
+    (set! (.from envelope) from)
+    (set! (.to envelope) to)
+    (set! (.kind envelope) kind)
+    (set! (.body envelope) body)
     (load envelope)))
 
 ;; A reply is an ordinary message that names the message it answers, so the
@@ -132,9 +132,8 @@
                       (from Address)
                       (body (slice u8))] (-> Envelope)
   (let [envelope (alloc/stack Envelope)]
-    (store! envelope
-            (envelope-new id from (load (field request from)) (Reply) body))
-    (store! (field envelope correlation) (Some (load (field request id))))
+    (set! envelope (envelope-new id from (.from request) (Reply) body))
+    (set! (.correlation envelope) (Some (.id request)))
     (load envelope)))
 
 ;; ---------------------------------------------------------------------------
@@ -177,7 +176,7 @@
                 (-> (Result i64 DeError))
                 (match (from-msgpack [Envelope] allocator source)
                   (Err [failure] (Err failure))
-                  (Ok [decoded] (do (store! out decoded) (Ok 0))))))
+                  (Ok [decoded] (do (set! out decoded) (Ok 0))))))
 
 ;; For debugging, journals, and clients that would rather not speak binary.
 (defstruct JsonCodec [(reserved u8)])
@@ -196,7 +195,7 @@
                 (-> (Result i64 DeError))
                 (match (from-json [Envelope] allocator source)
                   (Err [failure] (Err failure))
-                  (Ok [decoded] (do (store! out decoded) (Ok 0))))))
+                  (Ok [decoded] (do (set! out decoded) (Ok 0))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Transport -- how bytes move

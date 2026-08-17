@@ -46,11 +46,9 @@
   (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
       false
       (let [envelope (alloc/stack Envelope)]
-        (store! envelope
-                (envelope-new "sub" (Agent "client") (Service) (Subscribe) topic))
-        (match (codec-encode codec allocator envelope)
-          (Err [_] false)
-          (Ok [bytes] (= (frame-write! client bytes) FRAME_OK))))))
+        (set! envelope (envelope-new "sub" (Agent "client") (Service) (Subscribe) topic))
+        (try (let [bytes (try-or! (codec-encode codec allocator envelope) false)]
+                  (= (frame-write! client bytes) FRAME_OK))))))
 
 ;; Read one event name off a client socket, or "" if nothing arrives.
 (defn receive-event-kind [(transport (ptr UnixTransport))
@@ -60,16 +58,14 @@
         envelope (alloc/stack Envelope)]
     (if (!= (frame-read transport allocator out) FRAME_OK)
         ""
-        (match (codec-decode codec allocator (load out) envelope)
-          (Err [_] "")
-          (Ok [_]
-              (let [parsed (alloc/stack JsonParseResult)]
-                (store! parsed (json-parse allocator (load (field envelope body))))
-                (if (not (load (field parsed ok)))
-                    ""
-                    (match (json-string-at (load (field parsed value)) "event")
-                      (Some [name] name)
-                      (None [] "")))))))))
+        (try (let [_ (try-or! (codec-decode codec allocator (load out) envelope) "")]
+                  (let [parsed (alloc/stack JsonParseResult)]
+                    (store! parsed (json-parse allocator (load (field envelope body))))
+                    (if (not (load (field parsed ok)))
+                        ""
+                        (match (json-string-at (load (field parsed value)) "event")
+                          (Some [name] name)
+                          (None [] "")))))))))
 
 (defn emit-sample [(emitter (ptr EventEmitter)) (kind EventKind)] (-> i64)
   (emit-event emitter 1000 kind "chat-1" "op-1" "" "fake" "fake-model" (JsonNull)))
@@ -115,8 +111,8 @@
            (assert (> (emit-sample emitter (RunStarted)) 0))
            ;; One event, two recipients -- fan-out, not a broadcast to everyone.
            (assert (= (bus-server-drain! server) 2))
-           (assert (str-eq (receive-event-kind watcher-a codec allocator) "run.started"))
-           (assert (str-eq (receive-event-kind watcher-b codec allocator) "run.started"))
+           (assert (= (receive-event-kind watcher-a codec allocator) "run.started"))
+           (assert (= (receive-event-kind watcher-b codec allocator) "run.started"))
 
            (bus-server-close! server)
            (event-journal-close! journal)
@@ -230,8 +226,8 @@
            (bus-server-drain! server)
 
            ;; The survivor got everything; the dead one was dropped.
-           (assert (str-eq (receive-event-kind survivor codec allocator) "run.started"))
-           (assert (str-eq (receive-event-kind survivor codec allocator) "run.completed"))
+           (assert (= (receive-event-kind survivor codec allocator) "run.started"))
+           (assert (= (receive-event-kind survivor codec allocator) "run.completed"))
            (assert (= (bus-server-live-count server) 1))
 
            (bus-server-close! server)

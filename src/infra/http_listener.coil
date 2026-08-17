@@ -43,13 +43,12 @@
                    (ListenerOpenFailed "could not inspect listening socket")))
             (Ok [bound-port]
                 (do
-                  (store! (field listener fd)
-                          (cast i64 (load (field opened fd))))
-                  (store! (field listener port) bound-port)
+                  (set! (.fd listener) (cast i64 (.fd opened)))
+                  (set! (.port listener) bound-port)
                   (ListenerOpened (load listener)))))))))
 
 (defn http-listener-close! [(listener (ptr HttpListener))] (-> i64)
-  (let [fd (load (field listener fd))]
+  (let [fd (.fd listener)]
     (when (>= fd 0)
       (socket/tcp-listener-close! (field listener native))
       (store! (field listener fd) -1)
@@ -60,7 +59,7 @@
   (let [connection (alloc/stack socket/TcpConnection)]
     (match (socket/tcp-accept (field listener native) connection)
       (Err [failure] -1)
-      (Ok [accepted] (cast i64 (load (field accepted fd)))))))
+      (Ok [accepted] (cast i64 (.fd accepted))))))
 
 (defn push-http-crlf! [(buffer (mut StrBuf))] (-> i64)
   (sb-push-byte! (mut buffer) (cast u8 13))
@@ -133,13 +132,13 @@
           length (slice-len [u8] body)]
       (loop (if (> (* (load divisor) 10) length)
                 (break)
-                (store! divisor (* (load divisor) 10))))
+                (set! divisor (* (load divisor) 10))))
       (loop (do
               (sb-push-byte! (mut digits)
                              (cast u8 (+ 48 (% (/ length (load divisor)) 10))))
               (if (= (load divisor) 1)
                   (break)
-                  (store! divisor (/ (load divisor) 10)))))
+                  (set! divisor (/ (load divisor) 10)))))
       (sb-push-str! (mut head) (sb-str (load digits))))
     (push-http-crlf! (mut head))
     (push-http-crlf! (mut head))

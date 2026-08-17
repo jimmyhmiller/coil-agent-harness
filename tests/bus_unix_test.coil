@@ -34,21 +34,19 @@
                     (client (ptr UnixTransport))
                     (server (ptr UnixTransport))] (-> bool)
   (remove-socket-path)
-  (match (socket/unix-listen listener SOCKET_PATH 8)
-    (Err [_] false)
-    (Ok [_]
-        (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
-            false
-            (match (time/duration-seconds 2)
-              (Err [_] false)
-              (Ok [duration]
-                  (let [accepted (alloc/stack socket/UnixConnection)]
-                    (match (socket/unix-accept-for listener accepted duration)
-                      (Err [_] false)
-                      (Ok [_]
-                          (do
-                            (unix-transport-adopt! server (load accepted))
-                            true))))))))))
+  (try (let [_ (try-or! (socket/unix-listen listener SOCKET_PATH 8) false)]
+            (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
+                false
+                (match (time/duration-seconds 2)
+                  (Err [_] false)
+                  (Ok [duration]
+                      (let [accepted (alloc/stack socket/UnixConnection)]
+                        (match (socket/unix-accept-for listener accepted duration)
+                          (Err [_] false)
+                          (Ok [_]
+                              (do
+                                (unix-transport-adopt! server (load accepted))
+                                true))))))))))
 
 (defn teardown [(listener (ptr socket/UnixListener))
                 (client (ptr UnixTransport))
@@ -84,7 +82,7 @@
                      (Err [_] (assert false))
                      (Ok [_]
                          (do
-                           (assert (str-eq (load (field decoded id)) "msg-1"))
+                           (assert (= (load (field decoded id)) "msg-1"))
                            (assert (address-eq (load (field decoded to))
                                                (Topic "run.chat-1")))))))))
            (teardown listener client server)))
@@ -104,9 +102,9 @@
            (assert (= (frame-read server allocator first-out) FRAME_OK))
            (assert (= (frame-read server allocator second-out) FRAME_OK))
            (assert (= (frame-read server allocator third-out) FRAME_OK))
-           (assert (str-eq (load first-out) "one"))
+           (assert (= (load first-out) "one"))
            (assert (= (slice-len (load second-out)) 0))
-           (assert (str-eq (load third-out) "three"))
+           (assert (= (load third-out) "three"))
            (teardown listener client server)))
 
 (deftest a-closed-unix-peer-reports-eof-not-failure

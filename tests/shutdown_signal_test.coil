@@ -21,12 +21,12 @@
     (loop (if (load done)
               (break)
               (if (shutdown-signal-requested? (load (field job shutdown)))
-                  (store! done true)
+                  (set! done true)
                   (shutdown-signal-wait-listener (load (field job shutdown))
                                                  (load (field job allocator))
-                                                 (load (field (load (field job listener)) fd))
+                                                 (.fd (load (field job listener)))
                                                  25))))
-    (store! (load (field job result)) 0)
+    (set! (load (field job result)) 0)
     (cast (ptr i8) 0)))
 
 (deftest wakes-a-bounded-listener-loop-for-graceful-shutdown

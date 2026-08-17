@@ -69,8 +69,8 @@
                                (length i64)
                                (opaque (ptr i8))] (-> i64)
   (let [capture (cast (ptr StreamingCapture) opaque)
-        current (al-len [u8] (load (field capture body)))
-        available (- (load (field capture max-captured-bytes)) current)
+        current (al-len [u8] (.body capture))
+        available (- (.max-captured-bytes capture) current)
         retained (if (< available length) available length)
         sink (field capture sink)]
     (when (> retained 0)
@@ -78,7 +78,7 @@
       0)
     (let [accepted
             (cast i64
-                  (primitive/call-ptr (load (field sink consume))
+                  (primitive/call-ptr (.consume sink)
                                       data
                                       (cast usize length)
                                       (load (field sink context))))]
@@ -90,8 +90,8 @@
     (loop (if (>= (load i) (slice-len [u8] line))
               (break)
               (if (= (cast i64 (slice-get [u8] line (load i))) 58)
-                  (do (store! found (load i)) (break))
-                  (store! i (+ (load i) 1)))))
+                  (do (set! found (load i)) (break))
+                  (set! i (+ (load i) 1)))))
     (load found)))
 
 (defn request-headers [(allocator (ptr Allocator))
@@ -115,7 +115,7 @@
                     (store! (field header value)
                             (subslice [u8] line value-start (slice-len [u8] line)))
                     (al-push! [client/Header] (mut headers) (load header))))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (al-into-slice [client/Header] (mut headers))))
 
 ;; Adapt the harness's existing POST shape to Coil's supported HTTP client.
@@ -123,26 +123,26 @@
   (let [headers (request-headers allocator (load (field request headers)))
         native-request (alloc/stack client/Request)
         result (alloc/stack HttpResponse)]
-    (store! (field result transport-code) 0)
-    (store! (field result status-code) 0)
-    (store! (field result body) "")
-    (store! (field result error) "")
-    (store! (field native-request method) "POST")
-    (store! (field native-request url) (load (field request url)))
-    (store! (field native-request headers) headers)
-    (store! (field native-request body) (load (field request body)))
-    (store! (field native-request connect-timeout-ms) (load (field request timeout-ms)))
-    (store! (field native-request timeout-ms) (load (field request timeout-ms)))
-    (store! (field native-request follow-redirects) false)
+    (set! (.transport-code result) 0)
+    (set! (.status-code result) 0)
+    (set! (.body result) "")
+    (set! (.error result) "")
+    (set! (.method native-request) "POST")
+    (set! (.url native-request) (.url request))
+    (set! (.headers native-request) headers)
+    (set! (.body native-request) (.body request))
+    (set! (.connect-timeout-ms native-request) (.timeout-ms request))
+    (set! (.timeout-ms native-request) (.timeout-ms request))
+    (set! (.follow-redirects native-request) false)
     (match (client/request allocator native-request)
       (Ok [response]
           (do
-            (store! (field result status-code) (client/response-status response))
-            (store! (field result body) (client/response-body response))))
+            (set! (.status-code result) (client/response-status response))
+            (set! (.body result) (client/response-body response))))
       (Err [failure]
            (do
-             (store! (field result transport-code) -1)
-             (store! (field result error) "HTTP transport failed"))))
+             (set! (.transport-code result) -1)
+             (set! (.error result) "HTTP transport failed"))))
     (load result)))
 
 ;; Incremental transport for provider SSE, on `coil.http.client/request-stream`.
@@ -157,24 +157,24 @@
         capture (alloc/stack StreamingCapture)
         sink (alloc/stack client/BodySink)
         result (alloc/stack HttpResponse)]
-    (store! (field result transport-code) 0)
-    (store! (field result status-code) 0)
-    (store! (field result body) "")
-    (store! (field result error) "")
-    (store! (field capture sink) (load (field request chunks)))
-    (store! (field capture body) (al-new [u8] allocator))
-    (store! (field capture max-captured-bytes) 1048576)
-    (store! (field sink context) (cast (ptr i8) capture))
-    (store! (field sink consume) (fnptr-of capture-streaming-chunk))
-    (store! (field native-request method) "POST")
-    (store! (field native-request url) (load (field request url)))
-    (store! (field native-request headers) headers)
-    (store! (field native-request body) (load (field request body)))
+    (set! (.transport-code result) 0)
+    (set! (.status-code result) 0)
+    (set! (.body result) "")
+    (set! (.error result) "")
+    (set! (.sink capture) (.chunks request))
+    (set! (.body capture) (al-new [u8] allocator))
+    (set! (.max-captured-bytes capture) 1048576)
+    (set! (.context sink) (cast (ptr i8) capture))
+    (set! (.consume sink) (fnptr-of capture-streaming-chunk))
+    (set! (.method native-request) "POST")
+    (set! (.url native-request) (.url request))
+    (set! (.headers native-request) headers)
+    (set! (.body native-request) (.body request))
     ;; One budget covered both the connect and the total deadline before, and
     ;; `Request` splits them; keep them equal rather than quietly tightening one.
-    (store! (field native-request connect-timeout-ms) (load (field request timeout-ms)))
-    (store! (field native-request timeout-ms) (load (field request timeout-ms)))
-    (store! (field native-request follow-redirects) false)
+    (set! (.connect-timeout-ms native-request) (.timeout-ms request))
+    (set! (.timeout-ms native-request) (.timeout-ms request))
+    (set! (.follow-redirects native-request) false)
     (match (if (= (load (field request cancellation))
                   (cast (ptr CancellationToken) 0))
                (client/request-stream allocator native-request (load sink))
@@ -186,29 +186,28 @@
           (do
             ;; A consumer stop is a successful transfer that ended early, not a
             ;; failure: the status and headers arrived before any body byte did.
-            (store! (field result status-code)
-                    (client/streaming-response-status response))
+            (set! (.status-code result) (client/streaming-response-status response))
             (client/streaming-response-free allocator response)
             0))
       (Err [failure]
            (do
-             (store! (field result transport-code) -1)
-             (store! (field result error) "HTTP streaming transport failed")
+             (set! (.transport-code result) -1)
+             (set! (.error result) "HTTP streaming transport failed")
              (match failure
                (client/Transport [code message]
                                  (do
-                                   (store! (field result transport-code) code)
+                                   (set! (.transport-code result) code)
                                    (when (> (slice-len [u8] message) 0)
                                      (store! (field result error) message)
                                      0)
                                    0))
-               (client/OutOfMemory [] (store! (field result error) "out of memory"))
-               (client/InvalidRequest [] (store! (field result error) "invalid request")))
+               (client/OutOfMemory [] (set! (.error result) "out of memory"))
+               (client/InvalidRequest [] (set! (.error result) "invalid request")))
              0)))
     ;; Whatever arrived before a failure is still worth reporting — the old
     ;; implementation returned it too, and a provider's error body is often the
     ;; only explanation of what went wrong.
-    (store! (field result body) (al-into-slice [u8] (mut (field capture body))))
+    (set! (.body result) (al-into-slice [u8] (mut (.body capture))))
     (load result)))
 
 (impl StreamingHttpTransport CurlStreamingHttpTransport
@@ -218,20 +217,20 @@
                         (response (mut HttpResponse))]
                        (-> i64)
                        (do
-                         (store! response (http-post-stream allocator request))
+                         (set! response (http-post-stream allocator request))
                          0)))
 
 (defn streaming-http-send [(transport (dyn StreamingHttpTransport))
                            (allocator (ptr Allocator))
                            (request (ptr HttpRequest))] (-> HttpResponse)
   (let [response (alloc/stack HttpResponse)]
-    (store! (field response transport-code) -1)
-    (store! (field response status-code) 0)
-    (store! (field response body) "")
-    (store! (field response error) "streaming transport did not produce a response")
+    (set! (.transport-code response) -1)
+    (set! (.status-code response) 0)
+    (set! (.body response) "")
+    (set! (.error response) "streaming transport did not produce a response")
     (if (!= (send-streaming-http transport allocator request (mut response)) 0)
         (do
-          (store! (field response transport-code) -1)
+          (set! (.transport-code response) -1)
           (when (= (slice-len [u8] (load (field response error))) 0)
             (store! (field response error) "streaming transport failed")
             0))

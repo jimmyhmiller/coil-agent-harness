@@ -55,31 +55,31 @@
 
 (defn service-prepare-provider! [(service (ptr RunService))
                                  (provider-name (slice u8))] (-> i64)
-  (prepare-durable-provider (load (field service controller)) provider-name))
+  (prepare-durable-provider (.controller service) provider-name))
 
 ;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
 ;; by value through a trait object is not ABI-stable across Coil backends.
 (defn service-start-durable-run [(service (ptr RunService)) (command Json)] (-> i64)
   (let [command-ref (alloc/stack Json)]
-    (store! command-ref command)
-    (start-durable-run (load (field service controller)) command-ref)))
+    (set! command-ref command)
+    (start-durable-run (.controller service) command-ref)))
 
 (defn service-cancel-durable-run [(service (ptr RunService))
                                   (command Json)] (-> RunCancellationResult)
   (let [command-ref (alloc/stack Json)]
-    (store! command-ref command)
-    (cancel-durable-run (load (field service controller)) command-ref)))
+    (set! command-ref command)
+    (cancel-durable-run (.controller service) command-ref)))
 
 (defn service-request-cancel-durable-run [(service (ptr RunService))
                                           (command Json)] (-> i64)
   (let [command-ref (alloc/stack Json)]
-    (store! command-ref command)
-    (request-cancel-durable-run (load (field service controller)) command-ref)))
+    (set! command-ref command)
+    (request-cancel-durable-run (.controller service) command-ref)))
 
 (defn service-response [(status i64) (body Json)] (-> ServiceResponse)
   (let [response (alloc/stack ServiceResponse)]
-    (store! (field response status) status)
-    (store! (field response body) body)
+    (set! (.status response) status)
+    (set! (.body response) body)
     (load response)))
 
 (defn service-error [(allocator (ptr Allocator))
@@ -163,12 +163,12 @@
               (break)
               (let [event (al-get [Json] (load events) (load i))
                     payload (json-get event "payload")]
-                (when (and (str-eq (command-string event "event") "run.created")
-                           (and (str-eq (command-string event "run_id") run-id)
-                                (str-eq (command-string payload "workflow_id") workflow-id)))
+                (when (and (= (command-string event "event") "run.created")
+                           (and (= (command-string event "run_id") run-id)
+                                (= (command-string payload "workflow_id") workflow-id)))
                   (store! found true)
                   (break))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 (defn workflow-dependencies-valid? [(events (ref (ArrayList Json)))
@@ -188,17 +188,17 @@
             (loop (if (or (>= (load i) n) (not (load valid)))
                       (break)
                       (do
-                        (match-else (al-get [Json] (load items) (load i))
-                                    (JsonString [dependency]
-                                                (if (or (str-eq dependency run-id)
-                                                        (and (not external)
-                                                             (not (workflow-event-run-id events
-                                                                                         dependency
-                                                                                         workflow-id))))
-                                                    (store! valid false)
-                                                    0))
-                                    (_ (store! valid false)))
-                        (store! i (+ (load i) 1)))))
+                        (match (al-get [Json] (load items) (load i))
+                               (JsonString [dependency]
+                                           (if (or (= dependency run-id)
+                                                   (and (not external)
+                                                        (not (workflow-event-run-id events
+                                                                                    dependency
+                                                                                    workflow-id))))
+                                               (set! valid false)
+                                               0))
+                               (_ (set! valid false)))
+                        (set! i (+ (load i) 1)))))
             (load valid)))))
 
 (defn workflow-command-valid? [(events (ref (ArrayList Json)))
@@ -216,7 +216,7 @@
                             (allocator (ptr Allocator))] (-> JournalRecovery)
   (event-journal-recover-synchronized (load (field service journal))
                                       allocator
-                                      (load (field service journal-path))))
+                                      (.journal-path service)))
 
 (defn service-run-response [(service (ptr RunService))
                             (events (ref (ArrayList Json)))
@@ -234,8 +234,8 @@
         (let [recovery (service-recover-into service allocator)
               command-id (command-string command "command_id")
               run-id (command-string command "run_id")]
-          (if (not (load (field recovery ok)))
-              (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+          (if (not (.ok recovery))
+              (service-error allocator 500 "journal_recovery_failed" (.error recovery))
               (if (> (journal-command-sequence (field recovery events) command-id) 0)
                   (service-run-response service (field recovery events) run-id 200)
                   (if (not (workflow-command-valid? (field recovery events) command))
@@ -244,96 +244,95 @@
                                      "invalid_workflow_node"
                                      "workflow nodes require version 1, a node ID, and already-created dependencies in the same workflow")
                       (let [view (project-run (field recovery events) run-id)]
-                        (match-else (load (field view status))
-                                    (RunNotFound []
-                                                 (let [provider (command-string command "provider")
-                                                       model (command-string command "model")
-                                                       parent-run-id (command-string command "parent_run_id")
-                                                       parent-agent-id (command-string command "parent_agent_id")
-                                                       parent-view
-                                                         (project-run (field recovery events)
-                                                                      parent-run-id)]
-                                                   (if (and (> (slice-len [u8] parent-run-id) 0)
-                                                            (match-else (load (field parent-view status))
-                                                                        (RunNotFound [] true)
-                                                                        (_ false)))
-                                                       (service-error allocator
-                                                                      404
-                                                                      "parent_run_not_found"
-                                                                      "delegation parent run does not exist")
-                                                       (do
-                                                         (emit-event (load (field service emitter))
-                                                                     (now-ms)
-                                                                     (RunCreated)
-                                                                     run-id
-                                                                     run-id
-                                                                     ""
-                                                                     provider
-                                                                     model
-                                                                     command)
-                                                         (when (> (slice-len [u8] parent-run-id) 0)
-                                                           (emit-event-for-agent (load (field service emitter))
-                                                                                 (now-ms)
-                                                                                 (AgentDelegated)
-                                                                                 parent-run-id
-                                                                                 parent-agent-id
-                                                                                 run-id
-                                                                                 parent-agent-id
-                                                                                 provider
-                                                                                 model
-                                                                                 command)
-                                                           0)
-                                                         (emit-event-for-agent (load (field service emitter))
-                                                                               (now-ms)
-                                                                               (AgentCreated)
-                                                                               run-id
-                                                                               run-id
-                                                                               run-id
-                                                                               parent-agent-id
-                                                                               provider
-                                                                               model
-                                                                               command)
-                                                         (when (> (slice-len [u8]
-                                                                             (command-string command
-                                                                                             "workflow_id"))
-                                                                  0)
-                                                           (emit-event-for-agent (load (field service emitter))
-                                                                                 (now-ms)
-                                                                                 (WorkflowNodeCreated)
-                                                                                 run-id
-                                                                                 run-id
-                                                                                 (command-string command "node_id")
-                                                                                 (command-string command "workflow_id")
-                                                                                 provider
-                                                                                 model
-                                                                                 command)
-                                                           0)
-                                                         (if (event-journal-failed? (load (field service journal)))
-                                                             (service-error allocator
-                                                                            500
-                                                                            "journal_write_failed"
-                                                                            "create command was not durable")
-                                                             (let [remote-worker
-                                                                     (str-eq (command-string command "execution_target")
-                                                                             "worker")
-                                                                   start-code
-                                                                     (if remote-worker
-                                                                         0
-                                                                         (service-start-durable-run service command))
-                                                                   refreshed (service-recover-into service allocator)]
-                                                               (if (!= start-code 0)
-                                                                   (service-error allocator
-                                                                                  503
-                                                                                  "run_start_failed"
-                                                                                  "run was durably queued but could not start")
-                                                                   (service-run-response service
-                                                                                         (field refreshed events)
-                                                                                         run-id
-                                                                                         202))))))))
-                                    (_ (service-error allocator
-                                                      409
-                                                      "run_exists"
-                                                      "run_id already exists")))))))))))
+                        (match (.status view)
+                               (RunNotFound []
+                                            (let [provider (command-string command "provider")
+                                                  model (command-string command "model")
+                                                  parent-run-id (command-string command "parent_run_id")
+                                                  parent-agent-id (command-string command "parent_agent_id")
+                                                  parent-view
+                                                    (project-run (field recovery events)
+                                                                 parent-run-id)]
+                                              (if (and (> (slice-len [u8] parent-run-id) 0)
+                                                       (match (.status parent-view)
+                                                              (RunNotFound [] true)
+                                                              (_ false)))
+                                                  (service-error allocator
+                                                                 404
+                                                                 "parent_run_not_found"
+                                                                 "delegation parent run does not exist")
+                                                  (do
+                                                    (emit-event (load (field service emitter))
+                                                                (now-ms)
+                                                                (RunCreated)
+                                                                run-id
+                                                                run-id
+                                                                ""
+                                                                provider
+                                                                model
+                                                                command)
+                                                    (when (> (slice-len [u8] parent-run-id) 0)
+                                                      (emit-event-for-agent (load (field service emitter))
+                                                                            (now-ms)
+                                                                            (AgentDelegated)
+                                                                            parent-run-id
+                                                                            parent-agent-id
+                                                                            run-id
+                                                                            parent-agent-id
+                                                                            provider
+                                                                            model
+                                                                            command)
+                                                      0)
+                                                    (emit-event-for-agent (load (field service emitter))
+                                                                          (now-ms)
+                                                                          (AgentCreated)
+                                                                          run-id
+                                                                          run-id
+                                                                          run-id
+                                                                          parent-agent-id
+                                                                          provider
+                                                                          model
+                                                                          command)
+                                                    (when (> (slice-len [u8]
+                                                                        (command-string command
+                                                                                        "workflow_id"))
+                                                             0)
+                                                      (emit-event-for-agent (load (field service emitter))
+                                                                            (now-ms)
+                                                                            (WorkflowNodeCreated)
+                                                                            run-id
+                                                                            run-id
+                                                                            (command-string command "node_id")
+                                                                            (command-string command "workflow_id")
+                                                                            provider
+                                                                            model
+                                                                            command)
+                                                      0)
+                                                    (if (event-journal-failed? (load (field service journal)))
+                                                        (service-error allocator
+                                                                       500
+                                                                       "journal_write_failed"
+                                                                       "create command was not durable")
+                                                        (let [remote-worker
+                                                                (= (command-string command "execution_target") "worker")
+                                                              start-code
+                                                                (if remote-worker
+                                                                    0
+                                                                    (service-start-durable-run service command))
+                                                              refreshed (service-recover-into service allocator)]
+                                                          (if (!= start-code 0)
+                                                              (service-error allocator
+                                                                             503
+                                                                             "run_start_failed"
+                                                                             "run was durably queued but could not start")
+                                                              (service-run-response service
+                                                                                    (field refreshed events)
+                                                                                    run-id
+                                                                                    202))))))))
+                               (_ (service-error allocator
+                                                 409
+                                                 "run_exists"
+                                                 "run_id already exists")))))))))))
 
 ;; Rebuild a semantic conversation from durable events. The service, rather than
 ;; a particular client, owns history and provider continuation handles. This also
@@ -345,7 +344,7 @@
     (if (= (slice-len [u8] conversation-id) 0)
         0
         (let [recovery (service-recover-into service allocator)]
-          (if (not (load (field recovery ok)))
+          (if (not (.ok recovery))
               -1
               (let [(mut messages) (json-array allocator)
                     (mut run-ids) (zeroed (array (slice u8) 128))
@@ -365,9 +364,8 @@
                                 kind (command-string event "event")
                                 run-id (command-string event "run_id")
                                 payload (json-get event "payload")]
-                            (when (and (str-eq kind "run.created")
-                                       (and (str-eq (command-string payload "conversation_id")
-                                                    conversation-id)
+                            (when (and (= kind "run.created")
+                                       (and (= (command-string payload "conversation_id") conversation-id)
                                             (< (load run-count) 128)))
                               (let [(mut item) (json-object allocator)]
                                 (json-put-string! (mut item) "role" "user")
@@ -385,17 +383,17 @@
                               (loop (if (>= (load slot) (load run-count))
                                         (break)
                                         (do
-                                          (when (str-eq (load (index run-ids (load slot))) run-id)
+                                          (when (= (load (index run-ids (load slot))) run-id)
                                             (store! matched (load slot))
                                             (break))
-                                          (store! slot (+ (load slot) 1)))))
+                                          (set! slot (+ (load slot) 1)))))
                               (when (>= (load matched) 0)
                                 ;; Child completions are addressed agent messages,
                                 ;; not tool polling results. Preserve them in the
                                 ;; conversation as user-role input so any resumed
                                 ;; parent turn receives the child identity, status,
                                 ;; and output in chronological order.
-                                (when (str-eq kind "agent.message.received")
+                                (when (= kind "agent.message.received")
                                   (let [(mut item) (json-object allocator)
                                         (mut content) (sb-new allocator)]
                                     (sb-push-str! (mut content) "<subagent-completion from=\"")
@@ -409,19 +407,19 @@
                                     (json-put-string! (mut item) "content" (sb-finish! (mut content)))
                                     (json-array-push! (mut messages) (load item)))
                                   0)
-                                (when (str-eq kind "model.response.delta")
-                                  (match-else payload
-                                              (JsonString [text]
-                                                          (store! (index assistant-text (load matched))
-                                                                  (concat-or-empty allocator
-                                                                                   (load (index assistant-text
-                                                                                                (load matched)))
-                                                                                   text)))
-                                              (_ 0))
+                                (when (= kind "model.response.delta")
+                                  (match payload
+                                         (JsonString [text]
+                                                     (store! (index assistant-text (load matched))
+                                                             (concat-or-empty allocator
+                                                                              (load (index assistant-text
+                                                                                           (load matched)))
+                                                                              text)))
+                                         (_ 0))
                                   0)
-                                (when (or (str-eq kind "tool.call.proposed")
-                                          (or (str-eq kind "tool.call.completed")
-                                              (str-eq kind "tool.call.failed")))
+                                (when (or (= kind "tool.call.proposed")
+                                          (or (= kind "tool.call.completed")
+                                              (= kind "tool.call.failed")))
                                   (store! (index assistant-text (load matched))
                                           (concat-or-empty allocator
                                                            (load (index assistant-text (load matched)))
@@ -439,35 +437,35 @@
                                                                                                                                                 (json-stringify allocator
                                                                                                                                                                 payload))))))))
                                   0)
-                                (when (str-eq kind "model.request.completed")
+                                (when (= kind "model.request.completed")
                                   (store! continuation-provider
                                           (json-copy-string allocator
                                                             (command-string event "provider")))
                                   (store! continuation-model
                                           (json-copy-string allocator
                                                             (command-string event "model")))
-                                  (match-else payload
-                                              (JsonString [response-id]
-                                                          (store! previous-response-id
-                                                                  (json-copy-string allocator response-id)))
-                                              (_ (do
-                                                   (store! continuation-cache-key
-                                                           (json-copy-string allocator
-                                                                             (command-string payload "cache_key")))
-                                                   (store! previous-response-id
-                                                           (json-copy-string allocator
-                                                                             (command-string payload "response_id")))
-                                                   (let [session-id
-                                                           (command-string payload
-                                                                           "provider_session_id")]
-                                                     (when (> (slice-len [u8] session-id) 0)
-                                                       (store! provider-session-id
-                                                               (json-copy-string allocator session-id))
-                                                       0)))))
+                                  (match payload
+                                         (JsonString [response-id]
+                                                     (store! previous-response-id
+                                                             (json-copy-string allocator response-id)))
+                                         (_ (do
+                                              (store! continuation-cache-key
+                                                      (json-copy-string allocator
+                                                                        (command-string payload "cache_key")))
+                                              (store! previous-response-id
+                                                      (json-copy-string allocator
+                                                                        (command-string payload "response_id")))
+                                              (let [session-id
+                                                      (command-string payload
+                                                                      "provider_session_id")]
+                                                (when (> (slice-len [u8] session-id) 0)
+                                                  (store! provider-session-id
+                                                          (json-copy-string allocator session-id))
+                                                  0)))))
                                   0)
-                                (when (or (str-eq kind "run.completed")
-                                          (or (str-eq kind "run.failed")
-                                              (str-eq kind "run.cancelled")))
+                                (when (or (= kind "run.completed")
+                                          (or (= kind "run.failed")
+                                              (= kind "run.cancelled")))
                                   (let [text (load (index assistant-text (load matched)))]
                                     (when (> (slice-len [u8] text) 0)
                                       (let [(mut item) (json-object allocator)]
@@ -476,7 +474,7 @@
                                         (json-array-push! (mut messages) (load item)))
                                       0))
                                   0)))
-                            (store! i (+ (load i) 1)))))
+                            (set! i (+ (load i) 1)))))
                 (let [(mut current) (json-object allocator)]
                   (json-put-string! (mut current) "role" "user")
                   (json-put-string! (mut current)
@@ -484,19 +482,17 @@
                                     (command-string (load command) "prompt"))
                   (json-array-push! (mut messages) (load current)))
                 (json-object-put! (mut command) "messages" (load messages))
-                (when (and (str-eq (command-string (load command) "provider") "openai")
-                           (and (str-eq (load continuation-provider) "openai-responses")
-                                (and (str-eq (load continuation-model)
-                                             (command-string (load command) "model"))
+                (when (and (= (command-string (load command) "provider") "openai")
+                           (and (= (load continuation-provider) "openai-responses")
+                                (and (= (load continuation-model) (command-string (load command) "model"))
                                      (> (slice-len [u8] (load previous-response-id)) 0))))
                   (json-put-string! (mut command)
                                     "previous_response_id"
                                     (load previous-response-id))
                   0)
-                (when (and (str-eq (command-string (load command) "provider") "codex")
-                           (and (str-eq (load continuation-provider) "codex-app-server")
-                                (and (str-eq (load continuation-model)
-                                             (command-string (load command) "model"))
+                (when (and (= (command-string (load command) "provider") "codex")
+                           (and (= (load continuation-provider) "codex-app-server")
+                                (and (= (load continuation-model) (command-string (load command) "model"))
                                      (> (slice-len [u8] (load provider-session-id)) 0))))
                   (json-put-string! (mut command)
                                     "provider_session_id"
@@ -525,26 +521,26 @@
     (if (= (slice-len [u8] parent-run-id) 0)
         0
         (let [recovery (service-recover-into service allocator)]
-          (if (not (load (field recovery ok)))
+          (if (not (.ok recovery))
               -1
               (let [events (field recovery events)
                     requested-provider (command-string (load command) "provider")
                     requested-model (command-string (load command) "model")
                     inherit-provider
                       (or (= (slice-len [u8] requested-provider) 0)
-                          (str-eq requested-provider "auto"))
+                          (= requested-provider "auto"))
                     inherit-model
                       (or (= (slice-len [u8] requested-model) 0)
-                          (str-eq requested-model "auto"))
+                          (= requested-model "auto"))
                     (mut i) (al-len [Json] (load events))
                     (mut found) false]
                 (loop (if (<= (load i) 0)
                           (break)
                           (do
-                            (store! i (- (load i) 1))
+                            (set! i (- (load i) 1))
                             (let [event (al-get [Json] (load events) (load i))]
-                              (when (and (str-eq (command-string event "event") "run.created")
-                                         (str-eq (command-string event "run_id") parent-run-id))
+                              (when (and (= (command-string event "event") "run.created")
+                                         (= (command-string event "run_id") parent-run-id))
                                 (let [parent (json-get event "payload")]
                                   (when inherit-provider
                                     (json-put-string! (mut command)
@@ -555,8 +551,7 @@
                                     (json-put-string! (mut command)
                                                       "model"
                                                       (if (or inherit-provider
-                                                              (str-eq requested-provider
-                                                                      (command-string parent "provider")))
+                                                              (= requested-provider (command-string parent "provider")))
                                                           (command-string parent "model")
                                                           (route-default-model requested-provider)))
                                     0)
@@ -607,70 +602,70 @@
         (let [recovery (service-recover-into service allocator)
               command-id (command-string command "command_id")
               run-id (command-string command "run_id")]
-          (if (not (load (field recovery ok)))
-              (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+          (if (not (.ok recovery))
+              (service-error allocator 500 "journal_recovery_failed" (.error recovery))
               (if (> (journal-command-sequence (field recovery events) command-id) 0)
                   (service-run-response service (field recovery events) run-id 200)
                   (let [view (project-run (field recovery events) run-id)]
-                    (match-else (load (field view status))
-                                (RunNotFound []
-                                             (service-error allocator 404 "run_not_found" "run does not exist"))
-                                (RunSucceeded []
-                                              (service-error allocator 409 "run_terminal" "run is already terminal"))
-                                (RunErrored []
-                                            (service-error allocator 409 "run_terminal" "run is already terminal"))
-                                (RunCancelledStatus []
-                                                    (service-error allocator
-                                                                   409
-                                                                   "run_terminal"
-                                                                   "run is already terminal"))
-                                (_ (match (service-cancel-durable-run service command)
-                                     (RunCancellationAccepted []
-                                                              (let [refreshed (service-recover-into service allocator)]
-                                                                (service-run-response service
-                                                                                      (field refreshed events)
-                                                                                      run-id
-                                                                                      202)))
-                                     (RunCancellationTerminalOrMissing []
-                                                                       (let [refreshed
-                                                                               (service-recover-into service allocator)
-                                                                             refreshed-view
-                                                                               (project-run (field refreshed events)
-                                                                                            run-id)]
-                                                                         (if (load (field refreshed-view terminal))
-                                                                             (service-error allocator
-                                                                                            409
-                                                                                            "run_terminal"
-                                                                                            "run is already terminal")
-                                                                             (service-error allocator
-                                                                                            503
-                                                                                            "run_not_active"
-                                                                                            "run has no active controller state"))))
-                                     (RunCancellationFailed []
-                                                            (service-error allocator
-                                                                           500
-                                                                           "journal_write_failed"
-                                                                           "cancellation command was not durable"))))))))))))
+                    (match (.status view)
+                           (RunNotFound []
+                                        (service-error allocator 404 "run_not_found" "run does not exist"))
+                           (RunSucceeded []
+                                         (service-error allocator 409 "run_terminal" "run is already terminal"))
+                           (RunErrored []
+                                       (service-error allocator 409 "run_terminal" "run is already terminal"))
+                           (RunCancelledStatus []
+                                               (service-error allocator
+                                                              409
+                                                              "run_terminal"
+                                                              "run is already terminal"))
+                           (_ (match (service-cancel-durable-run service command)
+                                (RunCancellationAccepted []
+                                                         (let [refreshed (service-recover-into service allocator)]
+                                                           (service-run-response service
+                                                                                 (field refreshed events)
+                                                                                 run-id
+                                                                                 202)))
+                                (RunCancellationTerminalOrMissing []
+                                                                  (let [refreshed
+                                                                          (service-recover-into service allocator)
+                                                                        refreshed-view
+                                                                          (project-run (field refreshed events)
+                                                                                       run-id)]
+                                                                    (if (.terminal refreshed-view)
+                                                                        (service-error allocator
+                                                                                       409
+                                                                                       "run_terminal"
+                                                                                       "run is already terminal")
+                                                                        (service-error allocator
+                                                                                       503
+                                                                                       "run_not_active"
+                                                                                       "run has no active controller state"))))
+                                (RunCancellationFailed []
+                                                       (service-error allocator
+                                                                      500
+                                                                      "journal_write_failed"
+                                                                      "cancellation command was not durable"))))))))))))
 
 (defn service-query-run [(service (ptr RunService))
                          (run-id (slice u8))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
-        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+    (if (not (.ok recovery))
+        (service-error allocator 500 "journal_recovery_failed" (.error recovery))
         (let [view (project-run (field recovery events) run-id)]
-          (match-else (load (field view status))
-                      (RunNotFound []
-                                   (service-error allocator 404 "run_not_found" "run does not exist"))
-                      (_ (service-response 200 (run-view-json allocator view))))))))
+          (match (.status view)
+                 (RunNotFound []
+                              (service-error allocator 404 "run_not_found" "run does not exist"))
+                 (_ (service-response 200 (run-view-json allocator view))))))))
 
 (defn service-query-events [(service (ptr RunService))
                             (run-id (slice u8))
                             (after-sequence i64)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
-        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+    (if (not (.ok recovery))
+        (service-error allocator 500 "journal_recovery_failed" (.error recovery))
         (let [(mut result) (json-object allocator)
               (mut events) (json-array allocator)
               source (field recovery events)
@@ -684,22 +679,22 @@
                                     after-sequence))
                         (json-array-push! (mut events) event)
                         0)
-                      (store! i (+ (load i) 1)))))
+                      (set! i (+ (load i) 1)))))
           (json-object-put! (mut result) "version" (json-integer allocator 1))
           (json-put-string! (mut result) "run_id" run-id)
           (json-object-put! (mut result) "events" (load events))
           (json-object-put! (mut result)
                             "next_cursor"
                             (json-integer allocator
-                                          (load (field recovery last-sequence))))
+                                          (.last-sequence recovery)))
           (service-response 200 (load result))))))
 
 (defn service-query-workflow [(service (ptr RunService))
                               (workflow-id (slice u8))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
-        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+    (if (not (.ok recovery))
+        (service-error allocator 500 "journal_recovery_failed" (.error recovery))
         (let [(mut result) (json-object allocator)
               (mut nodes) (json-array allocator)
               events (field recovery events)
@@ -709,8 +704,8 @@
                     (break)
                     (let [event (al-get [Json] (load events) (load i))
                           payload (json-get event "payload")]
-                      (when (and (str-eq (command-string event "event") "run.created")
-                                 (str-eq (command-string payload "workflow_id") workflow-id))
+                      (when (and (= (command-string event "event") "run.created")
+                                 (= (command-string payload "workflow_id") workflow-id))
                         (let [run-id (command-string event "run_id")
                               (mut node) (run-view-json allocator (project-run events run-id))]
                           (json-put-string! (mut node) "node_id" (command-string payload "node_id"))
@@ -719,7 +714,7 @@
                                             (json-clone allocator (json-get payload "depends_on")))
                           (json-array-push! (mut nodes) (load node)))
                         0)
-                      (store! i (+ (load i) 1)))))
+                      (set! i (+ (load i) 1)))))
           (if (= (json-array-length (load nodes)) 0)
               (service-error allocator 404 "workflow_not_found" "workflow does not exist")
               (do
@@ -745,16 +740,16 @@
               (break)
               (let [event (al-get [Json] (load events) (load i))
                     payload (json-get event "payload")]
-                (when (str-eq (command-string payload "command_id") command-id)
+                (when (= (command-string payload "command_id") command-id)
                   (let [kind (command-string event "event")]
-                    (cond (str-eq kind "supervisor.intervention.applied") (store! state 2)
-                          (str-eq kind "supervisor.intervention.rejected") (store! state 3)
+                    (cond (= kind "supervisor.intervention.applied") (store! state 2)
+                          (= kind "supervisor.intervention.rejected") (store! state 3)
                           (and (= (load state) 0)
-                               (str-eq kind "supervisor.intervention.requested"))
+                               (= kind "supervisor.intervention.requested"))
                             (store! state 1)
                           :else 0))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load state)))
 
 (defn service-emit-intervention-result [(service (ptr RunService))
@@ -767,8 +762,8 @@
               (command-string command "run_id")
               (command-string command "command_id")
               ""
-              (load (field view provider))
-              (load (field view model))
+              (.provider view)
+              (.model view)
               command))
 
 (defn service-apply-intervention [(service (ptr RunService))
@@ -778,58 +773,58 @@
   (let [allocator (load (field service allocator))
         run-id (command-string command "run_id")
         view (project-run events run-id)]
-    (match-else (load (field view status))
-                (RunNotFound [] (service-error allocator 404 "run_not_found" "run does not exist"))
-                (RunSucceeded [] (service-error allocator 409 "run_terminal" "run is already terminal"))
-                (RunErrored [] (service-error allocator 409 "run_terminal" "run is already terminal"))
-                (RunCancelledStatus [] (service-error allocator 409 "run_terminal" "run is already terminal"))
-                (_ (let [requested
-                           (if (= intervention-state 1)
-                               1
-                               (service-emit-intervention-result service
-                                                                 command
-                                                                 view
-                                                                 (SupervisorInterventionRequested)))]
-                     (if (< requested 0)
-                         (service-error allocator
-                                        500
-                                        "intervention_failed"
-                                        "intervention request was not durable")
-                         (match (service-cancel-durable-run service command)
-                           (RunCancellationAccepted []
-                                                    (if (< (service-emit-intervention-result service
-                                                                                             command
-                                                                                             view
-                                                                                             (SupervisorInterventionApplied))
-                                                           0)
-                                                        (service-error allocator
-                                                                       500
-                                                                       "intervention_failed"
-                                                                       "intervention result was not durable")
-                                                        (let [refreshed (service-recover-into service allocator)]
-                                                          (service-run-response service
-                                                                                (field refreshed events)
-                                                                                run-id
-                                                                                202))))
-                           (RunCancellationTerminalOrMissing []
-                                                             (if (< (service-emit-intervention-result service
-                                                                                                      command
-                                                                                                      view
-                                                                                                      (SupervisorInterventionRejected))
-                                                                    0)
-                                                                 (service-error allocator
-                                                                                500
-                                                                                "intervention_failed"
-                                                                                "intervention result was not durable")
-                                                                 (service-error allocator
-                                                                                409
-                                                                                "intervention_rejected"
-                                                                                "run could not be cancelled")))
-                           (RunCancellationFailed []
-                                                  (service-error allocator
-                                                                 500
-                                                                 "intervention_failed"
-                                                                 "intervention was not durable")))))))))
+    (match (.status view)
+           (RunNotFound [] (service-error allocator 404 "run_not_found" "run does not exist"))
+           (RunSucceeded [] (service-error allocator 409 "run_terminal" "run is already terminal"))
+           (RunErrored [] (service-error allocator 409 "run_terminal" "run is already terminal"))
+           (RunCancelledStatus [] (service-error allocator 409 "run_terminal" "run is already terminal"))
+           (_ (let [requested
+                      (if (= intervention-state 1)
+                          1
+                          (service-emit-intervention-result service
+                                                            command
+                                                            view
+                                                            (SupervisorInterventionRequested)))]
+                (if (< requested 0)
+                    (service-error allocator
+                                   500
+                                   "intervention_failed"
+                                   "intervention request was not durable")
+                    (match (service-cancel-durable-run service command)
+                      (RunCancellationAccepted []
+                                               (if (< (service-emit-intervention-result service
+                                                                                        command
+                                                                                        view
+                                                                                        (SupervisorInterventionApplied))
+                                                      0)
+                                                   (service-error allocator
+                                                                  500
+                                                                  "intervention_failed"
+                                                                  "intervention result was not durable")
+                                                   (let [refreshed (service-recover-into service allocator)]
+                                                     (service-run-response service
+                                                                           (field refreshed events)
+                                                                           run-id
+                                                                           202))))
+                      (RunCancellationTerminalOrMissing []
+                                                        (if (< (service-emit-intervention-result service
+                                                                                                 command
+                                                                                                 view
+                                                                                                 (SupervisorInterventionRejected))
+                                                               0)
+                                                            (service-error allocator
+                                                                           500
+                                                                           "intervention_failed"
+                                                                           "intervention result was not durable")
+                                                            (service-error allocator
+                                                                           409
+                                                                           "intervention_rejected"
+                                                                           "run could not be cancelled")))
+                      (RunCancellationFailed []
+                                             (service-error allocator
+                                                            500
+                                                            "intervention_failed"
+                                                            "intervention was not durable")))))))))
 
 (defn service-record-assessment [(service (ptr RunService))
                                  (command Json)] (-> ServiceResponse)
@@ -838,31 +833,31 @@
         run-id (command-string command "run_id")]
     (if (not (supervisor-command-valid? command "verdict"))
         (service-error allocator 400 "invalid_assessment" "assessment requires a verdict")
-        (if (not (load (field recovery ok)))
-            (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (if (not (.ok recovery))
+            (service-error allocator 500 "journal_recovery_failed" (.error recovery))
             (if (> (journal-command-sequence (field recovery events)
                                              (command-string command "command_id"))
                    0)
                 (service-query-events service run-id 0)
                 (let [view (project-run (field recovery events) run-id)]
-                  (match-else (load (field view status))
-                              (RunNotFound []
-                                           (service-error allocator 404 "run_not_found" "run does not exist"))
-                              (_ (if (< (emit-event (load (field service emitter))
-                                                    (now-ms)
-                                                    (SupervisorAssessmentRecorded)
-                                                    run-id
-                                                    (command-string command "command_id")
-                                                    ""
-                                                    (load (field view provider))
-                                                    (load (field view model))
-                                                    command)
-                                        0)
-                                     (service-error allocator
-                                                    500
-                                                    "journal_write_failed"
-                                                    "assessment was not durable")
-                                     (service-response 202 command))))))))))
+                  (match (.status view)
+                         (RunNotFound []
+                                      (service-error allocator 404 "run_not_found" "run does not exist"))
+                         (_ (if (< (emit-event (load (field service emitter))
+                                               (now-ms)
+                                               (SupervisorAssessmentRecorded)
+                                               run-id
+                                               (command-string command "command_id")
+                                               ""
+                                               (.provider view)
+                                               (.model view)
+                                               command)
+                                   0)
+                                (service-error allocator
+                                               500
+                                               "journal_write_failed"
+                                               "assessment was not durable")
+                                (service-response 202 command))))))))))
 
 (defn service-request-intervention [(service (ptr RunService))
                                     (command Json)] (-> ServiceResponse)
@@ -871,10 +866,10 @@
         run-id (command-string command "run_id")
         command-id (command-string command "command_id")]
     (if (or (not (supervisor-command-valid? command "action"))
-            (not (str-eq (command-string command "action") "cancel")))
+            (not (= (command-string command "action") "cancel")))
         (service-error allocator 400 "invalid_intervention" "supported intervention action is cancel")
-        (if (not (load (field recovery ok)))
-            (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (if (not (.ok recovery))
+            (service-error allocator 500 "journal_recovery_failed" (.error recovery))
             (let [intervention-state (supervisor-intervention-state (field recovery events) command-id)]
               (if (= intervention-state 2)
                   (service-run-response service (field recovery events) run-id 200)
@@ -898,13 +893,13 @@
               (let [event (al-get [Json] (load events) (load i))]
                 (when (and (run-event? event run-id)
                            (match (json-string-at event "event")
-                             (Some [kind] (str-eq kind "run.created"))
+                             (Some [kind] (= kind "run.created"))
                              (None [] false)))
                   (store! found true)
                   0)
                 (if (load found)
                     (break)
-                    (store! i (+ (load i) 1))))))
+                    (set! i (+ (load i) 1))))))
     (load found)))
 
 ;; Recover all durable runs once at service startup. Queued work is safe to launch
@@ -912,7 +907,7 @@
 (defn service-recover-runs! [(service (ptr RunService))] (-> i64)
   (let [allocator (load (field service allocator))
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
+    (if (not (.ok recovery))
         -1
         (let [events (field recovery events)
               (mut i) 0
@@ -929,35 +924,17 @@
                             (match (json-string-at event "run_id")
                               (Some [value] value)
                               (None [] ""))]
-                      (when (and (str-eq kind "run.created")
+                      (when (and (= kind "run.created")
                                  (not (run-created-before? events (load i) run-id)))
                         (let [view (project-run events run-id)]
-                          (match-else (load (field view status))
-                                      (RunQueued []
-                                                 (let [created (json-get event "payload")]
-                                                   (if (str-eq (command-string created "execution_target")
-                                                               "worker")
-                                                       0
-                                                       (let [start-code (service-start-durable-run service created)]
-                                                         (if (= start-code 0)
-                                                             (store! recovered (+ (load recovered) 1))
-                                                             (emit-event (load (field service emitter))
-                                                                         (now-ms)
-                                                                         (RunFailed)
-                                                                         run-id
-                                                                         run-id
-                                                                         ""
-                                                                         (load (field view provider))
-                                                                         (load (field view model))
-                                                                         (JsonString "queued run could not restart")))))))
-                                      (RunRunning []
-                                                  (let [created (json-get event "payload")]
-                                                    (if (str-eq (command-string created "execution_target")
-                                                                "worker")
-                                                        (service-worker-recovery-required! service
-                                                                                           run-id
-                                                                                           (worker-latest-claim events
-                                                                                                                run-id))
+                          (match (load (field view status))
+                                 (RunQueued []
+                                            (let [created (json-get event "payload")]
+                                              (if (= (command-string created "execution_target") "worker")
+                                                  0
+                                                  (let [start-code (service-start-durable-run service created)]
+                                                    (if (= start-code 0)
+                                                        (store! recovered (+ (load recovered) 1))
                                                         (emit-event (load (field service emitter))
                                                                     (now-ms)
                                                                     (RunFailed)
@@ -966,20 +943,36 @@
                                                                     ""
                                                                     (load (field view provider))
                                                                     (load (field view model))
-                                                                    (JsonString "service restarted while run was in flight")))))
-                                      (RunCancelling []
-                                                     (emit-event (load (field service emitter))
-                                                                 (now-ms)
-                                                                 (RunCancelled)
-                                                                 run-id
-                                                                 run-id
-                                                                 ""
-                                                                 (load (field view provider))
-                                                                 (load (field view model))
-                                                                 (JsonString "cancellation confirmed by service restart")))
-                                      (_ 0)))
+                                                                    (JsonString "queued run could not restart")))))))
+                                 (RunRunning []
+                                             (let [created (json-get event "payload")]
+                                               (if (= (command-string created "execution_target") "worker")
+                                                   (service-worker-recovery-required! service
+                                                                                      run-id
+                                                                                      (worker-latest-claim events
+                                                                                                           run-id))
+                                                   (emit-event (load (field service emitter))
+                                                               (now-ms)
+                                                               (RunFailed)
+                                                               run-id
+                                                               run-id
+                                                               ""
+                                                               (load (field view provider))
+                                                               (load (field view model))
+                                                               (JsonString "service restarted while run was in flight")))))
+                                 (RunCancelling []
+                                                (emit-event (load (field service emitter))
+                                                            (now-ms)
+                                                            (RunCancelled)
+                                                            run-id
+                                                            run-id
+                                                            ""
+                                                            (load (field view provider))
+                                                            (load (field view model))
+                                                            (JsonString "cancellation confirmed by service restart")))
+                                 (_ 0)))
                         0)
-                      (store! i (+ (load i) 1)))))
+                      (set! i (+ (load i) 1)))))
           (if (event-journal-failed? (load (field service journal)))
               -1
               (load recovered))))))
@@ -1024,8 +1017,8 @@
 (defn worker-event-for-run? [(event Json)
                              (kind (slice u8))
                              (run-id (slice u8))] (-> bool)
-  (and (str-eq (command-string event "event") kind)
-       (str-eq (command-string event "run_id") run-id)))
+  (and (= (command-string event "event") kind)
+       (= (command-string event "run_id") run-id)))
 
 (defn worker-latest-claim [(events (ref (ArrayList Json)))
                            (run-id (slice u8))] (-> Json)
@@ -1039,7 +1032,7 @@
                           (worker-event-for-run? event "worker.lease.renewed" run-id))
                   (store! result (json-get event "payload"))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load result)))
 
 (defn worker-run-finished? [(events (ref (ArrayList Json)))
@@ -1051,13 +1044,13 @@
               (break)
               (let [event (al-get [Json] (load events) (load i))
                     kind (command-string event "event")]
-                (when (and (str-eq (command-string event "run_id") run-id)
-                           (or (str-eq kind "run.completed")
-                               (or (str-eq kind "run.failed")
-                                   (str-eq kind "run.cancelled"))))
+                (when (and (= (command-string event "run_id") run-id)
+                           (or (= kind "run.completed")
+                               (or (= kind "run.failed")
+                                   (= kind "run.cancelled"))))
                   (store! finished true)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load finished)))
 
 (defn service-worker-recovery-required! [(service (ptr RunService))
@@ -1124,7 +1117,7 @@
                              (None [] false)))
                   (store! registered true)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load registered)))
 
 (defn service-claim-worker-assignment [(service (ptr RunService))
@@ -1138,8 +1131,8 @@
     (if (or (= (slice-len [u8] worker-id) 0)
             (= (slice-len [u8] command-id) 0))
         (service-error allocator 400 "invalid_claim" "worker_id and command_id are required")
-        (if (not (load (field recovery ok)))
-            (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (if (not (.ok recovery))
+            (service-error allocator 500 "journal_recovery_failed" (.error recovery))
             (if (not (worker-registered-for-agent-process? (field recovery events) worker-id))
                 (service-error allocator
                                409
@@ -1156,13 +1149,13 @@
                             (let [event (al-get [Json] (load events) (load i))
                                   payload (json-get event "payload")
                                   candidate (command-string event "run_id")]
-                              (when (and (str-eq (command-string event "event") "run.created")
-                                         (and (str-eq (command-string payload "execution_target") "worker")
+                              (when (and (= (command-string event "event") "run.created")
+                                         (and (= (command-string payload "execution_target") "worker")
                                               (not (worker-run-finished? events candidate))))
                                 (let [lease (worker-latest-claim events candidate)
                                       lease-id (command-string lease "lease_id")]
-                                  (if (and (str-eq lease-id command-id)
-                                           (str-eq (command-string lease "worker_id") worker-id))
+                                  (if (and (= lease-id command-id)
+                                           (= (command-string lease "worker_id") worker-id))
                                       (do
                                         (store! assignment payload)
                                         (store! replay-lease lease)
@@ -1178,7 +1171,7 @@
                                             (service-worker-recovery-required! service candidate lease)
                                             0))))
                                 0)
-                              (store! i (+ (load i) 1)))))
+                              (set! i (+ (load i) 1)))))
                   (if (= (slice-len [u8] (load run-id)) 0)
                       (let [(mut body) (json-object allocator)]
                         (json-object-put! (mut body) "version" (json-integer allocator 1))
@@ -1231,11 +1224,11 @@
         requested-lease-ms (json-number-i64 (json-get command "lease_ms"))
         lease-ms (if (> requested-lease-ms 0) requested-lease-ms 30000)
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
-        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+    (if (not (.ok recovery))
+        (service-error allocator 500 "journal_recovery_failed" (.error recovery))
         (let [lease (worker-latest-claim (field recovery events) run-id)]
-          (if (or (not (str-eq worker-id (command-string lease "worker_id")))
-                  (not (str-eq lease-id (command-string lease "lease_id"))))
+          (if (or (not (= worker-id (command-string lease "worker_id")))
+                  (not (= lease-id (command-string lease "lease_id"))))
               (service-error allocator 409 "lease_mismatch" "heartbeat requires the current worker lease")
               (if (<= (json-number-i64 (json-get lease "lease_expires_at_ms")) (now-ms))
                   (do
@@ -1270,12 +1263,12 @@
         lease-id (command-string command "lease_id")
         outcome (command-string command "outcome")
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
-        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+    (if (not (.ok recovery))
+        (service-error allocator 500 "journal_recovery_failed" (.error recovery))
         (let [claim (worker-latest-claim (field recovery events) run-id)]
           (if (or (= (slice-len [u8] run-id) 0)
-                  (or (not (str-eq worker-id (command-string claim "worker_id")))
-                      (not (str-eq lease-id (command-string claim "lease_id")))))
+                  (or (not (= worker-id (command-string claim "worker_id")))
+                      (not (= lease-id (command-string claim "lease_id")))))
               (service-error allocator 409 "lease_mismatch" "completion requires the current worker lease")
               (if (<= (json-number-i64 (json-get claim "lease_expires_at_ms")) (now-ms))
                   (do
@@ -1295,7 +1288,7 @@
                                     command)
                         (emit-event (load (field service emitter))
                                     (now-ms)
-                                    (if (str-eq outcome "succeeded") (RunCompleted) (RunFailed))
+                                    (if (= outcome "succeeded") (RunCompleted) (RunFailed))
                                     run-id
                                     run-id
                                     ""
@@ -1306,17 +1299,17 @@
                           (service-run-response service (field refreshed events) run-id 200))))))))))
 
 (defn worker-progress-kind [(name (slice u8))] (-> EventKind)
-  (cond (str-eq name "model.request.started") (ModelRequestStarted)
-        (str-eq name "model.response.delta") (ModelResponseDelta)
-        (str-eq name "model.request.completed") (ModelRequestCompleted)
-        (str-eq name "model.request.failed") (ModelRequestFailed)
-        (str-eq name "model.request.retry_scheduled") (ModelRequestRetryScheduled)
-        (str-eq name "tool.call.proposed") (ToolCallProposed)
-        (str-eq name "tool.call.rejected") (ToolCallRejected)
-        (str-eq name "tool.call.started") (ToolCallStarted)
-        (str-eq name "tool.call.completed") (ToolCallCompleted)
-        (str-eq name "tool.call.failed") (ToolCallFailed)
-        (str-eq name "codex.notification") (CodexNotification)
+  (cond (= name "model.request.started") (ModelRequestStarted)
+        (= name "model.response.delta") (ModelResponseDelta)
+        (= name "model.request.completed") (ModelRequestCompleted)
+        (= name "model.request.failed") (ModelRequestFailed)
+        (= name "model.request.retry_scheduled") (ModelRequestRetryScheduled)
+        (= name "tool.call.proposed") (ToolCallProposed)
+        (= name "tool.call.rejected") (ToolCallRejected)
+        (= name "tool.call.started") (ToolCallStarted)
+        (= name "tool.call.completed") (ToolCallCompleted)
+        (= name "tool.call.failed") (ToolCallFailed)
+        (= name "codex.notification") (CodexNotification)
         :else (WorkerProgress)))
 
 (defn service-worker-progress [(service (ptr RunService))
@@ -1326,18 +1319,18 @@
         worker-id (command-string command "worker_id")
         lease-id (command-string command "lease_id")
         recovery (service-recover-into service allocator)]
-    (if (not (load (field recovery ok)))
-        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+    (if (not (.ok recovery))
+        (service-error allocator 500 "journal_recovery_failed" (.error recovery))
         (let [lease (worker-latest-claim (field recovery events) run-id)]
-          (if (or (not (str-eq worker-id (command-string lease "worker_id")))
-                  (not (str-eq lease-id (command-string lease "lease_id"))))
+          (if (or (not (= worker-id (command-string lease "worker_id")))
+                  (not (= lease-id (command-string lease "lease_id"))))
               (service-error allocator 409 "lease_mismatch" "progress requires the current worker lease")
               (if (<= (json-number-i64 (json-get lease "lease_expires_at_ms")) (now-ms))
                   (service-error allocator 409 "lease_expired" "worker lease has expired")
                   (let [remote-event (json-get command "event")
                         remote-kind (command-string remote-event "event")
                         kind (worker-progress-kind remote-kind)
-                        semantic (not (str-eq (event-kind-name kind) "worker.progress"))]
+                        semantic (not (= (event-kind-name kind) "worker.progress"))]
                     (emit-event-for-agent (load (field service emitter))
                                           (now-ms)
                                           kind
@@ -1366,7 +1359,7 @@
 (defn service-list-tools [(service (ptr RunService))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
         out (alloc/stack Json)]
-    (if (< (describe-tools (load (field service controller)) allocator out) 0)
+    (if (< (describe-tools (.controller service) allocator out) 0)
         (service-tool-plane-unavailable allocator)
         (service-response 200 (load out)))))
 
@@ -1374,10 +1367,10 @@
   (let [allocator (load (field service allocator))
         command-ref (alloc/stack Json)
         out (alloc/stack Json)]
-    (store! command-ref command)
+    (set! command-ref command)
     (if (= (slice-len [u8] (command-string command "name")) 0)
         (service-error allocator 400 "invalid_command" "a tool name is required")
-        (if (< (authorize-tool-call (load (field service controller)) command-ref allocator out) 0)
+        (if (< (authorize-tool-call (.controller service) command-ref allocator out) 0)
             (service-tool-plane-unavailable allocator)
             (service-response 200 (load out))))))
 
@@ -1385,73 +1378,73 @@
   (let [allocator (load (field service allocator))
         command-ref (alloc/stack Json)
         out (alloc/stack Json)]
-    (store! command-ref command)
+    (set! command-ref command)
     (if (= (slice-len [u8] (command-string command "name")) 0)
         (service-error allocator 400 "invalid_command" "a tool name is required")
-        (if (< (invoke-tool (load (field service controller)) command-ref allocator out) 0)
+        (if (< (invoke-tool (.controller service) command-ref allocator out) 0)
             (service-tool-plane-unavailable allocator)
             (service-response 200 (load out))))))
 
 (defn service-handle-http [(service (ptr RunService))
                            (request (ptr ServiceHttpRequest))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        method (load (field request method))
-        target (load (field request target))
-        principal (load (field request principal))
-        can-observe (load (field request can-observe))
-        can-control (load (field request can-control))]
-    (cond (and (str-eq method "GET") (str-eq target "/v1/tools"))
+        method (.method request)
+        target (.target request)
+        principal (.principal request)
+        can-observe (.can-observe request)
+        can-control (.can-control request)]
+    (cond (and (= method "GET") (= target "/v1/tools"))
             (if (not can-observe) (service-forbidden allocator) (service-list-tools service))
-          (and (str-eq method "POST") (str-eq target "/v1/tools/authorize"))
+          (and (= method "POST") (= target "/v1/tools/authorize"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-authorize-tool service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/tools/call"))
+          (and (= method "POST") (= target "/v1/tools/call"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-call-tool service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/workers/register"))
+          (and (= method "POST") (= target "/v1/workers/register"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-register-worker service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/workers/claim"))
+          (and (= method "POST") (= target "/v1/workers/claim"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-claim-worker-assignment service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/workers/complete"))
+          (and (= method "POST") (= target "/v1/workers/complete"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-worker-complete service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/workers/heartbeat"))
+          (and (= method "POST") (= target "/v1/workers/heartbeat"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-worker-heartbeat service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/workers/progress"))
+          (and (= method "POST") (= target "/v1/workers/progress"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
                   (if (load (field parsed ok))
                       (service-worker-progress service (load (field parsed value)))
                       (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
-          (and (str-eq method "POST") (str-eq target "/v1/runs"))
+          (and (= method "POST") (= target "/v1/runs"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
@@ -1462,7 +1455,7 @@
           (starts-with target "/v1/workflows/")
             (if (not can-observe)
                 (service-forbidden allocator)
-                (if (str-eq method "GET")
+                (if (= method "GET")
                     (service-query-workflow service
                                             (subslice [u8] target 14 (slice-len [u8] target)))
                     (service-error allocator 404 "not_found" "route does not exist")))
@@ -1472,7 +1465,7 @@
                   events-run-id (service-events-run-id rest)
                   assessment-run-id (service-suffixed-run-id rest "/assessments")
                   intervention-run-id (service-suffixed-run-id rest "/interventions")]
-              (cond (and (str-eq method "POST")
+              (cond (and (= method "POST")
                          (> (slice-len [u8] assessment-run-id) 0))
                       (if (not can-control)
                           (service-forbidden allocator)
@@ -1481,14 +1474,13 @@
                                 (service-error allocator 400 "invalid_json" "request body is not valid JSON")
                                 (let [(mut command) (load (field parsed value))]
                                   (service-command-actor! (mut command) principal)
-                                  (if (not (str-eq (command-string (load command) "run_id")
-                                                   assessment-run-id))
+                                  (if (not (= (command-string (load command) "run_id") assessment-run-id))
                                       (service-error allocator
                                                      409
                                                      "run_id_mismatch"
                                                      "path and command run IDs differ")
                                       (service-record-assessment service (load command)))))))
-                    (and (str-eq method "POST")
+                    (and (= method "POST")
                          (> (slice-len [u8] intervention-run-id) 0))
                       (if (not can-control)
                           (service-forbidden allocator)
@@ -1497,14 +1489,13 @@
                                 (service-error allocator 400 "invalid_json" "request body is not valid JSON")
                                 (let [(mut command) (load (field parsed value))]
                                   (service-command-actor! (mut command) principal)
-                                  (if (not (str-eq (command-string (load command) "run_id")
-                                                   intervention-run-id))
+                                  (if (not (= (command-string (load command) "run_id") intervention-run-id))
                                       (service-error allocator
                                                      409
                                                      "run_id_mismatch"
                                                      "path and command run IDs differ")
                                       (service-request-intervention service (load command)))))))
-                    (and (str-eq method "POST")
+                    (and (= method "POST")
                          (> (slice-len [u8] cancel-run-id) 0))
                       (if (not can-control)
                           (service-forbidden allocator)
@@ -1518,21 +1509,20 @@
                                                "request body is not valid JSON")
                                 (let [(mut command) (load (field parsed value))]
                                   (service-command-actor! (mut command) principal)
-                                  (if (not (str-eq (command-string (load command) "run_id")
-                                                   cancel-run-id))
+                                  (if (not (= (command-string (load command) "run_id") cancel-run-id))
                                       (service-error allocator
                                                      409
                                                      "run_id_mismatch"
                                                      "path and command run IDs differ")
                                       (service-cancel-run service (load command)))))))
-                    (and (str-eq method "GET")
+                    (and (= method "GET")
                          (> (slice-len [u8] events-run-id) 0))
                       (if can-observe
                           (service-query-events service
                                                 events-run-id
                                                 (service-events-cursor target))
                           (service-forbidden allocator))
-                    (str-eq method "GET")
+                    (= method "GET")
                       (if can-observe
                           (service-query-run service rest)
                           (service-forbidden allocator))

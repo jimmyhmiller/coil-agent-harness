@@ -22,7 +22,7 @@
 ;; Take ownership of a connection that was accepted elsewhere (the server side).
 (defn tcp-transport-adopt! [(transport (ptr TcpTransport))
                             (connection socket/TcpConnection)] (-> i64)
-  (store! (field transport connection) connection)
+  (set! (.connection transport) connection)
   0)
 
 ;; Dial a peer (the client side). Returns 0, or a negative transport code.

@@ -30,12 +30,12 @@
 
 (defn router-new [(allocator (ptr Allocator))] (-> Router)
   (let [router (alloc/stack Router)]
-    (store! (field router allocator) allocator)
-    (store! (field router participants) (al-new [Participant] allocator))
+    (set! (.allocator router) allocator)
+    (set! (.participants router) (al-new [Participant] allocator))
     (load router)))
 
 (defn router-count [(router (ptr Router))] (-> i64)
-  (al-len [Participant] (load (field router participants))))
+  (al-len [Participant] (.participants router)))
 
 (defn router-participant [(router (ptr Router)) (handle i64)] (-> (ptr Participant))
   (primitive/index (load (field (field router participants) data)) handle))
@@ -49,10 +49,10 @@
     (loop (if (>= (load i) n)
               (break)
               (let [participant (router-participant router (load i))]
-                (if (and (load (field participant attached))
-                         (address-eq (load (field participant address)) address))
-                    (do (store! found (load i)) (break))
-                    (store! i (+ (load i) 1))))))
+                (if (and (.attached participant)
+                         (address-eq (.address participant) address))
+                    (do (set! found (load i)) (break))
+                    (set! i (+ (load i) 1))))))
     (load found)))
 
 ;; Attach a participant, returning its handle. Attaching an address that is
@@ -63,11 +63,10 @@
     (if (!= existing ROUTER_NO_PARTICIPANT)
         existing
         (let [participant (alloc/stack Participant)]
-          (store! (field participant address) address)
-          (store! (field participant topics)
-                  (al-new [(slice u8)] (load (field router allocator))))
-          (store! (field participant attached) true)
-          (al-push! [Participant] (mut (field router participants)) (load participant))
+          (set! (.address participant) address)
+          (set! (.topics participant) (al-new [(slice u8)] (load (field router allocator))))
+          (set! (.attached participant) true)
+          (al-push! [Participant] (mut (.participants router)) (load participant))
           (- (router-count router) 1)))))
 
 ;; Detaching leaves the slot in place so existing handles stay meaningful; the
@@ -76,7 +75,7 @@
   (if (or (< handle 0) (>= handle (router-count router)))
       0
       (let [participant (router-participant router handle)]
-        (store! (field participant attached) false)
+        (set! (.attached participant) false)
         1)))
 
 (defn participant-subscribed? [(participant (ptr Participant)) (topic (slice u8))] (-> bool)
@@ -86,9 +85,9 @@
         (mut found) false]
     (loop (if (>= (load i) n)
               (break)
-              (if (str-eq (al-get [(slice u8)] (load topics) (load i)) topic)
-                  (do (store! found true) (break))
-                  (store! i (+ (load i) 1)))))
+              (if (= (al-get [(slice u8)] (load topics) (load i)) topic)
+                  (do (set! found true) (break))
+                  (set! i (+ (load i) 1)))))
     (load found)))
 
 ;; Subscribing twice is a no-op rather than an error: a client that reconnects
@@ -100,7 +99,7 @@
         (if (participant-subscribed? participant topic)
             0
             (do
-              (al-push! [(slice u8)] (mut (field participant topics)) topic)
+              (al-push! [(slice u8)] (mut (.topics participant)) topic)
               1)))))
 
 (defn router-unsubscribe! [(router (ptr Router)) (handle i64) (topic (slice u8))] (-> i64)
@@ -113,16 +112,16 @@
             (mut removed) 0]
         (loop (if (>= (load i) n)
                   (break)
-                  (if (str-eq (al-get [(slice u8)] (load topics) (load i)) topic)
+                  (if (= (al-get [(slice u8)] (load topics) (load i)) topic)
                       (do
                         ;; Order does not matter, so fill the hole from the end
                         ;; rather than shifting the tail.
-                        (store! (primitive/index (load (field topics data)) (load i))
-                                (al-get [(slice u8)] (load topics) (- n 1)))
+                        (set! (primitive/index (load (field topics data)) (load i))
+                              (al-get [(slice u8)] (load topics) (- n 1)))
                         (al-pop! [(slice u8)] (mut topics))
-                        (store! removed 1)
+                        (set! removed 1)
                         (break))
-                      (store! i (+ (load i) 1)))))
+                      (set! i (+ (load i) 1)))))
         (load removed))))
 
 ;; Should this participant receive this envelope?
@@ -132,13 +131,13 @@
 ;; process its own traffic -- which reads as a loop the first time it happens.
 (defn delivers-to? [(participant (ptr Participant))
                     (envelope (ptr Envelope))] (-> bool)
-  (if (not (load (field participant attached)))
+  (if (not (.attached participant))
       false
-      (let [address (load (field participant address))]
-        (if (address-eq address (load (field envelope from)))
+      (let [address (.address participant)]
+        (if (address-eq address (.from envelope))
             false
-            (match (load (field envelope to))
-              (Agent [_] (address-eq address (load (field envelope to))))
+            (match (.to envelope)
+              (Agent [_] (address-eq address (.to envelope)))
               (Topic [name] (participant-subscribed? participant name))
               (Broadcast [] true)
               ;; Service messages are for the harness, not for participants.
@@ -159,5 +158,5 @@
                 (when (delivers-to? (router-participant router (load i)) envelope)
                   (al-push! [i64] (mut out) (load i))
                   (store! delivered (+ (load delivered) 1)))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load delivered)))

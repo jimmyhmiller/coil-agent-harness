@@ -32,8 +32,7 @@
 ;; malformed topic should be rejected rather than silently never receiving.
 (defn run-topic? [(topic (slice u8))] (-> bool)
   (and (> (slice-len topic) (slice-len RUN_TOPIC_PREFIX))
-       (str-eq (subslice [u8] topic 0 (slice-len RUN_TOPIC_PREFIX))
-               RUN_TOPIC_PREFIX)))
+       (= (subslice [u8] topic 0 (slice-len RUN_TOPIC_PREFIX)) RUN_TOPIC_PREFIX)))
 
 ;; The run id a topic refers to, or an empty slice if it is not a run topic.
 (defn run-topic-id [(topic (slice u8))] (-> (slice u8))

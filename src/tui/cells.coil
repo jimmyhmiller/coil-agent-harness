@@ -11,16 +11,16 @@
 
 (defn utf8-invalid [] (-> Utf8Scalar)
   (let [scalar (alloc/stack Utf8Scalar)]
-    (store! (field scalar valid) false)
-    (store! (field scalar codepoint) 65533)
-    (store! (field scalar length) 1)
+    (set! (.valid scalar) false)
+    (set! (.codepoint scalar) 65533)
+    (set! (.length scalar) 1)
     (load scalar)))
 
 (defn utf8-value [(codepoint i64) (length i64)] (-> Utf8Scalar)
   (let [scalar (alloc/stack Utf8Scalar)]
-    (store! (field scalar valid) true)
-    (store! (field scalar codepoint) codepoint)
-    (store! (field scalar length) length)
+    (set! (.valid scalar) true)
+    (set! (.codepoint scalar) codepoint)
+    (set! (.length scalar) length)
     (load scalar)))
 
 (defn utf8-byte [(text (slice u8)) (at i64)] (-> i64)
@@ -91,12 +91,12 @@
     (loop (if (>= (load at) count)
               (break)
               (let [scalar (utf8-decode text (load at))]
-                (if (not (load (field scalar valid)))
-                    (do (store! width -1) (break))
-                    (let [cell-width (unicode-cell-width (load (field scalar codepoint)))]
+                (if (not (.valid scalar))
+                    (do (set! width -1) (break))
+                    (let [cell-width (unicode-cell-width (.codepoint scalar))]
                       (if (< cell-width 0)
-                          (do (store! width -1) (break))
+                          (do (set! width -1) (break))
                           (do
-                            (store! width (+ (load width) cell-width))
-                            (store! at (+ (load at) (load (field scalar length)))))))))))
+                            (set! width (+ (load width) cell-width))
+                            (set! at (+ (load at) (.length scalar))))))))))
     (load width)))

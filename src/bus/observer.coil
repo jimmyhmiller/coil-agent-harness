@@ -32,13 +32,13 @@
 (defn bus-observer-init! [(sink (ptr BusObserverSink))
                           (allocator (ptr Allocator))
                           (capacity i64)] (-> i64)
-  (store! (field sink allocator) allocator)
-  (store! (field sink queue) (al-new [Envelope] allocator))
+  (set! (.allocator sink) allocator)
+  (set! (.queue sink) (al-new [Envelope] allocator))
   ;; A capacity of zero would silently discard everything, which reads as "the
   ;; bus is broken" rather than "the queue is full". Refuse it.
-  (store! (field sink capacity) (if (< capacity 1) 1 capacity))
-  (store! (field sink dropped) 0)
-  (store! (field sink next-id) 1)
+  (set! (.capacity sink) (if (< capacity 1) 1 capacity))
+  (set! (.dropped sink) 0)
+  (set! (.next-id sink) 1)
   0)
 
 ;; Decimal formatting, written out because `int->str` is a comptime primitive
@@ -53,7 +53,7 @@
                   (break)
                   (do
                     (al-push! [i64] (mut digits) (% (load remaining) 10))
-                    (store! remaining (/ (load remaining) 10)))))
+                    (set! remaining (/ (load remaining) 10)))))
         (let [n (al-len [i64] (load digits))
               (mut i) 0]
           (loop (if (>= (load i) n)
@@ -61,14 +61,14 @@
                     (do
                       (sb-push-byte! (mut buffer)
                                      (cast u8 (+ 48 (al-get [i64] (load digits) (- (- n 1) (load i))))))
-                      (store! i (+ (load i) 1))))))
+                      (set! i (+ (load i) 1))))))
         (sb-str (load buffer)))))
 
 (defn bus-observer-pending [(sink (ptr BusObserverSink))] (-> i64)
-  (al-len [Envelope] (load (field sink queue))))
+  (al-len [Envelope] (.queue sink)))
 
 (defn bus-observer-dropped [(sink (ptr BusObserverSink))] (-> i64)
-  (load (field sink dropped)))
+  (.dropped sink))
 
 (defn bus-observer-at [(sink (ptr BusObserverSink)) (index i64)] (-> (ptr Envelope))
   (primitive/index (load (field (field sink queue) data)) index))
@@ -80,8 +80,8 @@
     (loop (if (>= (load i) n)
               (break)
               (do
-                (al-pop! [Envelope] (mut (field sink queue)))
-                (store! i (+ (load i) 1)))))
+                (al-pop! [Envelope] (mut (.queue sink)))
+                (set! i (+ (load i) 1)))))
     n))
 
 ;; Drop the oldest entry to make room. Oldest rather than newest because a
@@ -93,28 +93,27 @@
     (loop (if (>= (load i) n)
               (break)
               (do
-                (store! (bus-observer-at sink (- (load i) 1))
-                        (load (bus-observer-at sink (load i))))
-                (store! i (+ (load i) 1)))))
-    (al-pop! [Envelope] (mut (field sink queue)))
-    (store! (field sink dropped) (+ (load (field sink dropped)) 1))
+                (set! (bus-observer-at sink (- (load i) 1)) (load (bus-observer-at sink (load i))))
+                (set! i (+ (load i) 1)))))
+    (al-pop! [Envelope] (mut (.queue sink)))
+    (set! (.dropped sink) (+ (.dropped sink) 1))
     0))
 
 (impl EventSink BusObserverSink
   (publish-event [(self (ptr BusObserverSink)) (event (ptr Event))]
                  (-> i64)
                  (let [allocator (load (field self allocator))
-                       topic (run-topic allocator (load (field event run-id)))]
+                       topic (run-topic allocator (.run-id event))]
                    ;; An event with no run id has no topic to publish on. That
                    ;; is not a failure of the run, so report success.
                    (if (= (slice-len topic) 0)
                        0
                        (let [body (json-stringify allocator (event-to-json allocator event))
-                             id (decimal allocator (load (field self next-id)))
+                             id (decimal allocator (.next-id self))
                              envelope (alloc/stack Envelope)]
-                         (store! (field self next-id) (+ (load (field self next-id)) 1))
-                         (store! envelope (event-envelope id topic body))
+                         (set! (.next-id self) (+ (.next-id self) 1))
+                         (set! envelope (event-envelope id topic body))
                          (when (>= (bus-observer-pending self) (load (field self capacity)))
                            (drop-oldest! self))
-                         (al-push! [Envelope] (mut (field self queue)) (load envelope))
+                         (al-push! [Envelope] (mut (.queue self)) (load envelope))
                          0)))))

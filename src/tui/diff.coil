@@ -48,8 +48,8 @@
 ;; with identical characters but different styling are different rows, and
 ;; repainting one as if it matched would leave the wrong colour on screen.
 (defn frame-line-same? [(left (ref FrameLine)) (right (ref FrameLine))] (-> bool)
-  (let [left-spans (load (field left spans))
-        right-spans (load (field right spans))
+  (let [left-spans (.spans left)
+        right-spans (.spans right)
         count (al-len [FrameSpan] left-spans)]
     (if (!= count (al-len [FrameSpan] right-spans))
         false
@@ -59,17 +59,17 @@
                     (break)
                     (let [a (al-get [FrameSpan] left-spans (load i))
                           b (al-get [FrameSpan] right-spans (load i))]
-                      (if (and (str-eq (load (field a text)) (load (field b text)))
-                               (style-role-same? (load (field a role))
-                                                 (load (field b role))))
-                          (store! i (+ (load i) 1))
-                          (do (store! same false) (break))))))
+                      (if (and (= (.text a) (.text b))
+                               (style-role-same? (.role a)
+                                                 (.role b)))
+                          (set! i (+ (load i) 1))
+                          (do (set! same false) (break))))))
           (load same)))))
 
 ;; True when the two frames differ in no row at all.
 (defn frame-same? [(left (ptr Frame)) (right (ptr Frame))] (-> bool)
-  (let [left-lines (load (field left lines))
-        right-lines (load (field right lines))
+  (let [left-lines (.lines left)
+        right-lines (.lines right)
         count (al-len [FrameLine] left-lines)]
     (if (!= count (al-len [FrameLine] right-lines))
         false
@@ -79,29 +79,29 @@
                     (break)
                     (if (frame-line-same? (al-get [FrameLine] left-lines (load i))
                                           (al-get [FrameLine] right-lines (load i)))
-                        (store! i (+ (load i) 1))
-                        (do (store! same false) (break)))))
+                        (set! i (+ (load i) 1))
+                        (do (set! same false) (break)))))
           (load same)))))
 
 ;; Can a diff be planned between these two live frames?
 (defn diffable? [(committed (ptr Frame))
                  (previous (ptr Frame))
                  (next (ptr Frame))] (-> bool)
-  (and (= (al-len [FrameLine] (load (field committed lines))) 0)
-       (= (al-len [FrameLine] (load (field previous lines)))
-          (al-len [FrameLine] (load (field next lines))))))
+  (and (= (al-len [FrameLine] (.lines committed)) 0)
+       (= (al-len [FrameLine] (.lines previous))
+          (al-len [FrameLine] (.lines next)))))
 
 (defn plan-write-line! [(operations (ptr (ArrayList TerminalOperation)))
                         (line (ref FrameLine))] (-> i64)
-  (let [spans (load (field line spans))
+  (let [spans (.spans line)
         count (al-len [FrameSpan] spans)
         (mut i) 0]
     (loop (if (>= (load i) count)
               (break)
               (let [span (al-get [FrameSpan] spans (load i))]
-                (push-operation! operations (TerminalSetRole (load (field span role))))
-                (push-operation! operations (TerminalWrite (load (field span text))))
-                (store! i (+ (load i) 1)))))
+                (push-operation! operations (TerminalSetRole (.role span)))
+                (push-operation! operations (TerminalWrite (.text span)))
+                (set! i (+ (load i) 1)))))
     (push-operation! operations (TerminalResetStyle))
     0))
 
@@ -120,8 +120,8 @@
 (defn plan-live-diff! [(operations (ptr (ArrayList TerminalOperation)))
                        (previous (ptr Frame))
                        (next (ptr Frame))] (-> i64)
-  (let [previous-lines (load (field previous lines))
-        next-lines (load (field next lines))
+  (let [previous-lines (.lines previous)
+        next-lines (.lines next)
         height (al-len [FrameLine] next-lines)
         (mut rewritten) 0]
     (if (= height 0)
@@ -146,7 +146,7 @@
                         (when (< (+ (load row) 1) height)
                           (push-operation! operations (TerminalCursorDown 1))
                           0)
-                        (store! row (+ (load row) 1))))))
+                        (set! row (+ (load row) 1))))))
           (load rewritten)))))
 
 ;; ---------------------------------------------------------------------------
@@ -174,14 +174,14 @@
 (defn frame-clone! [(allocator (ptr Allocator))
                     (source (ptr Frame))
                     (out (ptr Frame))] (-> i64)
-  (store! out (frame-new allocator))
-  (let [lines (load (field source lines))
+  (set! out (frame-new allocator))
+  (let [lines (.lines source)
         count (al-len [FrameLine] lines)
         (mut row) 0]
     (loop (if (>= (load row) count)
               (break)
               (let [line (al-get [FrameLine] lines (load row))
-                    spans (load (field line spans))
+                    spans (.spans line)
                     span-count (al-len [FrameSpan] spans)
                     (mut copied) (al-new [FrameSpan] allocator)
                     (mut span-at) 0]
@@ -190,10 +190,10 @@
                           (let [span (al-get [FrameSpan] spans (load span-at))]
                             (al-push! [FrameSpan]
                                       (mut copied)
-                                      (frame-span (copy-text allocator (load (field span text)))
-                                                  (load (field span cells))
-                                                  (load (field span role))))
-                            (store! span-at (+ (load span-at) 1)))))
+                                      (frame-span (copy-text allocator (.text span))
+                                                  (.cells span)
+                                                  (.role span)))
+                            (set! span-at (+ (load span-at) 1)))))
                 (frame-push-spans! out (load copied))
-                (store! row (+ (load row) 1)))))
+                (set! row (+ (load row) 1)))))
     0))

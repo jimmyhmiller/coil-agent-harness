@@ -46,18 +46,16 @@
                       (match (al-get [Json] (load items) (load i))
                         (JsonString [value]
                                     (if (= (slice-len [u8] value) 0)
-                                        (store! ok false)
+                                        (set! ok false)
                                         (do
                                           (al-push! [(slice u8)] (mut output) value)
-                                          (store! i (+ (load i) 1)))))
-                        (_ (store! ok false)))))
+                                          (set! i (+ (load i) 1)))))
+                        (_ (set! ok false)))))
             (load ok)))))
 
 (defn factory-load-optional-strings! [(values Json)
                                       (output (mut (ArrayList (slice u8))))] (-> bool)
-  (match-else values
-              (JsonNull [] true)
-              (_ (factory-load-strings! values (mut output)))))
+  (match values (JsonNull [] true) (_ (factory-load-strings! values (mut output)))))
 
 (defsum FactoryDefinitionResult
   (FactoryLoaded [(definition FactoryDefinition)])
@@ -86,11 +84,11 @@
                         (JsonString [relative]
                                     (let [contents (factory-read-file allocator directory relative)]
                                       (if (= (slice-len [u8] contents) 0)
-                                          (store! ok false)
+                                          (set! ok false)
                                           (do
                                             (al-push! [(slice u8)] (mut output) contents)
-                                            (store! i (+ (load i) 1))))))
-                        (_ (store! ok false)))))
+                                            (set! i (+ (load i) 1))))))
+                        (_ (set! ok false)))))
             (load ok)))))
 
 (defn factory-add-worker! [(allocator (ptr Allocator))
@@ -104,20 +102,20 @@
                            (workers (mut (ArrayList FactoryWorker)))] (-> bool)
   (let [instructions (factory-read-file allocator directory file)
         worker (alloc/stack FactoryWorker)]
-    (store! (field worker file) file)
-    (store! (field worker instructions) instructions)
-    (store! (field worker provider) provider)
-    (store! (field worker model) model)
-    (store! (field worker reasoning) reasoning)
-    (store! (field worker before-commands) (al-new [(slice u8)] allocator))
-    (store! (field worker after-commands) (al-new [(slice u8)] allocator))
+    (set! (.file worker) file)
+    (set! (.instructions worker) instructions)
+    (set! (.provider worker) provider)
+    (set! (.model worker) model)
+    (set! (.reasoning worker) reasoning)
+    (set! (.before-commands worker) (al-new [(slice u8)] allocator))
+    (set! (.after-commands worker) (al-new [(slice u8)] allocator))
     (if (or (= (slice-len [u8] file) 0)
             (= (slice-len [u8] instructions) 0))
         false
         (if (not (and (factory-load-optional-strings! before
-                                                      (mut (field worker before-commands)))
+                                                      (mut (.before-commands worker)))
                       (factory-load-optional-strings! after
-                                                      (mut (field worker after-commands)))))
+                                                      (mut (.after-commands worker)))))
             false
             (do (al-push! [FactoryWorker] (mut workers) (load worker)) true)))))
 
@@ -134,38 +132,38 @@
             (loop (if (or (>= (load i) n) (not (load ok)))
                       (break)
                       (let [entry (al-get [Json] (load items) (load i))]
-                        (store! ok
-                                (match entry
-                                  (JsonString [file]
-                                              (factory-add-worker! allocator
-                                                                   directory
-                                                                   file
-                                                                   ""
-                                                                   ""
-                                                                   ""
-                                                                   (JsonNull)
-                                                                   (JsonNull)
-                                                                   (mut workers)))
-                                  (JsonObject [keys values]
-                                              (factory-add-worker! allocator
-                                                                   directory
-                                                                   (match (json-string-at entry "file")
-                                                                     (Some [file] file)
-                                                                     (None [] ""))
-                                                                   (match (json-string-at entry "provider")
-                                                                     (Some [value] value)
-                                                                     (None [] ""))
-                                                                   (match (json-string-at entry "model")
-                                                                     (Some [value] value)
-                                                                     (None [] ""))
-                                                                   (match (json-string-at entry "reasoning")
-                                                                     (Some [value] value)
-                                                                     (None [] ""))
-                                                                   (json-get entry "before")
-                                                                   (json-get entry "after")
-                                                                   (mut workers)))
-                                  (_ false)))
-                        (store! i (+ (load i) 1)))))
+                        (set! ok
+                              (match entry
+                                (JsonString [file]
+                                            (factory-add-worker! allocator
+                                                                 directory
+                                                                 file
+                                                                 ""
+                                                                 ""
+                                                                 ""
+                                                                 (JsonNull)
+                                                                 (JsonNull)
+                                                                 (mut workers)))
+                                (JsonObject [keys values]
+                                            (factory-add-worker! allocator
+                                                                 directory
+                                                                 (match (json-string-at entry "file")
+                                                                   (Some [file] file)
+                                                                   (None [] ""))
+                                                                 (match (json-string-at entry "provider")
+                                                                   (Some [value] value)
+                                                                   (None [] ""))
+                                                                 (match (json-string-at entry "model")
+                                                                   (Some [value] value)
+                                                                   (None [] ""))
+                                                                 (match (json-string-at entry "reasoning")
+                                                                   (Some [value] value)
+                                                                   (None [] ""))
+                                                                 (json-get entry "before")
+                                                                 (json-get entry "after")
+                                                                 (mut workers)))
+                                (_ false)))
+                        (set! i (+ (load i) 1)))))
             (load ok)))))
 
 (defn load-factory-definition [(allocator (ptr Allocator))
@@ -174,9 +172,9 @@
     (if (= (slice-len [u8] manifest-text) 0)
         (FactoryInvalid "factory folder must contain a readable factory.json")
         (let [parsed (json-parse allocator manifest-text)]
-          (if (not (load (field parsed ok)))
+          (if (not (.ok parsed))
               (FactoryInvalid "factory.json is not valid JSON")
-              (let [manifest (load (field parsed value))
+              (let [manifest (.value parsed)
                     name
                       (match (json-string-at manifest "name")
                         (Some [value] value)
@@ -187,16 +185,16 @@
                         (None [] ""))
                     commands (json-get manifest "commands")
                     (mut definition) (zeroed FactoryDefinition)]
-                (store! (field definition directory) directory)
-                (store! (field definition name) name)
-                (store! (field definition goal) goal)
-                (store! (field definition common-context) (al-new [(slice u8)] allocator))
-                (store! (field definition tool-groups) (al-new [(slice u8)] allocator))
-                (store! (field definition before-commands) (al-new [(slice u8)] allocator))
-                (store! (field definition after-commands) (al-new [(slice u8)] allocator))
-                (store! (field definition before-each-commands) (al-new [(slice u8)] allocator))
-                (store! (field definition after-each-commands) (al-new [(slice u8)] allocator))
-                (store! (field definition workers) (al-new [FactoryWorker] allocator))
+                (set! (.directory definition) directory)
+                (set! (.name definition) name)
+                (set! (.goal definition) goal)
+                (set! (.common-context definition) (al-new [(slice u8)] allocator))
+                (set! (.tool-groups definition) (al-new [(slice u8)] allocator))
+                (set! (.before-commands definition) (al-new [(slice u8)] allocator))
+                (set! (.after-commands definition) (al-new [(slice u8)] allocator))
+                (set! (.before-each-commands definition) (al-new [(slice u8)] allocator))
+                (set! (.after-each-commands definition) (al-new [(slice u8)] allocator))
+                (set! (.workers definition) (al-new [FactoryWorker] allocator))
                 (cond (or (= (slice-len [u8] name) 0) (= (slice-len [u8] goal) 0))
                         (FactoryInvalid "factory.json requires non-empty name and goal")
                       (not (factory-load-strings! (json-get (json-get manifest "tools") "groups")

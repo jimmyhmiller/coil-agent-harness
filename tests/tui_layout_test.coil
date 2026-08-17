@@ -21,23 +21,20 @@
            (presentation-apply-action! (mut model) (AppendAssistant "model-secret" "I’ll inspect the root."))
            (presentation-apply-action! (mut model) (FinishAssistant "model-secret"))
            (presentation-apply-action! (mut model)
-                                       (ProposeTool "tool-secret" "bash" (load arguments)))
+                                       (ProposeTool :id "tool-secret" :name "bash" :arguments (load arguments)))
            (presentation-apply-action! (mut model) (StartTool "tool-secret" "bash"))
            (presentation-apply-action! (mut model)
                                        (FinishTool "tool-secret" (JsonString "done")))
            (let [(mut frame) (layout-model-range allocator (mut model) 0 2 options)
                  text (render-frame-plain allocator (mut frame))
                  tool-line (al-get [FrameLine] (load (field frame lines)) 1)]
-             (assert (str-eq text
-                             "● I’ll inspect the root.\n  ⏺ Bash  ls  done\n"))
+             (assert (= text "● I’ll inspect the root.\n  ⏺ Bash  ls  done\n"))
              (assert (= (al-len [FrameSpan] (load (field tool-line spans))) 3))
              (let [status-span
                      (al-get [FrameSpan]
                              (load (field tool-line spans))
                              2)]
-               (assert (match-else (load (field status-span role))
-                                   (RoleSuccess [] true)
-                                   (_ false)))))))
+               (assert (match (load (field status-span role)) (RoleSuccess [] true) (_ false)))))))
 
 (deftest wraps-by-display-cells-and-preserves-continuation-indentation
          (let [allocator (malloc-allocator)
@@ -48,7 +45,7 @@
            (let [(mut frame) (layout-model-range allocator (mut model) 0 1 options)
                  text (render-frame-plain allocator (mut frame))
                  first-line (al-get [FrameLine] (load (field frame lines)) 0)]
-             (assert (str-eq text "● ab界🙂cdef\n  gh\n"))
+             (assert (= text "● ab界🙂cdef\n  gh\n"))
              (assert (= (load (field first-line cells)) 12)))))
 
 (deftest visibly-escapes-controls-and-replaces-malformed-utf8
@@ -63,7 +60,7 @@
                                        (AppendAssistant "model-1" (slice-new [u8] (index malformed 0) 3)))
            (let [(mut frame) (layout-model-range allocator (mut model) 0 1 options)
                  text (render-frame-plain allocator (mut frame))]
-             (assert (str-eq text "assistant: A\\x1B�\n")))))
+             (assert (= text "assistant: A\\x1B�\n")))))
 
 (deftest keeps-every-rendered-line-within-the-requested-width-matrix
          (let [allocator (malloc-allocator)
@@ -101,7 +98,7 @@
            (json-put-string! (mut arguments) "command" "pwd")
            (json-object-put! (mut result) "exit_code" (json-integer allocator 0))
            (presentation-apply-action! (mut model)
-                                       (ProposeTool "tool-1" "bash" (load arguments)))
+                                       (ProposeTool :id "tool-1" :name "bash" :arguments (load arguments)))
            (presentation-apply-action! (mut model)
                                        (FinishTool "tool-1" (load result)))
            (let [compact-options (layout-options-profile 80 true true false)
@@ -110,6 +107,6 @@
                  (mut verbose) (layout-model-range allocator (mut model) 0 1 verbose-options)
                  compact-text (render-frame-plain allocator (mut compact))
                  verbose-text (render-frame-plain allocator (mut verbose))]
-             (assert (str-eq compact-text "  ⏺ Bash  pwd\n"))
-             (assert (str-eq verbose-text
-                             "  ⏺ Bash  pwd  done\n    arguments: {\"command\":\"pwd\"}\n    result: {\"exit_code\":0}\n")))))
+             (assert (= compact-text "  ⏺ Bash  pwd\n"))
+             (assert (= verbose-text
+                        "  ⏺ Bash  pwd  done\n    arguments: {\"command\":\"pwd\"}\n    result: {\"exit_code\":0}\n")))))

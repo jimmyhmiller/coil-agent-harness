@@ -13,7 +13,7 @@
                                       (root-run-id (slice u8))] (-> bool)
   (let [event-run-id (run-watch-json-string event "run_id")
         kind (run-watch-json-string event "event")]
-    (and (str-eq event-run-id root-run-id)
-         (or (str-eq kind "run.completed")
-             (or (str-eq kind "run.failed")
-                 (str-eq kind "run.cancelled"))))))
+    (and (= event-run-id root-run-id)
+         (or (= kind "run.completed")
+             (or (= kind "run.failed")
+                 (= kind "run.cancelled"))))))

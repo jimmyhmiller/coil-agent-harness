@@ -18,19 +18,19 @@
   (let [(mut arguments) (json-object allocator)
         call (alloc/stack ToolCall)]
     (json-put-string! (mut arguments) "path" path)
-    (when (str-eq name "write_text_file")
+    (when (= name "write_text_file")
       (json-put-string! (mut arguments) "content" content)
       0)
-    (store! (field call id) id)
-    (store! (field call name) name)
-    (store! (field call arguments) (load arguments))
-    (store! (field call raw-arguments) "")
+    (set! (.id call) id)
+    (set! (.name call) name)
+    (set! (.arguments call) (load arguments))
+    (set! (.raw-arguments call) "")
     (load call)))
 
 (deftest reads-bounded-line-windows
          (let [window (alloc/stack LineWindow)]
            (store! window (file-line-window "one\ntwo\nthree\nfour\n" 2 2))
-           (assert (str-eq (load (field window content)) "two\nthree\n"))
+           (assert (= (load (field window content)) "two\nthree\n"))
            (assert-eq (load (field window total-lines)) 4)
            (assert-eq (load (field window start-line)) 2)
            (assert-eq (load (field window end-line)) 3)
@@ -70,18 +70,13 @@
                                             write-call
                                             context
                                             allocator)]
-             (assert (match-else (load (field written status))
-                                 (ToolSucceeded [] true)
-                                 (_ false)))
+             (assert (match (load (field written status)) (ToolSucceeded [] true) (_ false)))
              (assert-eq (json-number-i64 (json-get (load (field written output)) "bytes_written"))
                         17))
            (let [read (execute-read-text-file reader read-call context allocator)
                  output (load (field read output))]
-             (assert (match-else (load (field read status))
-                                 (ToolSucceeded [] true)
-                                 (_ false)))
-             (assert (str-eq (command-string output "content")
-                             "hello from a tool"))
+             (assert (match (load (field read status)) (ToolSucceeded [] true) (_ false)))
+             (assert (= (command-string output "content") "hello from a tool"))
              (assert-eq (json-number-i64 (json-get output "bytes")) 17))
            (let [(mut edit-arguments) (json-object allocator)
                  editor (alloc/stack EditTextFileTool)
@@ -96,20 +91,13 @@
              (store! (field edit-call name) "edit_text_file")
              (store! (field edit-call arguments) (load edit-arguments))
              (let [edited (execute-edit-text-file editor edit-call context allocator)]
-               (assert (match-else (load (field edited status))
-                                   (ToolSucceeded [] true)
-                                   (_ false))))
+               (assert (match (load (field edited status)) (ToolSucceeded [] true) (_ false))))
              (let [read (execute-read-text-file reader read-call context allocator)]
-               (assert (str-eq (command-string (load (field read output)) "content")
-                               "hello via the tool"))))
+               (assert (= (command-string (load (field read output)) "content") "hello via the tool"))))
            (let [deleted (execute-delete-file deleter read-call context allocator)]
-             (assert (match-else (load (field deleted status))
-                                 (ToolSucceeded [] true)
-                                 (_ false))))
+             (assert (match (load (field deleted status)) (ToolSucceeded [] true) (_ false))))
            (let [missing (execute-read-text-file reader read-call context allocator)]
-             (assert (match-else (load (field missing status))
-                                 (ToolErrored [] true)
-                                 (_ false))))))
+             (assert (match (load (field missing status)) (ToolErrored [] true) (_ false))))))
 
 (deftest creates-and-removes-only-empty-relative-directories
          (let [allocator (malloc-allocator)
@@ -131,13 +119,9 @@
            ;; Clean up a directory left by an interrupted prior test.
            (execute-remove-directory remover call context allocator)
            (let [created (execute-create-directory creator call context allocator)]
-             (assert (match-else (load (field created status))
-                                 (ToolSucceeded [] true)
-                                 (_ false))))
+             (assert (match (load (field created status)) (ToolSucceeded [] true) (_ false))))
            (let [removed (execute-remove-directory remover call context allocator)]
-             (assert (match-else (load (field removed status))
-                                 (ToolSucceeded [] true)
-                                 (_ false))))))
+             (assert (match (load (field removed status)) (ToolSucceeded [] true) (_ false))))))
 
 (deftest rejects-parent-traversal-and-registers-effect-metadata
          (let [allocator (malloc-allocator)
@@ -156,9 +140,7 @@
            (store! (field context cancellation)
                    (cast (ptr CancellationToken) 0))
            (let [result (execute-read-text-file reader call context allocator)]
-             (assert (match-else (load (field result status))
-                                 (ToolErrored [] true)
-                                 (_ false))))
+             (assert (match (load (field result status)) (ToolErrored [] true) (_ false))))
            (store! registry (tool-registry-new allocator))
            (assert (register-filesystem-tools! (mut registry) allocator "/tmp"))
            (assert-eq (al-len [ToolDefinition]
@@ -168,13 +150,9 @@
              (None [] (assert false))
              (Some [definition]
                    (let [selected definition]
-                     (assert (match-else (load (field (field selected spec) effect))
-                                         (Destructive [] true)
-                                         (_ false))))))
+                     (assert (match (load (field (field selected spec) effect)) (Destructive [] true) (_ false))))))
            (match (tool-find (load registry) "create_directory")
              (None [] (assert false))
              (Some [definition]
                    (let [selected definition]
-                     (assert (match-else (load (field (field selected spec) effect))
-                                         (Reversible [] true)
-                                         (_ false))))))))
+                     (assert (match (load (field (field selected spec) effect)) (Reversible [] true) (_ false))))))))

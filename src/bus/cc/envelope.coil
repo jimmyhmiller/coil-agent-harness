@@ -56,12 +56,12 @@
    (body (slice u8))])
 
 (defn cc-envelope-init! [(envelope (ptr CcEnvelope))] (-> i64)
-  (store! (field envelope from) (None [(slice u8)]))
-  (store! (field envelope from-session) (None [(slice u8)]))
-  (store! (field envelope hop-chain) (None [(slice u8)]))
-  (store! (field envelope from-name) (None [(slice u8)]))
-  (store! (field envelope from-mode) (None [(slice u8)]))
-  (store! (field envelope body) "")
+  (set! (.from envelope) (None [(slice u8)]))
+  (set! (.from-session envelope) (None [(slice u8)]))
+  (set! (.hop-chain envelope) (None [(slice u8)]))
+  (set! (.from-name envelope) (None [(slice u8)]))
+  (set! (.from-mode envelope) (None [(slice u8)]))
+  (set! (.body envelope) "")
   0)
 
 ;; ---------------------------------------------------------------------------
@@ -84,7 +84,7 @@
                 (when (not (cc-session-byte? (cast i64 (slice-get [u8] value (load i)))))
                   (store! ok false)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load ok)))
 
 (defn cc-lower-hex-byte? [(byte i64)] (-> bool)
@@ -125,7 +125,7 @@
     (and (load ok) (and (> (load ids) 0) (<= (load ids) CC_HOP_MAX_IDS)))))
 
 (defn cc-mode-valid? [(value (slice u8))] (-> bool)
-  (or (str-eq value "bypass") (str-eq value "prompting")))
+  (or (= value "bypass") (= value "prompting")))
 
 ;; The name as it may appear between the quotes: anything except a quote, an
 ;; angle bracket, or a line break. Those would let a name close its own
@@ -217,7 +217,7 @@
                                                (slice-get [u8] name (+ (load i) (load k))))
                                 (store! k (+ (load k) 1))))))
                   0)
-                (store! i (+ (load i) width)))))
+                (set! i (+ (load i) width)))))
     (let [text (sb-str (load stripped))
           length (slice-len [u8] text)
           (mut lo) 0
@@ -225,11 +225,11 @@
       (loop (if (or (>= (load lo) (load hi))
                     (not (cc-trim-byte? (cast i64 (slice-get [u8] text (load lo))))))
                 (break)
-                (store! lo (+ (load lo) 1))))
+                (set! lo (+ (load lo) 1))))
       (loop (if (or (>= (load lo) (load hi))
                     (not (cc-trim-byte? (cast i64 (slice-get [u8] text (- (load hi) 1))))))
                 (break)
-                (store! hi (- (load hi) 1))))
+                (set! hi (- (load hi) 1))))
       (let [trimmed (substr text (load lo) (load hi))
             trimmed-length (slice-len [u8] trimmed)
             (mut chars) 0
@@ -241,8 +241,8 @@
                     (when (= (load chars) CC_NAME_MAX_CHARS)
                       (store! cut (load at))
                       (break))
-                    (store! at (+ (load at) (cc-utf8-length trimmed (load at))))
-                    (store! chars (+ (load chars) 1)))))
+                    (set! at (+ (load at) (cc-utf8-length trimmed (load at))))
+                    (set! chars (+ (load chars) 1)))))
         (if (< (load cut) 0)
             trimmed
             (let [(mut clamped) (sb-new allocator)]
@@ -272,7 +272,7 @@
                           (cast i64 (slice-get [u8] CC_TAG (load i))))
                   (store! ok false)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load ok)))
 
 ;; Rewrite `</cross-session-message` to `<\/cross-session-message` so a body
@@ -303,13 +303,13 @@
                       (if terminates
                           (do
                             (sb-push-str! (mut buffer) "<\\/")
-                            (store! i (+ (load i) 2)))
+                            (set! i (+ (load i) 2)))
                           (do
                             (sb-push-byte! (mut buffer) (cast u8 byte))
-                            (store! i (+ (load i) 1)))))
+                            (set! i (+ (load i) 1)))))
                     (do
                       (sb-push-byte! (mut buffer) (cast u8 byte))
-                      (store! i (+ (load i) 1)))))))
+                      (set! i (+ (load i) 1)))))))
     (sb-finish! (mut buffer))))
 
 ;; ---------------------------------------------------------------------------
@@ -340,32 +340,32 @@
                           (envelope (ptr CcEnvelope))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) CC_OPEN)
-    (let [from (cc-optional-attribute (load (field envelope from)))]
+    (let [from (cc-optional-attribute (.from envelope))]
       (when (> (slice-len [u8] from) 0)
         (cc-push-attribute! (mut buffer) "from" from)
         0))
-    (let [session (cc-optional-attribute (load (field envelope from-session)))]
+    (let [session (cc-optional-attribute (.from-session envelope))]
       (when (and (> (slice-len [u8] session) 0) (cc-session-id-valid? session))
         (cc-push-attribute! (mut buffer) "from-session" session)
         0))
-    (let [hops (cc-optional-attribute (load (field envelope hop-chain)))]
+    (let [hops (cc-optional-attribute (.hop-chain envelope))]
       (when (and (> (slice-len [u8] hops) 0) (cc-hop-chain-valid? hops))
         (cc-push-attribute! (mut buffer) "hop-chain" hops)
         0))
-    (let [name (cc-optional-attribute (load (field envelope from-name)))]
+    (let [name (cc-optional-attribute (.from-name envelope))]
       (when (> (slice-len [u8] name) 0)
         (let [clean (cc-sanitize-name allocator name)]
           (when (> (slice-len [u8] clean) 0)
             (cc-push-attribute! (mut buffer) "from-name" clean)
             0))
         0))
-    (let [mode (cc-optional-attribute (load (field envelope from-mode)))]
+    (let [mode (cc-optional-attribute (.from-mode envelope))]
       (when (and (> (slice-len [u8] mode) 0) (cc-mode-valid? mode))
         (cc-push-attribute! (mut buffer) "from-mode" mode)
         0))
     (sb-push-str! (mut buffer) ">\n")
     (sb-push-str! (mut buffer)
-                  (cc-scrub-close-tag allocator (load (field envelope body))))
+                  (cc-scrub-close-tag allocator (.body envelope)))
     (sb-push-str! (mut buffer) CC_CLOSE)
     (sb-finish! (mut buffer))))
 
@@ -389,7 +389,7 @@
         start (+ (+ index name-length) 3)]
     (if (or (> start n)
             (or (!= (cast i64 (slice-get [u8] text index)) 32)
-                (not (str-eq (substr text (+ index 1) (+ (+ index 1) name-length)) name))))
+                (not (= (substr text (+ index 1) (+ (+ index 1) name-length)) name))))
         false
         (if (or (!= (cast i64 (slice-get [u8] text (+ (+ index 1) name-length))) 61)
                 (!= (cast i64 (slice-get [u8] text (+ (+ index 2) name-length))) 34))
@@ -401,7 +401,7 @@
                         (break)
                         (let [byte (cast i64 (slice-get [u8] text (load at)))]
                           (if (= byte 34)
-                              (do (store! closed true) (break))
+                              (do (set! closed true) (break))
                               (do
                                 ;; kind 0 address, 1 session, 2 hop-chain,
                                 ;; 3 name, 4 mode -- the classes the reference's
@@ -413,12 +413,12 @@
                                                  :else true))
                                   (store! ok false)
                                   (break))
-                                (store! at (+ (load at) 1)))))))
+                                (set! at (+ (load at) 1)))))))
               (if (or (not (load ok)) (or (not (load closed)) (= (load at) start)))
                   false
                   (do
-                    (store! out-value (substr text start (load at)))
-                    (store! out-index (+ (load at) 1))
+                    (set! out-value (substr text start (load at)))
+                    (set! out-index (+ (load at) 1))
                     true)))))))
 
 ;; Parse `text` as an envelope. Returns false when it is not one -- including
@@ -437,7 +437,7 @@
     (cc-envelope-init! out)
     (if (or (< n (+ (+ open-length close-length) 2))
             (or (not (starts-with text CC_OPEN))
-                (not (str-eq (substr text (- n close-length) n) CC_CLOSE))))
+                (not (= (substr text (- n close-length) n) CC_CLOSE))))
         false
         (let [(mut at) open-length
               value (alloc/stack (slice u8))
@@ -474,10 +474,10 @@
                 (if (< body-end body-start)
                     false
                     (do
-                      (store! (field out body) (substr text body-start body-end))
+                      (set! (.body out) (substr text body-start body-end))
                       ;; The round trip. Everything above is a proposal; this is
                       ;; the acceptance test.
-                      (str-eq (cc-envelope-render allocator out) text)))))))))
+                      (= (cc-envelope-render allocator out) text)))))))))
 
 ;; Wrap a body for sending. The common path: our address, our name, and the
 ;; permission mode we attest to.
@@ -497,5 +497,5 @@
     (when (> (slice-len [u8] from-mode) 0)
       (store! (field envelope from-mode) (Some from-mode))
       0)
-    (store! (field envelope body) body)
+    (set! (.body envelope) body)
     (cc-envelope-render allocator envelope)))

@@ -19,30 +19,30 @@
         recovery (event-journal-recover allocator events-path)
         (mut model) (presentation-model-new allocator)
         (mut policy) (transcript-policy-new)]
-    (if (not (load (field recovery ok)))
+    (if (not (.ok recovery))
         false
         (do
           (let [(mut at) 0
-                count (al-len [Json] (load (field recovery events)))]
+                count (al-len [Json] (.events recovery))]
             (loop (if (>= (load at) count)
                       (break)
                       (do
                         (presentation-apply-event! (mut model)
                                                    (al-get [Json]
-                                                           (load (field recovery events))
+                                                           (.events recovery)
                                                            (load at)))
-                        (store! at (+ (load at) 1))))))
+                        (set! at (+ (load at) 1))))))
           (transcript-advance! (mut policy) (mut model))
           (let [options (layout-options 80 true false)
                 (mut frame)
                   (layout-model-range allocator
                                       (mut model)
                                       0
-                                      (load (field policy committed-count))
+                                      (.committed-count policy)
                                       options)
                 actual (render-frame-plain allocator (mut frame))]
             (match (fs/read-file allocator expected-path)
-              (Ok [expected] (str-eq actual expected))
+              (Ok [expected] (= actual expected))
               (Err [failure] false)))))))
 
 (deftest recorded-event-streams-produce-the-golden-transcripts

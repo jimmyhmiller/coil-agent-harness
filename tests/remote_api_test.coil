@@ -26,7 +26,7 @@
   (prepare-durable-provider [(self (ptr RemoteFakeController)) (provider-name (slice u8))] (-> i64) 0)
   (start-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                      (-> i64)
-                     (do (store! (field self starts) (+ (load (field self starts)) 1)) 0))
+                     (do (set! (.starts self) (+ (.starts self) 1)) 0))
   (request-cancel-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                               (-> i64)
                               0)
@@ -60,13 +60,13 @@
 (defn remote-server-thread [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr RemoteServerJob) opaque)
         auth (alloc/stack ServiceAuth)]
-    (store! (field auth operator-token) "test-token")
-    (store! (field auth observer-token) "observer-token")
-    (store! (load (field job result))
-            (serve-run-service-once (load (field job allocator))
-                                    (load (field job listener))
-                                    (load (field job service))
-                                    auth))
+    (set! (.operator-token auth) "test-token")
+    (set! (.observer-token auth) "observer-token")
+    (set! (load (field job result))
+          (serve-run-service-once (load (field job allocator))
+                                  (load (field job listener))
+                                  (load (field job service))
+                                  auth))
     (cast (ptr i8) 0)))
 
 (defstruct RemoteShutdownServerJob
@@ -79,14 +79,14 @@
 (defn remote-shutdown-server-thread [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr RemoteShutdownServerJob) opaque)
         auth (alloc/stack ServiceAuth)]
-    (store! (field auth operator-token) "secret-token")
-    (store! (field auth observer-token) "")
-    (store! (load (field job result))
-            (serve-run-service-until-shutdown (load (field job allocator))
-                                              (load (field job listener))
-                                              (load (field job service))
-                                              auth
-                                              (load (field job shutdown))))
+    (set! (.operator-token auth) "secret-token")
+    (set! (.observer-token auth) "")
+    (set! (load (field job result))
+          (serve-run-service-until-shutdown (load (field job allocator))
+                                            (load (field job listener))
+                                            (load (field job service))
+                                            auth
+                                            (load (field job shutdown))))
     (cast (ptr i8) 0)))
 
 (defn remote-test-url [(allocator (ptr Allocator)) (port i64)] (-> (slice u8))
@@ -108,15 +108,14 @@
                 headers
                 (concat-or-empty allocator "Authorization: Bearer " token))
       0)
-    (store! (field request url) (remote-test-url allocator port))
-    (store! (field request headers) headers)
-    (store! (field request body)
-            "{\"version\":1,\"command_id\":\"remote-1\",\"run_id\":\"remote-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
-    (store! (field request timeout-ms) 3000)
-    (store! (field request cancellation) (cast (ptr CancellationToken) 0))
-    (store! (field (field request chunks) context) (cast (ptr i8) 0))
-    (store! (field (field request chunks) consume)
-            (fnptr-of discard-http-chunk))
+    (set! (.url request) (remote-test-url allocator port))
+    (set! (.headers request) headers)
+    (set! (.body request)
+          "{\"version\":1,\"command_id\":\"remote-1\",\"run_id\":\"remote-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\"}")
+    (set! (.timeout-ms request) 3000)
+    (set! (.cancellation request) (cast (ptr CancellationToken) 0))
+    (set! (.context (.chunks request)) (cast (ptr i8) 0))
+    (set! (.consume (.chunks request)) (fnptr-of discard-http-chunk))
     (http-post allocator request)))
 
 (deftest accepts-a-versioned-command-over-a-real-http-socket
@@ -206,7 +205,7 @@
                (assert-eq (load (field response status-code)) 202)
                (assert (load (field parsed ok)))
                (assert (match (json-string-at (load (field parsed value)) "status")
-                         (Some [value] (str-eq value "queued"))
+                         (Some [value] (= value "queued"))
                          (None [] false))))
              (thread-join server-thread)
              (assert-eq (load server-result) 0)

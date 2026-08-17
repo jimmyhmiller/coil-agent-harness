@@ -67,7 +67,7 @@
                     (store! start-byte (+ (load i) 1))
                     0)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (let [total-lines
             (if (= n 0)
                 0
@@ -81,19 +81,18 @@
                        (if (> wanted-end total-lines) total-lines wanted-end))
           next-line (if (< end-line total-lines) (+ end-line 1) 0)
           result (alloc/stack LineWindow)]
-      (store! (field result content)
-              (subslice [u8] bytes actual-start actual-end))
-      (store! (field result total-lines) total-lines)
-      (store! (field result start-line) start-line)
-      (store! (field result end-line) end-line)
-      (store! (field result next-start-line) next-line)
+      (set! (.content result) (subslice [u8] bytes actual-start actual-end))
+      (set! (.total-lines result) total-lines)
+      (set! (.start-line result) start-line)
+      (set! (.end-line result) end-line)
+      (set! (.next-start-line result) next-line)
       (load result))))
 
 (defn file-tool-path-safe? [(path (slice u8))] (-> bool)
   (and (> (slice-len [u8] path) 0)
        (and (not (os/slice-has-byte? path (cast u8 0)))
             (and (!= (cast i64 (slice-get [u8] path 0)) 47)
-                 (and (not (str-eq path ".."))
+                 (and (not (= path ".."))
                       (and (match (str-find path "../")
                              (Some [position] false)
                              (None [] true))
@@ -121,7 +120,7 @@
                 (when (= (slice-get [u8] bytes (load i)) (cast u8 0))
                   (store! binary true)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load binary)))
 
 (defn bounded-read-file [(allocator (ptr Allocator))
@@ -170,8 +169,8 @@
 
 (defn file-tool-error [(call (ptr ToolCall))
                        (message (slice u8))] (-> ToolResult)
-  (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
-    (store! (field result error) message)
+  (let [(mut result) (tool-result-empty (.id call) (ToolErrored))]
+    (set! (.error result) message)
     (load result)))
 
 (defn file-tool-path-result [(allocator (ptr Allocator))
@@ -179,13 +178,13 @@
                              (key (slice u8))
                              (path (slice u8))] (-> ToolResult)
   (let [(mut output) (json-object allocator)
-        (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+        (mut result) (tool-result-empty (.id call) (ToolSucceeded))]
     (json-put-string! (mut output) key path)
-    (store! (field result output) (load output))
+    (set! (.output result) (load output))
     (load result)))
 
 (defn file-tool-relative-path [(call (ptr ToolCall))] (-> (slice u8))
-  (match (json-string-at (load (field call arguments)) "path")
+  (match (json-string-at (.arguments call) "path")
     (Some [value] value)
     (None [] "")))
 
@@ -193,7 +192,7 @@
                               (call (ptr ToolCall))
                               (context (ptr ToolExecutionContext))
                               (allocator (ptr Allocator))] (-> ToolResult)
-  (let [arguments (load (field call arguments))
+  (let [arguments (.arguments call)
         relative
           (match (json-string-at arguments "path")
             (Some [value] value)
@@ -206,7 +205,7 @@
             (file-tool-error call "path must be workspace-relative without parent traversal")
             (match (bounded-read-file allocator
                                       (file-tool-path allocator
-                                                      (load (field self root))
+                                                      (.root self)
                                                       relative))
               (BoundedReadFailed [message] (file-tool-error call message))
               (BoundedReadOk [bytes truncated]
@@ -226,40 +225,40 @@
                                                            requested-count)
                                        (mut output) (json-object allocator)
                                        (mut result)
-                                         (tool-result-empty (load (field call id))
+                                         (tool-result-empty (.id call)
                                                             (ToolSucceeded))]
                                    (json-put-string! (mut output)
                                                      "content"
-                                                     (load (field window content)))
+                                                     (.content window))
                                    (json-put-bool! (mut output)
                                                    "truncated"
                                                    (or truncated
-                                                       (> (load (field window next-start-line)) 0)))
+                                                       (> (.next-start-line window) 0)))
                                    (json-object-put! (mut output)
                                                      "bytes"
                                                      (json-integer allocator
                                                                    (slice-len [u8]
-                                                                     (load (field window content)))))
+                                                                     (.content window))))
                                    (json-object-put! (mut output) "total_lines"
                                                      (json-integer allocator
-                                                       (load (field window total-lines))))
+                                                       (.total-lines window)))
                                    (json-object-put! (mut output) "start_line"
                                                      (json-integer allocator
-                                                       (load (field window start-line))))
+                                                       (.start-line window)))
                                    (json-object-put! (mut output) "end_line"
                                                      (json-integer allocator
-                                                       (load (field window end-line))))
+                                                       (.end-line window)))
                                    (json-object-put! (mut output) "next_start_line"
                                                      (json-integer allocator
-                                                       (load (field window next-start-line))))
-                                   (store! (field result output) (load output))
+                                                       (.next-start-line window)))
+                                   (set! (.output result) (load output))
                                    (load result)))))))))
 
 (defn execute-write-text-file [(self (ptr WriteTextFileTool))
                                (call (ptr ToolCall))
                                (context (ptr ToolExecutionContext))
                                (allocator (ptr Allocator))] (-> ToolResult)
-  (let [arguments (load (field call arguments))
+  (let [arguments (.arguments call)
         relative
           (match (json-string-at arguments "path")
             (Some [value] value)
@@ -294,7 +293,7 @@
                               (call (ptr ToolCall))
                               (context (ptr ToolExecutionContext))
                               (allocator (ptr Allocator))] (-> ToolResult)
-  (let [arguments (load (field call arguments))
+  (let [arguments (.arguments call)
         relative
           (match (json-string-at arguments "path")
             (Some [value] value)
@@ -517,34 +516,31 @@
                                  (root (slice u8))] (-> ToolDefinition)
   (let [definition (alloc/stack ToolDefinition)
         implementation (box allocator ReadTextFileTool (zeroed ReadTextFileTool))]
-    (store! (field implementation root) root)
-    (store! (field (field definition spec) name) "read_text_file")
-    (store! (field (field definition spec) description)
-            "Read a bounded line range from a workspace-relative text file. Defaults to 120 lines; use start_line and line_count to continue without rereading prior content.")
-    (store! (field (field definition spec) input-schema)
-            (read-text-file-schema allocator))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (ReadOnly))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 10000)
-    (store! (field definition implementation) implementation)
+    (set! (.root implementation) root)
+    (set! (.name (.spec definition)) "read_text_file")
+    (set! (.description (.spec definition))
+          "Read a bounded line range from a workspace-relative text file. Defaults to 120 lines; use start_line and line_count to continue without rereading prior content.")
+    (set! (.input-schema (.spec definition)) (read-text-file-schema allocator))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 10000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn write-text-file-definition [(allocator (ptr Allocator))
                                   (root (slice u8))] (-> ToolDefinition)
   (let [definition (alloc/stack ToolDefinition)
         implementation (box allocator WriteTextFileTool (zeroed WriteTextFileTool))]
-    (store! (field implementation root) root)
-    (store! (field (field definition spec) name) "write_text_file")
-    (store! (field (field definition spec) description)
-            "Create or replace a workspace-relative text file, up to one MiB.")
-    (store! (field (field definition spec) input-schema)
-            (file-tool-schema allocator true))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (Destructive))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 10000)
-    (store! (field definition implementation) implementation)
+    (set! (.root implementation) root)
+    (set! (.name (.spec definition)) "write_text_file")
+    (set! (.description (.spec definition)) "Create or replace a workspace-relative text file, up to one MiB.")
+    (set! (.input-schema (.spec definition)) (file-tool-schema allocator true))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (Destructive))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 10000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn edit-text-file-schema [(allocator (ptr Allocator))] (-> Json)
@@ -573,17 +569,16 @@
                                  (root (slice u8))] (-> ToolDefinition)
   (let [definition (alloc/stack ToolDefinition)
         implementation (box allocator EditTextFileTool (zeroed EditTextFileTool))]
-    (store! (field implementation root) root)
-    (store! (field (field definition spec) name) "edit_text_file")
-    (store! (field (field definition spec) description)
-            "Replace one exact, unique text block in an existing workspace-relative file. Prefer this over rewriting the whole file.")
-    (store! (field (field definition spec) input-schema)
-            (edit-text-file-schema allocator))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (Destructive))
-    (store! (field (field definition spec) idempotent) false)
-    (store! (field (field definition spec) timeout-ms) 10000)
-    (store! (field definition implementation) implementation)
+    (set! (.root implementation) root)
+    (set! (.name (.spec definition)) "edit_text_file")
+    (set! (.description (.spec definition))
+          "Replace one exact, unique text block in an existing workspace-relative file. Prefer this over rewriting the whole file.")
+    (set! (.input-schema (.spec definition)) (edit-text-file-schema allocator))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (Destructive))
+    (set! (.idempotent (.spec definition)) false)
+    (set! (.timeout-ms (.spec definition)) 10000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn filesystem-path-definition [(allocator (ptr Allocator))
@@ -593,21 +588,20 @@
                                   (effect ToolEffect)
                                   (implementation (dyn ToolImplementation))] (-> ToolDefinition)
   (let [definition (alloc/stack ToolDefinition)]
-    (store! (field (field definition spec) name) name)
-    (store! (field (field definition spec) description) description)
-    (store! (field (field definition spec) input-schema)
-            (file-tool-schema allocator false))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) effect)
-    (store! (field (field definition spec) idempotent) false)
-    (store! (field (field definition spec) timeout-ms) 10000)
-    (store! (field definition implementation) implementation)
+    (set! (.name (.spec definition)) name)
+    (set! (.description (.spec definition)) description)
+    (set! (.input-schema (.spec definition)) (file-tool-schema allocator false))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) effect)
+    (set! (.idempotent (.spec definition)) false)
+    (set! (.timeout-ms (.spec definition)) 10000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn create-directory-definition [(allocator (ptr Allocator))
                                    (root (slice u8))] (-> ToolDefinition)
   (let [implementation (box allocator CreateDirectoryTool (zeroed CreateDirectoryTool))]
-    (store! (field implementation root) root)
+    (set! (.root implementation) root)
     (filesystem-path-definition allocator
                                 root
                                 "create_directory"
@@ -618,7 +612,7 @@
 (defn delete-file-definition [(allocator (ptr Allocator))
                               (root (slice u8))] (-> ToolDefinition)
   (let [implementation (box allocator DeleteFileTool (zeroed DeleteFileTool))]
-    (store! (field implementation root) root)
+    (set! (.root implementation) root)
     (filesystem-path-definition allocator
                                 root
                                 "delete_file"
@@ -629,7 +623,7 @@
 (defn remove-directory-definition [(allocator (ptr Allocator))
                                    (root (slice u8))] (-> ToolDefinition)
   (let [implementation (box allocator RemoveDirectoryTool (zeroed RemoveDirectoryTool))]
-    (store! (field implementation root) root)
+    (set! (.root implementation) root)
     (filesystem-path-definition allocator
                                 root
                                 "remove_directory"

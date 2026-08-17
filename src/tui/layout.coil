@@ -23,10 +23,10 @@
 
 (defn layout-options [(width i64) (unicode bool) (expanded bool)] (-> LayoutOptions)
   (let [options (alloc/stack LayoutOptions)]
-    (store! (field options width) (if (< width 12) 12 width))
-    (store! (field options unicode) unicode)
-    (store! (field options compact) false)
-    (store! (field options expanded) expanded)
+    (set! (.width options) (if (< width 12) 12 width))
+    (set! (.unicode options) unicode)
+    (set! (.compact options) false)
+    (set! (.expanded options) expanded)
     (load options)))
 
 (defn layout-options-profile [(width i64)
@@ -34,7 +34,7 @@
                               (compact bool)
                               (expanded bool)] (-> LayoutOptions)
   (let [(mut options) (layout-options width unicode expanded)]
-    (store! (field options compact) compact)
+    (set! (.compact options) compact)
     (load options)))
 
 (defn layout-state-word [(state PresentationState)] (-> (slice u8))
@@ -76,7 +76,7 @@
                   (or (<= (load end) 0)
                       (not (utf8-continuation? (cast i64 (slice-get [u8] text (load end)))))))
               (break)
-              (store! end (- (load end) 1))))
+              (set! end (- (load end) 1))))
     (if (> count 512)
         (let [(mut output) (sb-new allocator)]
           (sb-push-str! (mut output) (subslice [u8] text 0 (load end)))
@@ -101,7 +101,7 @@
         (mut at) from]
     (loop (if (or (>= (load at) n) (= (slice-get [u8] text (load at)) (cast u8 10)))
               (break)
-              (store! at (+ (load at) 1))))
+              (set! at (+ (load at) 1))))
     (load at)))
 
 (defn layout-fence-at? [(text (slice u8)) (at i64)] (-> bool)
@@ -153,8 +153,8 @@
                                        (or (= (load scan) code-start)
                                            (= (slice-get [u8] body (- (load scan) 1))
                                               (cast u8 10))))
-                                  (store! close (load scan))
-                                  (store! scan (+ (layout-line-end body (load scan)) 1)))))
+                                  (set! close (load scan))
+                                  (set! scan (+ (layout-line-end body (load scan)) 1)))))
                     (let [code-end
                             (if (>= (load close) 0)
                                 (if (> (load close) code-start) (- (load close) 1) code-start)
@@ -163,13 +163,13 @@
                                         (view-code info
                                                    (subslice [u8] body code-start code-end)
                                                    continuation))
-                      (store! opened true)
-                      (store! at
-                              (if (>= (load close) 0)
-                                  (+ (layout-line-end body (load close)) 1)
-                                  (+ n 1)))
-                      (store! prose-start (load at))))
-                  (store! at (+ (load at) 1)))))
+                      (set! opened true)
+                      (set! at
+                            (if (>= (load close) 0)
+                                (+ (layout-line-end body (load close)) 1)
+                                (+ n 1)))
+                      (set! prose-start (load at))))
+                  (set! at (+ (load at) 1)))))
     ;; Whatever prose is left after the last fence.
     (when (< (load prose-start) n)
       (view-stack-push! root
@@ -188,31 +188,29 @@
                          (root (ptr ViewNode))
                          (item (ref PresentationBlock))
                          (options (ref LayoutOptions))] (-> i64)
-  (let [unicode (load (field options unicode))]
-    (match (load (field item kind))
+  (let [unicode (.unicode options)]
+    (match (.kind item)
       (UserBlock []
                  (view-stack-push! root
                                    (view-flow (RolePrimary)
                                               (if unicode "❯ " "> ")
                                               "  "
-                                              (load (field item body)))))
+                                              (.body item))))
       ;; A model turn that produced only tool calls still opens an assistant block
       ;; on `model.request.started` and never receives text. Rendering it emits a
       ;; bare bullet above every tool group, so an empty turn that has settled
       ;; contributes no rows at all. An unsettled one still shows progress, and a
       ;; failed one still shows its bullet so the failure is not silent.
       (AssistantBlock []
-                      (let [body (load (field item body))
+                      (let [body (.body item)
                             empty (= (slice-len [u8] body) 0)
                             unsettled
-                              (match-else (load (field item state))
-                                          (PresentationPending [] true)
-                                          (PresentationRunning [] true)
-                                          (_ false))
+                              (match (.state item)
+                                     (PresentationPending [] true)
+                                     (PresentationRunning [] true)
+                                     (_ false))
                             failed
-                              (match-else (load (field item state))
-                                          (PresentationSucceeded [] false)
-                                          (_ true))]
+                              (match (.state item) (PresentationSucceeded [] false) (_ true))]
                         (cond (and empty (and (not unsettled) (not failed))) 0
                               (and empty unsettled)
                                 (view-stack-push! root
@@ -230,39 +228,37 @@
       (ToolBlock []
                  (let [tool
                          (present-tool allocator
-                                       (load (field item title))
-                                       (load (field item arguments))
-                                       (load (field item result)))
+                                       (.title item)
+                                       (.arguments item)
+                                       (.result item))
                        heading
                          (layout-join allocator
-                                      (load (field tool label))
-                                      (load (field tool subject)))
+                                      (.label tool)
+                                      (.subject tool))
                        ;; The presenter's summary wins when it has one. A bash
                        ;; call that exits non-zero is a SUCCESSFUL tool call, so
                        ;; the lifecycle state says "done" while the thing the
                        ;; user cares about is "exit 1".
                        state
-                         (if (> (slice-len [u8] (load (field tool summary))) 0)
-                             (load (field tool summary))
-                             (layout-state-word (load (field item state))))
+                         (if (> (slice-len [u8] (.summary tool)) 0)
+                             (.summary tool)
+                             (layout-state-word (.state item)))
                        show-state
-                         (not (and (load (field options compact))
-                                   (match-else (load (field item state))
-                                               (PresentationSucceeded [] true)
-                                               (_ false))))
+                         (not (and (.compact options)
+                                   (match (.state item) (PresentationSucceeded [] true) (_ false))))
                        suffix
                          (if show-state
                              (layout-join allocator "" state)
                              "")]
                    (view-stack-push! root
-                                     (view-decorated-flow (layout-state-role (load (field item state)))
+                                     (view-decorated-flow (layout-state-role (.state item))
                                                           (if unicode "  ⏺ " "  tool: ")
                                                           (RoleMuted)
                                                           "    "
                                                           heading
                                                           (RolePrimary)
                                                           suffix
-                                                          (layout-state-role (load (field item state)))))
+                                                          (layout-state-role (.state item))))
                    ;; Why it failed, if it did. A row reading "Read README.md
                    ;; failed" with no reason is the single least useful thing the
                    ;; transcript can say -- it looks like the file is at fault
@@ -294,16 +290,16 @@
                                                   "      "
                                                   (layout-diagnostic-text allocator
                                                                           (load (field item arguments)))))
-                     (match-else (load (field item result))
-                                 (JsonNull [] 0)
-                                 (_ (do
-                                      (view-stack-push! root
-                                                        (view-flow (RoleMuted)
-                                                                   "    result: "
-                                                                   "      "
-                                                                   (layout-diagnostic-text allocator
-                                                                                           (load (field item result)))))
-                                      0)))
+                     (match (load (field item result))
+                            (JsonNull [] 0)
+                            (_ (do
+                                 (view-stack-push! root
+                                                   (view-flow (RoleMuted)
+                                                              "    result: "
+                                                              "      "
+                                                              (layout-diagnostic-text allocator
+                                                                                      (load (field item result)))))
+                                 0)))
                      (when (> (slice-len [u8] (load (field item detail))) 0)
                        (view-stack-push! root
                                          (view-flow (RoleMuted)
@@ -314,26 +310,26 @@
                      0)))
       (AgentBlock []
                   (view-stack-push! root
-                                    (view-flow (layout-state-role (load (field item state)))
+                                    (view-flow (layout-state-role (.state item))
                                                (if unicode "    • " "    - ")
                                                "      "
                                                (layout-join allocator
-                                                            (load (field item id))
-                                                            (layout-state-word (load (field item state)))))))
+                                                            (.id item)
+                                                            (layout-state-word (.state item))))))
       (WorkflowBlock []
                      (view-stack-push! root
-                                       (view-flow (layout-state-role (load (field item state)))
+                                       (view-flow (layout-state-role (.state item))
                                                   (if unicode "    • " "    - ")
                                                   "      "
                                                   (layout-join allocator
-                                                               (load (field item body))
-                                                               (layout-state-word (load (field item state)))))))
+                                                               (.body item)
+                                                               (layout-state-word (.state item))))))
       (ErrorBlock []
                   (view-stack-push! root
                                     (view-flow (RoleFailure)
                                                "  error: "
                                                "    "
-                                               (load (field item detail))))))
+                                               (.detail item)))))
     0))
 
 (defn layout-model-range-view [(allocator (ptr Allocator))
@@ -342,47 +338,43 @@
                                (end i64)
                                (options (ref LayoutOptions))] (-> ViewNode)
   (let [(mut root) (view-stack allocator 0)
-        count (al-len [PresentationBlock] (load (field model blocks)))
+        count (al-len [PresentationBlock] (.blocks model))
         limit (if (> end count) count end)
         (mut at) (if (< start 0) 0 start)]
     (loop (if (>= (load at) limit)
               (break)
               (let [item
                       (al-get [PresentationBlock]
-                              (load (field model blocks))
+                              (.blocks model)
                               (load at))
                     previous-kind
                       (if (> (load at) 0)
                           (let [previous
                                   (al-get [PresentationBlock]
-                                          (load (field model blocks))
+                                          (.blocks model)
                                           (- (load at) 1))]
-                            (load (field previous kind)))
+                            (.kind previous))
                           (ErrorBlock))]
-                (match-else (load (field item kind))
-                            (AgentBlock []
-                                        (when (match-else previous-kind
-                                                          (AgentBlock [] false)
-                                                          (_ true))
-                                          (view-stack-push! (mut root)
-                                                            (view-flow (RoleMuted)
-                                                                       "  "
-                                                                       "  "
-                                                                       "Subagents"))
-                                          0))
-                            (WorkflowBlock []
-                                           (when (match-else previous-kind
-                                                             (WorkflowBlock [] false)
-                                                             (_ true))
-                                             (view-stack-push! (mut root)
-                                                               (view-flow (RoleMuted)
-                                                                          "  "
-                                                                          "  "
-                                                                          "Workflow"))
-                                             0))
-                            (_ 0))
+                (match (.kind item)
+                       (AgentBlock []
+                                   (when (match previous-kind (AgentBlock [] false) (_ true))
+                                     (view-stack-push! (mut root)
+                                                       (view-flow (RoleMuted)
+                                                                  "  "
+                                                                  "  "
+                                                                  "Subagents"))
+                                     0))
+                       (WorkflowBlock []
+                                      (when (match previous-kind (WorkflowBlock [] false) (_ true))
+                                        (view-stack-push! (mut root)
+                                                          (view-flow (RoleMuted)
+                                                                     "  "
+                                                                     "  "
+                                                                     "Workflow"))
+                                        0))
+                       (_ 0))
                 (layout-view-push! allocator (mut root) item options)
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     (load root)))
 
 (defn layout-model-range [(allocator (ptr Allocator))
@@ -391,5 +383,5 @@
                           (end i64)
                           (options (ref LayoutOptions))] (-> Frame)
   (let [view (terminal-view (layout-model-range-view allocator model start end options))
-        laid-out (view-layout allocator view (load (field options width)))]
-    (load (field laid-out frame))))
+        laid-out (view-layout allocator view (.width options))]
+    (.frame laid-out)))

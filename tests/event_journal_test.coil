@@ -18,7 +18,7 @@
 (defn concurrent-event-worker [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr ConcurrentEventJob) opaque)
         (mut i) 0]
-    (loop (if (>= (load i) (load (field job count)))
+    (loop (if (>= (load i) (.count job))
               (break)
               (do
                 (emit-event (load (field job emitter))
@@ -30,7 +30,7 @@
                             "test"
                             "test"
                             (JsonNull))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (cast (ptr i8) 0)))
 
 (deftest persists-ordered-events-and-recovers-past-a-torn-tail
@@ -77,7 +77,7 @@
              (assert-eq (al-len [Json] (load (field recovery events))) 2)
              (assert (match (json-string-at (al-get [Json] (load (field recovery events)) 1)
                                             "event")
-                       (Some [value] (str-eq value "run.completed"))
+                       (Some [value] (= value "run.completed"))
                        (None [] false))))))
 
 (deftest rejects-corruption-in-a-complete-journal-record
@@ -86,8 +86,7 @@
            (fs/write-file allocator path "not-json\n")
            (let [recovery (event-journal-recover allocator path)]
              (assert (not (load (field recovery ok))))
-             (assert (str-eq (load (field recovery error))
-                             "event journal contains invalid JSON")))))
+             (assert (= (load (field recovery error)) "event journal contains invalid JSON")))))
 
 (deftest opens-the-same-path-without-process-ownership
          (let [allocator (malloc-allocator)

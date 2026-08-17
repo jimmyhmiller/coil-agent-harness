@@ -21,15 +21,15 @@
                      (let [choice (model-catalog-at (mut catalog) (load i))
                            provider (load (field choice provider))
                            model (load (field choice model))]
-                       (if (str-eq provider "auto")
+                       (if (= provider "auto")
                            ;; Automatic selection requires the model to be auto too;
                            ;; the catalog's own auto row must satisfy that rule.
-                           (assert (str-eq model "auto"))
+                           (assert (= model "auto"))
                            (do
                              (assert (route-known-provider? provider))
                              ;; A pinned provider needs a real model, never "auto".
                              (assert (> (slice-len [u8] model) 0))
-                             (assert (not (str-eq model "auto")))))
+                             (assert (not (= model "auto")))))
                        (store! i (+ (load i) 1)))))))
 
 (deftest catalogued-names-are-unique
@@ -67,7 +67,7 @@
                      (break)
                      (let [choice (model-catalog-at (mut catalog) (load i))]
                        (when (not (load (field choice effort)))
-                         (assert (str-eq (load (field choice default-effort)) "none"))
+                         (assert (= (load (field choice default-effort)) "none"))
                          (store! checked (+ (load checked) 1))
                          0)
                        (store! i (+ (load i) 1)))))
@@ -81,8 +81,7 @@
                      (let [choice (alloc/stack EffortChoice)]
                        (store! choice (effort-choice-at (load i)))
                        (assert-eq (effort-index (load (field choice effort))) (load i))
-                       (assert (str-eq (load (field choice effort))
-                                       (load (field choice label))))
+                       (assert (= (load (field choice effort)) (load (field choice label))))
                        (store! i (+ (load i) 1)))))))
 
 ;; Absence retains the old default, while provider-specific and future values
@@ -106,7 +105,6 @@
                                shown (alloc/stack EffortChoice)]
                            (assert (and (>= at 0) (< at EFFORT_CHOICE_COUNT)))
                            (store! shown (effort-choice-at at))
-                           (assert (str-eq (load (field shown effort))
-                                           (load (field choice default-effort)))))
+                           (assert (= (load (field shown effort)) (load (field choice default-effort)))))
                          0)
                        (store! i (+ (load i) 1)))))))

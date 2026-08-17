@@ -32,8 +32,8 @@
                          (flow (ptr ViewFlow))
                          (width i64)] (-> i64)
   (let [(mut builder) (sb-new (load (field frame allocator)))
-        (mut cells) (view-layout-prefix! (mut builder) (load (field flow first-prefix)))
-        text (load (field flow text))
+        (mut cells) (view-layout-prefix! (mut builder) (.first-prefix flow))
+        text (.text flow)
         (mut at) 0
         count (slice-len [u8] text)]
     (loop (if (>= (load at) count)
@@ -122,7 +122,7 @@
     (frame-push-line! frame
                       (sb-finish! (mut builder))
                       (load cells)
-                      (load (field flow role)))))
+                      (.role flow))))
 
 ;; Code rows are laid out one source line per frame row, highlighted, and clipped
 ;; rather than wrapped. Wrapping code re-flows it into something that is no longer
@@ -133,13 +133,13 @@
                          (width i64)] (-> i64)
   (let [allocator (load (field frame allocator))
         language (alloc/stack SyntaxLanguage)
-        code (load (field value code))
-        prefix (load (field value prefix))
+        code (.code value)
+        prefix (.prefix value)
         prefix-cells (view-menu-cells prefix)
         n (slice-len [u8] code)
         (mut start) 0
         (mut at) 0]
-    (store! language (syntax-language (load (field value language))))
+    (set! language (syntax-language (.language value)))
     (loop (if (> (load at) n)
               (break)
               (if (or (= (load at) n)
@@ -158,11 +158,11 @@
                                 (al-push! [FrameSpan]
                                           (mut spans)
                                           (al-get [FrameSpan] (load highlighted) (load i)))
-                                (store! i (+ (load i) 1)))))
+                                (set! i (+ (load i) 1)))))
                     (frame-push-spans! frame (mut spans))
-                    (store! at (+ (load at) 1))
-                    (store! start (load at)))
-                  (store! at (+ (load at) 1)))))
+                    (set! at (+ (load at) 1))
+                    (set! start (load at)))
+                  (set! at (+ (load at) 1)))))
     0))
 
 (defn view-layout-node! [(frame (ptr Frame))
@@ -171,29 +171,26 @@
   (match node
     (ViewCodeNode [code]
                   (let [value (alloc/stack ViewCode)]
-                    (store! value code)
+                    (set! value code)
                     (view-layout-code! frame value width)))
     (ViewFlowNode [flow]
                   (let [flow-value (alloc/stack ViewFlow)]
-                    (store! flow-value flow)
+                    (set! flow-value flow)
                     (view-layout-flow! frame flow-value width)))
     (ViewDecoratedFlowNode [decorated]
                            (let [value (alloc/stack ViewDecoratedFlow)
                                  flow (alloc/stack ViewFlow)
                                  before
                                    (al-len [FrameLine]
-                                           (load (field frame lines)))
+                                           (.lines frame))
                                  (mut text) (sb-new (load (field frame allocator)))]
-                             (store! value decorated)
-                             (sb-push-str! (mut text) (load (field value body)))
-                             (sb-push-str! (mut text) (load (field value suffix)))
-                             (store! (field flow role)
-                                     (load (field value line-role)))
-                             (store! (field flow first-prefix)
-                                     (load (field value first-prefix)))
-                             (store! (field flow continuation-prefix)
-                                     (load (field value continuation-prefix)))
-                             (store! (field flow text) (sb-finish! (mut text)))
+                             (set! value decorated)
+                             (sb-push-str! (mut text) (.body value))
+                             (sb-push-str! (mut text) (.suffix value))
+                             (set! (.role flow) (.line-role value))
+                             (set! (.first-prefix flow) (.first-prefix value))
+                             (set! (.continuation-prefix flow) (.continuation-prefix value))
+                             (set! (.text flow) (sb-finish! (mut text)))
                              (view-layout-flow! frame flow width)
                              (when (= (al-len [FrameLine]
                                               (load (field frame lines)))
@@ -229,7 +226,7 @@
                                 (break)
                                 (do
                                   (frame-push-line! frame "" 0 (RolePrimary))
-                                  (store! i (+ (load i) 1)))))
+                                  (set! i (+ (load i) 1)))))
                       0))
     (ViewTailNode [rows child]
                   (let [(mut full) (frame-new (load (field frame allocator)))]
@@ -241,16 +238,16 @@
                           (mut at) 0
                           count
                             (al-len [FrameLine]
-                                    (load (field bounded lines)))]
+                                    (.lines bounded))]
                       (loop (if (>= (load at) count)
                                 (break)
                                 (do
                                   (al-push! [FrameLine]
-                                            (mut (field frame lines))
+                                            (mut (.lines frame))
                                             (al-get [FrameLine]
-                                                    (load (field bounded lines))
+                                                    (.lines bounded)
                                                     (load at)))
-                                  (store! at (+ (load at) 1)))))
+                                  (set! at (+ (load at) 1)))))
                       0)))
     (ViewStackNode [gap children]
                    (let [(mut at) 0
@@ -266,17 +263,16 @@
                                                             (load children)
                                                             (load at))
                                                     width)
-                                 (store! at (+ (load at) 1)))))
+                                 (set! at (+ (load at) 1)))))
                      0))
     (ViewInputNode [input]
                    (let [input-value (alloc/stack ViewInput)
                          flow (alloc/stack ViewFlow)]
-                     (store! input-value input)
-                     (store! (field flow role) (RolePrimary))
-                     (store! (field flow first-prefix)
-                             (load (field input-value prompt)))
-                     (store! (field flow continuation-prefix) "  ")
-                     (store! (field flow text) (load (field input-value text)))
+                     (set! input-value input)
+                     (set! (.role flow) (RolePrimary))
+                     (set! (.first-prefix flow) (.prompt input-value))
+                     (set! (.continuation-prefix flow) "  ")
+                     (set! (.text flow) (.text input-value))
                      (view-layout-flow! frame flow width)))))
 
 (defn view-layout [(allocator (ptr Allocator))
@@ -284,11 +280,11 @@
                    (width i64)] (-> ViewLayout)
   (let [result (alloc/stack ViewLayout)
         (mut frame) (frame-new allocator)]
-    (view-layout-node! (mut frame) (load (field view root)) width)
-    (store! (field result frame) (load frame))
-    (store! (field result cursor-present) false)
-    (store! (field result cursor-row) 0)
-    (store! (field result cursor-column) 0)
+    (view-layout-node! (mut frame) (.root view) width)
+    (set! (.frame result) (load frame))
+    (set! (.cursor-present result) false)
+    (set! (.cursor-row result) 0)
+    (set! (.cursor-column result) 0)
     (load result)))
 
 (defn view-layout-bound-input [(allocator (ptr Allocator))
@@ -296,15 +292,15 @@
                                (row-budget i64)] (-> ViewLayout)
   (let [full-value (alloc/stack ViewLayout)
         source (alloc/stack Frame)]
-    (store! full-value full)
-    (store! source (load (field full-value frame)))
-    (let [count (al-len [FrameLine] (load (field source lines)))
+    (set! full-value full)
+    (set! source (.frame full-value))
+    (let [count (al-len [FrameLine] (.lines source))
           limit (if (< row-budget 3) 3 row-budget)]
       (if (<= count limit)
           (load full-value)
           (let [result (alloc/stack ViewLayout)
                 (mut frame) (frame-new allocator)
-                cursor-row (load (field full-value cursor-row))
+                cursor-row (.cursor-row full-value)
                 start
                   (if (>= cursor-row (- limit 1))
                       (- cursor-row (- limit 2))
@@ -331,29 +327,27 @@
                       (do
                         (let [line
                                 (al-get [FrameLine]
-                                        (load (field source lines))
+                                        (.lines source)
                                         (load at))]
                           (frame-push-line! (mut frame)
-                                            (load (field line text))
-                                            (load (field line cells))
-                                            (load (field line role)))
+                                            (.text line)
+                                            (.cells line)
+                                            (.role line))
                           (let [slot
                                   (index (load (field (field frame lines) data))
                                          (- (al-len [FrameLine]
-                                                    (load (field frame lines)))
+                                                    (.lines frame))
                                             1))]
-                            (store! (field slot spans)
-                                    (load (field line spans))))
+                            (set! (.spans slot) (.spans line)))
                           0)
-                        (store! at (+ (load at) 1)))))
+                        (set! at (+ (load at) 1)))))
             (when can-show-trailing
               (frame-push-line! (mut frame) "  … more input" 14 (RoleMuted))
               0)
-            (store! (field result frame) (load frame))
-            (store! (field result cursor-present) true)
-            (store! (field result cursor-row) (+ leading (- cursor-row start)))
-            (store! (field result cursor-column)
-                    (load (field full-value cursor-column)))
+            (set! (.frame result) (load frame))
+            (set! (.cursor-present result) true)
+            (set! (.cursor-row result) (+ leading (- cursor-row start)))
+            (set! (.cursor-column result) (.cursor-column full-value))
             (load result))))))
 
 ;; A suffix was selected before layout, so omitted input must be represented even
@@ -365,9 +359,9 @@
   (let [source-value (alloc/stack ViewLayout)
         result (alloc/stack ViewLayout)
         limit (if (< row-budget 3) 3 row-budget)]
-    (store! source-value source)
-    (let [source-frame (mut (field source-value frame))
-          count (al-len [FrameLine] (load (field source-frame lines)))
+    (set! source-value source)
+    (let [source-frame (mut (.frame source-value))
+          count (al-len [FrameLine] (.lines source-frame))
           kept (if (> limit 1) (- limit 1) 0)
           start (if (> count kept) (- count kept) 0)
           (mut frame) (frame-new allocator)
@@ -378,22 +372,22 @@
                 (do
                   (let [line
                           (al-get [FrameLine]
-                                  (load (field source-frame lines))
+                                  (.lines source-frame)
                                   (load at))]
                     (frame-push-line! (mut frame)
-                                      (load (field line text))
-                                      (load (field line cells))
-                                      (load (field line role)))
+                                      (.text line)
+                                      (.cells line)
+                                      (.role line))
                     (let [slot
                             (index (load (field (field frame lines) data))
-                                   (- (al-len [FrameLine] (load (field frame lines))) 1))]
-                      (store! (field slot spans) (load (field line spans))))
+                                   (- (al-len [FrameLine] (.lines frame)) 1))]
+                      (set! (.spans slot) (.spans line)))
                     0)
-                  (store! at (+ (load at) 1)))))
-      (store! (field result frame) (load frame))
-      (store! (field result cursor-present) true)
-      (store! (field result cursor-row) (- count start))
-      (store! (field result cursor-column) (load (field source-value cursor-column)))
+                  (set! at (+ (load at) 1)))))
+      (set! (.frame result) (load frame))
+      (set! (.cursor-present result) true)
+      (set! (.cursor-row result) (- count start))
+      (set! (.cursor-column result) (.cursor-column source-value))
       (load result))))
 
 (defn view-layout-tail-start [(text (slice u8))
@@ -409,7 +403,7 @@
     (loop (if (or (>= (load start) count)
                   (not (utf8-continuation? (cast i64 (slice-get [u8] text (load start))))))
               (break)
-              (store! start (+ (load start) 1))))
+              (set! start (+ (load start) 1))))
     (load start)))
 
 ;; ---------------------------------------------------------------------------
@@ -446,24 +440,24 @@
         (loop (if (or (load done) (>= (load at) count))
                   (break)
                   (let [scalar (utf8-decode text (load at))
-                        valid (load (field scalar valid))
+                        valid (.valid scalar)
                         cell-width
                           (if valid
-                              (unicode-cell-width (load (field scalar codepoint)))
+                              (unicode-cell-width (.codepoint scalar))
                               -1)]
                     (if (or (not valid)
                             (or (< cell-width 0)
                                 (> (+ (load used) cell-width) room)))
-                        (store! done true)
+                        (set! done true)
                         (do
                           (sb-push-str! (mut out)
                                         (subslice [u8]
                                                   text
                                                   (load at)
                                                   (+ (load at)
-                                                     (load (field scalar length)))))
-                          (store! used (+ (load used) cell-width))
-                          (store! at (+ (load at) (load (field scalar length)))))))))
+                                                     (.length scalar))))
+                          (set! used (+ (load used) cell-width))
+                          (set! at (+ (load at) (.length scalar))))))))
         (sb-push-str! (mut out) "…")
         (sb-finish! (mut out)))))
 
@@ -478,7 +472,7 @@
                   (break)
                   (do
                     (al-push! [i64] (mut digits) (% (load remaining) 10))
-                    (store! remaining (/ (load remaining) 10)))))
+                    (set! remaining (/ (load remaining) 10)))))
         (let [n (al-len [i64] (load digits))
               (mut i) 0]
           (loop (if (>= (load i) n)
@@ -490,7 +484,7 @@
                                               (al-get [i64]
                                                       (load digits)
                                                       (- (- n 1) (load i))))))
-                      (store! i (+ (load i) 1))))))
+                      (set! i (+ (load i) 1))))))
         (sb-finish! (mut buffer)))))
 
 (defn view-menu-overflow-text [(allocator (ptr Allocator)) (overflow i64)] (-> (slice u8))
@@ -509,7 +503,7 @@
     (sb-push-str! (mut out) text)
     (loop (if (>= (load i) target)
               (break)
-              (do (sb-push-byte! (mut out) (cast u8 32)) (store! i (+ (load i) 1)))))
+              (do (sb-push-byte! (mut out) (cast u8 32)) (set! i (+ (load i) 1)))))
     (sb-finish! (mut out))))
 
 ;; Append the menu to a laid-out composer. The selected row is marked with a
@@ -529,22 +523,22 @@
         (loop (if (>= (load at) count)
                   (break)
                   (let [entry (al-get [ViewMenuEntry] (load menu) (load at))
-                        cells (view-menu-cells (load (field entry label)))]
+                        cells (view-menu-cells (.label entry))]
                     (when (> cells (load label-width)) (store! label-width cells) 0)
-                    (store! at (+ (load at) 1)))))
-        (store! at 0)
+                    (set! at (+ (load at) 1)))))
+        (set! at 0)
         (loop (if (>= (load at) count)
                   (break)
                   (let [entry (al-get [ViewMenuEntry] (load menu) (load at))
-                        selected (load (field entry selected))
+                        selected (.selected entry)
                         marker (if selected "❯ " "  ")
                         marker-cells 2
                         label
                           (view-menu-pad allocator
-                                         (load (field entry label))
+                                         (.label entry)
                                          (+ (load label-width) 2))
                         label-role (if selected (RolePrimary) (RoleMuted))
-                        detail (load (field entry detail))
+                        detail (.detail entry)
                         room (- width (+ marker-cells (view-menu-cells label)))
                         (mut spans) (al-new [FrameSpan] allocator)]
                     (al-push! [FrameSpan]
@@ -560,7 +554,7 @@
                                   (frame-span shown (view-menu-cells shown) (RoleMuted))))
                       0)
                     (frame-push-spans! frame (mut spans))
-                    (store! at (+ (load at) 1)))))
+                    (set! at (+ (load at) 1)))))
         (when (> overflow 0)
           (let [(mut spans) (al-new [FrameSpan] allocator)
                 text (view-menu-overflow-text allocator overflow)]
@@ -581,30 +575,30 @@
         result (alloc/stack ViewLayout)
         (mut full-frame) (frame-new allocator)
         (mut prefix-frame) (frame-new allocator)]
-    (store! input-value input)
-    (let [text (load (field input-value text))
-          cursor-offset (load (field input-value cursor-offset))
+    (set! input-value input)
+    (let [text (.text input-value)
+          cursor-offset (.cursor-offset input-value)
           cursor-at-end (= cursor-offset (slice-len [u8] text))
           tail-start
             (if cursor-at-end
                 (view-layout-tail-start text
                                         width
-                                        (load (field input-value row-budget)))
+                                        (.row-budget input-value))
                 0)
           visible-text (subslice [u8] text tail-start (slice-len [u8] text))]
-      (store! (field full-flow role) (RolePrimary))
-      (store! (field full-flow first-prefix) (load (field input-value prompt)))
-      (store! (field full-flow continuation-prefix) "  ")
-      (store! (field full-flow text) visible-text)
+      (set! (.role full-flow) (RolePrimary))
+      (set! (.first-prefix full-flow) (.prompt input-value))
+      (set! (.continuation-prefix full-flow) "  ")
+      (set! (.text full-flow) visible-text)
       (when (> tail-start 0)
         (store! (field full-flow first-prefix) "  ")
         0)
-      (store! prefix-flow (load full-flow))
-      (store! (field prefix-flow text)
-              (subslice [u8]
-                        visible-text
-                        0
-                        (- cursor-offset tail-start)))
+      (set! prefix-flow (load full-flow))
+      (set! (.text prefix-flow)
+            (subslice [u8]
+                      visible-text
+                      0
+                      (- cursor-offset tail-start)))
       (view-layout-flow! (mut full-frame) full-flow width)
       ;; Appending at the end is overwhelmingly the common editing operation. The
       ;; full layout already contains that cursor position; laying out the entire
@@ -616,30 +610,30 @@
                   (do
                     (view-layout-flow! (mut prefix-frame) prefix-flow width)
                     (mut prefix-frame)))
-            prefix-count (al-len [FrameLine] (load (field cursor-frame lines)))
+            prefix-count (al-len [FrameLine] (.lines cursor-frame))
             cursor-line
               (al-get [FrameLine]
-                      (load (field cursor-frame lines))
+                      (.lines cursor-frame)
                       (- prefix-count 1))]
-        (store! (field result frame) (load full-frame))
-        (store! (field result cursor-present) true)
-        (store! (field result cursor-row) (- prefix-count 1))
-        (store! (field result cursor-column) (load (field cursor-line cells)))
+        (set! (.frame result) (load full-frame))
+        (set! (.cursor-present result) true)
+        (set! (.cursor-row result) (- prefix-count 1))
+        (set! (.cursor-column result) (.cells cursor-line))
         ;; The composer is bounded first, then the menu is appended. Bounding the
         ;; two together would let a long prompt scroll the menu out of the region
         ;; it is supposed to be attached to.
         (let [bounded (alloc/stack ViewLayout)]
-          (store! bounded
-                  (if (> tail-start 0)
-                      (view-layout-omitted-tail allocator
-                                                (load result)
-                                                (load (field input-value row-budget)))
-                      (view-layout-bound-input allocator
-                                               (load result)
-                                               (load (field input-value row-budget)))))
+          (set! bounded
+                (if (> tail-start 0)
+                    (view-layout-omitted-tail allocator
+                                              (load result)
+                                              (.row-budget input-value))
+                    (view-layout-bound-input allocator
+                                             (load result)
+                                             (.row-budget input-value))))
           (view-layout-append-menu! allocator
                                     bounded
                                     (load (field input-value menu))
-                                    (load (field input-value menu-overflow))
+                                    (.menu-overflow input-value)
                                     width)
           (load bounded))))))

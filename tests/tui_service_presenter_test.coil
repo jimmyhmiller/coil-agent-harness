@@ -12,7 +12,7 @@
                          (node ViewNode)] (-> (slice u8))
   (let [view (terminal-view node)
         (mut laid-out) (view-layout allocator view 80)]
-    (render-frame-plain allocator (mut (field laid-out frame)))))
+    (render-frame-plain allocator (mut (.frame laid-out)))))
 
 (deftest presents-run-status-without-wire-json
          (let [allocator (malloc-allocator)
@@ -27,7 +27,7 @@
                                                         200
                                                         (load body)
                                                         true))]
-             (assert (str-eq text "● run-1  running\n  claude/sonnet\n")))))
+             (assert (= text "● run-1  running\n  claude/sonnet\n")))))
 
 (deftest presents-a-workflow-as-a-readable-dependency-tree
          (let [allocator (malloc-allocator)
@@ -56,8 +56,8 @@
                                                              200
                                                              (load body)
                                                              true))]
-             (assert (str-eq text
-                             "● Workflow wf-1\n  ├─ plan  run-1  completed\n  └─ build  run-2  running\n      after run-1\n")))))
+             (assert (= text
+                        "● Workflow wf-1\n  ├─ plan  run-1  completed\n  └─ build  run-2  running\n      after run-1\n")))))
 
 (deftest presents-service-errors-as-human-messages
          (let [allocator (malloc-allocator)
@@ -70,5 +70,4 @@
                                                         404
                                                         (load body)
                                                         true))]
-             (assert (str-eq text
-                             "! run does not exist\n")))))
+             (assert (= text "! run does not exist\n")))))

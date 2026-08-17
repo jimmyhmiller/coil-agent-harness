@@ -23,22 +23,21 @@
               (break)
               (let [actual (atomic-cas maximum (load observed) candidate)]
                 (if (= actual (load observed))
-                    (store! done true)
-                    (store! observed actual)))))
+                    (set! done true)
+                    (set! observed actual)))))
     (atomic-load maximum)))
 
 (defn execute-probe [(probe (ptr ParallelProbe))
                      (call (ptr ToolCall))
                      (allocator (ptr Allocator))] (-> ToolResult)
   (let [active (+ (atomic-add (load (field probe active)) 1) 1)
-        (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+        (mut result) (tool-result-empty (.id call) (ToolSucceeded))]
     (update-maximum! (load (field probe maximum)) active)
     (sleep-ms 80)
     (atomic-sub (load (field probe active)) 1)
     ;; The executor must promote this call-arena-owned string before closing the
     ;; worker's region.
-    (store! (field result output)
-            (JsonString (json-copy-string allocator (load (field call id)))))
+    (set! (.output result) (JsonString (json-copy-string allocator (.id call))))
     (load result)))
 
 (impl ToolImplementation ParallelProbe
@@ -64,18 +63,18 @@
                                           "model-1")))
                      (atomic-store (load (field self valid-envelope)) 0)
                      0)
-                   (match-else (load (field event kind))
-                               (ToolCallProposed []
-                                                 (let [payload (load (field event payload))]
-                                                   (when (or (not (match (json-string-at payload "name")
-                                                                    (Some [name] (str-eq name "probe"))
-                                                                    (None [] false)))
-                                                             (not (match-else (json-get payload "arguments")
-                                                                              (JsonObject [keys values] true)
-                                                                              (_ false))))
-                                                     (atomic-store (load (field self valid-proposal)) 0)
-                                                     0)))
-                               (_ 0))
+                   (match (.kind event)
+                          (ToolCallProposed []
+                                            (let [payload (.payload event)]
+                                              (when (or (not (match (json-string-at payload "name")
+                                                               (Some [name] (str-eq name "probe"))
+                                                               (None [] false)))
+                                                        (not (match (json-get payload "arguments")
+                                                                    (JsonObject [keys values] true)
+                                                                    (_ false))))
+                                                (atomic-store (load (field self valid-proposal)) 0)
+                                                0)))
+                          (_ 0))
                    0)))
 
 (defn executor-tool [(allocator (ptr Allocator)) (probe (ptr ParallelProbe))] (-> ToolDefinition)
@@ -83,32 +82,32 @@
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
         definition (alloc/stack ToolDefinition)]
-    (store! (field (field definition spec) name) "probe")
-    (store! (field (field definition spec) description) "Parallelism probe")
-    (store! (field (field definition spec) input-schema) (load (field schema-result value)))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (ReadOnly))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 1000)
-    (store! (field definition implementation) probe)
+    (set! (.name (.spec definition)) "probe")
+    (set! (.description (.spec definition)) "Parallelism probe")
+    (set! (.input-schema (.spec definition)) (.value schema-result))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 1000)
+    (set! (.implementation definition) probe)
     (load definition)))
 
 (defn executor-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
   (let [call (alloc/stack ToolCall)]
-    (store! (field call id) id)
-    (store! (field call name) "probe")
-    (store! (field call arguments) (json-object allocator))
-    (store! (field call raw-arguments) "{}")
+    (set! (.id call) id)
+    (set! (.name call) "probe")
+    (set! (.arguments call) (json-object allocator))
+    (set! (.raw-arguments call) "{}")
     (load call)))
 
 (defn executor-bash-call [(allocator (ptr Allocator))] (-> ToolCall)
   (let [call (alloc/stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-object-put! (mut arguments) "command" (JsonString "printf worker-stack-ok"))
-    (store! (field call id) "bash-worker")
-    (store! (field call name) "bash")
-    (store! (field call arguments) (load arguments))
-    (store! (field call raw-arguments) "")
+    (set! (.id call) "bash-worker")
+    (set! (.name call) "bash")
+    (set! (.arguments call) (load arguments))
+    (set! (.raw-arguments call) "")
     (load call)))
 
 ;; Regression for the real macOS SIGBUS report: the platform's 512 KiB default
@@ -139,11 +138,9 @@
            (let [batch (execute-tools-parallel allocator execution)
                  result (al-get [ToolResult] (load (field batch results)) 0)
                  output (load (field result output))]
-             (assert (match-else (load (field result status))
-                                 (ToolSucceeded [] true)
-                                 (_ false)))
+             (assert (match (load (field result status)) (ToolSucceeded [] true) (_ false)))
              (assert (match (json-string-at output "stdout")
-                       (Some [value] (str-eq value "worker-stack-ok"))
+                       (Some [value] (= value "worker-stack-ok"))
                        (None [] false))))))
 
 (deftest executes-independent-tools-concurrently-and-keeps-result-order
@@ -185,12 +182,10 @@
              (assert-eq (al-len [ToolResult] (load (field batch results))) 2)
              (assert-eq (atomic-load maximum) 2)
              (let [first (al-get [ToolResult] (load (field batch results)) 0)]
-               (assert (match-else (load (field first status))
-                                   (ToolSucceeded [] true)
-                                   (_ false)))
-               (assert (str-eq (load (field first call-id)) "first"))
+               (assert (match (load (field first status)) (ToolSucceeded [] true) (_ false)))
+               (assert (= (load (field first call-id)) "first"))
                (assert (match (json-string-value (load (field first output)))
-                         (Some [text] (str-eq text "first"))
+                         (Some [text] (= text "first"))
                          (None [] false))))
              (assert-eq (atomic-load event-count) 6)
              (assert-eq (atomic-load valid-envelope) 1)
@@ -234,10 +229,8 @@
            (store! (field execution max-parallel) 1)
            (let [batch (execute-tools-parallel allocator execution)
                  result (al-get [ToolResult] (load (field batch results)) 0)]
-             (assert (match-else (load (field result status))
-                                 (ToolErrored [] true)
-                                 (_ false)))
-             (assert (str-eq (load (field result error)) "tool deadline exceeded"))
+             (assert (match (load (field result status)) (ToolErrored [] true) (_ false)))
+             (assert (= (load (field result error)) "tool deadline exceeded"))
              (assert-eq (atomic-load event-count) 3)
              (assert-eq (atomic-load valid-envelope) 1)
              (assert-eq (atomic-load valid-proposal) 1))))

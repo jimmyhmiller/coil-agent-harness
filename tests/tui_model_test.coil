@@ -40,9 +40,7 @@
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
            (let [started (al-get [PresentationBlock] (load (field model blocks)) 0)]
              (assert (= (slice-len [u8] (load (field started body))) 0))
-             (assert (match-else (load (field started state))
-                                 (PresentationRunning [] true)
-                                 (_ false))))
+             (assert (match (load (field started state)) (PresentationRunning [] true) (_ false))))
            (assert (presentation-apply-event! (mut model)
                                               (tui-event allocator
                                                          2
@@ -55,7 +53,7 @@
                    (al-get [PresentationBlock]
                            (load (field model blocks))
                            0)]
-             (assert (str-eq (load (field streaming body)) "Hello")))))
+             (assert (= (load (field streaming body)) "Hello")))))
 
 (deftest correlates-streaming-and-tool-events-without-terminal-concerns
          (let [allocator (malloc-allocator)
@@ -103,16 +101,12 @@
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 2))
            (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)
                  tool-block (al-get [PresentationBlock] (load (field model blocks)) 1)]
-             (assert (str-eq (load (field assistant body)) "Hello there"))
-             (assert (match-else (load (field tool-block result))
-                                 (JsonString [text] (str-eq text "done"))
-                                 (_ false)))
-             (assert (str-eq (presentation-json-string (load (field tool-block arguments))
-                                                       "command")
-                             "ls"))
-             (assert (match-else (load (field tool-block state))
-                                 (PresentationSucceeded [] true)
-                                 (_ false))))))
+             (assert (= (load (field assistant body)) "Hello there"))
+             (assert (match (load (field tool-block result)) (JsonString [text] (= text "done")) (_ false)))
+             (assert (= (presentation-json-string (load (field tool-block arguments))
+                                                  "command")
+                        "ls"))
+             (assert (match (load (field tool-block state)) (PresentationSucceeded [] true) (_ false))))))
 
 (deftest ignores-an-already-projected-journal-prefix
          (let [allocator (malloc-allocator)
@@ -122,7 +116,7 @@
            (assert (not (presentation-apply-event! (mut model) event)))
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
            (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)]
-             (assert (str-eq (load (field assistant body)) "once")))))
+             (assert (= (load (field assistant body)) "once")))))
 
 (deftest advances-past-unknown-events-without-inventing-presentation-state
          (let [allocator (malloc-allocator)
@@ -140,7 +134,7 @@
 (deftest bounds-retained-stream-text-at-a-valid-utf8-boundary
          (let [allocator (malloc-allocator)
                text (presentation-append-bounded allocator "prefix" "界界界界界界界界" 27)]
-           (assert (str-eq text "prefix\n[output truncated]"))))
+           (assert (= text "prefix\n[output truncated]"))))
 
 (deftest reduces-a-large-delta-burst-to-one-deterministic-block
          (let [allocator (malloc-allocator)
@@ -211,8 +205,8 @@
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 256))
            (let [first (al-get [PresentationBlock] (load (field model blocks)) 0)
                  last (al-get [PresentationBlock] (load (field model blocks)) 255)]
-             (assert (str-eq (load (field first id)) "tool-0"))
-             (assert (str-eq (load (field last id)) "tool-255")))))
+             (assert (= (load (field first id)) "tool-0"))
+             (assert (= (load (field last id)) "tool-255")))))
 
 (deftest keeps-parallel-tools-stable-when-they-complete-out-of-order
          (let [allocator (malloc-allocator)
@@ -228,14 +222,10 @@
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 2))
            (let [first (al-get [PresentationBlock] (load (field model blocks)) 0)
                  second (al-get [PresentationBlock] (load (field model blocks)) 1)]
-             (assert (str-eq (load (field first id)) "tool-a"))
-             (assert (str-eq (load (field second id)) "tool-b"))
-             (assert (match-else (load (field first state))
-                                 (PresentationSucceeded [] true)
-                                 (_ false)))
-             (assert (match-else (load (field second state))
-                                 (PresentationSucceeded [] true)
-                                 (_ false))))))
+             (assert (= (load (field first id)) "tool-a"))
+             (assert (= (load (field second id)) "tool-b"))
+             (assert (match (load (field first state)) (PresentationSucceeded [] true) (_ false)))
+             (assert (match (load (field second state)) (PresentationSucceeded [] true) (_ false))))))
 
 (deftest delegated-agent-remains-live-until-its-child-run-finishes
          (let [allocator (malloc-allocator)
@@ -258,9 +248,7 @@
                                                          (JsonNull))))
            (assert (= (transcript-advance! (mut policy) (mut model)) 1))
            (let [agent (al-get [PresentationBlock] (load (field model blocks)) 0)]
-             (assert (match-else (load (field agent state))
-                                 (PresentationSucceeded [] true)
-                                 (_ false))))))
+             (assert (match (load (field agent state)) (PresentationSucceeded [] true) (_ false))))))
 
 (deftest renders-a-tool-from-its-own-proposal-payload
          (let [allocator (malloc-allocator)
@@ -281,13 +269,11 @@
                                                  (JsonString "read_file")))
            (assert (= (al-len [PresentationBlock] (load (field model blocks))) 1))
            (let [tool (al-get [PresentationBlock] (load (field model blocks)) 0)]
-             (assert (str-eq (load (field tool title)) "read_file"))
-             (assert (str-eq (presentation-json-string (load (field tool arguments))
-                                                       "path")
-                             "README.md"))
-             (assert (match-else (load (field tool state))
-                                 (PresentationRunning [] true)
-                                 (_ false))))))
+             (assert (= (load (field tool title)) "read_file"))
+             (assert (= (presentation-json-string (load (field tool arguments))
+                                                  "path")
+                        "README.md"))
+             (assert (match (load (field tool state)) (PresentationRunning [] true) (_ false))))))
 
 (deftest transcript-commits-only-the-stable-prefix
          (let [allocator (malloc-allocator)
@@ -297,7 +283,7 @@
            (json-put-string! (mut arguments) "command" "ls")
            (presentation-apply-action! (mut model) (AppendAssistant "model-1" "hello"))
            (presentation-apply-action! (mut model)
-                                       (ProposeTool "tool-1" "bash" (load arguments)))
+                                       (ProposeTool :id "tool-1" :name "bash" :arguments (load arguments)))
            (presentation-apply-action! (mut model)
                                        (FinishTool "tool-1" (JsonString "done")))
            (assert (= (transcript-advance! (mut policy) (mut model)) 0))
@@ -314,16 +300,12 @@
            (json-put-string! (mut arguments) "command" "sleep 10")
            (presentation-apply-action! (mut model) (AppendAssistant "model-1" "working"))
            (presentation-apply-action! (mut model)
-                                       (ProposeTool "tool-1" "bash" (load arguments)))
+                                       (ProposeTool :id "tool-1" :name "bash" :arguments (load arguments)))
            (presentation-apply-action! (mut model) (StartTool "tool-1" "bash"))
            (presentation-apply-action! (mut model) (CancelRun "run-1"))
            (assert (= (transcript-advance! (mut policy) (mut model)) 3))
            (assert (= (transcript-live-count (mut policy) (mut model)) 0))
            (let [assistant (al-get [PresentationBlock] (load (field model blocks)) 0)
                  tool (al-get [PresentationBlock] (load (field model blocks)) 1)]
-             (assert (match-else (load (field assistant state))
-                                 (PresentationCancelled [] true)
-                                 (_ false)))
-             (assert (match-else (load (field tool state))
-                                 (PresentationCancelled [] true)
-                                 (_ false))))))
+             (assert (match (load (field assistant state)) (PresentationCancelled [] true) (_ false)))
+             (assert (match (load (field tool state)) (PresentationCancelled [] true) (_ false))))))

@@ -35,8 +35,7 @@
                             (allocator (ptr Allocator))]
                            (-> i64)
                            (do
-                             (store! (field self prepare-count)
-                                     (+ (load (field self prepare-count)) 1))
+                             (set! (.prepare-count self) (+ (.prepare-count self) 1))
                              0))
   (codex-strategy-execute [(self (ptr FakeCodexExecutionStrategy))
                            (request (ptr ModelRequest))
@@ -44,18 +43,16 @@
                            (allocator (ptr Allocator))]
                           (-> ModelResult)
                           (do
-                            (store! (field self execute-count)
-                                    (+ (load (field self execute-count)) 1))
+                            (set! (.execute-count self) (+ (.execute-count self) 1))
                             (let [(mut response) (response-empty allocator)]
-                              (store! (field response provider) "codex")
-                              (store! (field response model) (load (field request model)))
-                              (store! (field response output-text) "strategy response")
+                              (set! (.provider response) "codex")
+                              (set! (.model response) (.model request))
+                              (set! (.output-text response) "strategy response")
                               (ModelOk (load response)))))
   (codex-strategy-close! [(self (ptr FakeCodexExecutionStrategy))]
                          (-> i64)
                          (do
-                           (store! (field self close-count)
-                                   (+ (load (field self close-count)) 1))
+                           (set! (.close-count self) (+ (.close-count self) 1))
                            0)))
 
 (defstruct FixtureStreamingTransport
@@ -69,19 +66,18 @@
                         (response (mut HttpResponse))]
                        (-> i64)
                        (do
-                         (store! (field self calls) (+ (load (field self calls)) 1))
-                         (let [payload (load (field self payload))
+                         (set! (.calls self) (+ (.calls self) 1))
+                         (let [payload (.payload self)
                                sink (field request chunks)
                                consumed
-                                 (primitive/call-ptr (load (field sink consume))
+                                 (primitive/call-ptr (.consume sink)
                                                      (slice-data [u8] payload)
                                                      (cast usize (slice-len [u8] payload))
                                                      (load (field sink context)))]
-                           (store! (field response transport-code)
-                                   (if (= (cast i64 consumed) (slice-len [u8] payload)) 0 -1)))
-                         (store! (field response status-code) 200)
-                         (store! (field response body) "")
-                         (store! (field response error) "fixture stream rejected")
+                           (set! (.transport-code response) (if (= (cast i64 consumed) (slice-len [u8] payload)) 0 -1)))
+                         (set! (.status-code response) 200)
+                         (set! (.body response) "")
+                         (set! (.error response) "fixture stream rejected")
                          0)))
 
 (defstruct FakeCodexTransport
@@ -102,33 +98,30 @@
 (impl EventSink DeltaEventSink
   (publish-event [(self (ptr DeltaEventSink)) (event (ptr Event))]
                  (-> i64)
-                 (match-else (load (field event kind))
-                             (ModelResponseDelta []
-                                                 (do
-                                                   (store! (field self deltas)
-                                                           (+ (load (field self deltas)) 1))
-                                                   (match-else (load (field event payload))
-                                                               (JsonString [value]
-                                                                           (when (not (str-eq value "hi"))
-                                                                             (store! (field self valid) false)
-                                                                             0))
-                                                               (_ (store! (field self valid) false)))
-                                                   0))
-                             (_ 0))))
+                 (match (.kind event)
+                        (ModelResponseDelta []
+                                            (do
+                                              (set! (.deltas self) (+ (.deltas self) 1))
+                                              (match (.payload event)
+                                                     (JsonString [value]
+                                                                 (when (not (str-eq value "hi"))
+                                                                   (store! (field self valid) false)
+                                                                   0))
+                                                     (_ (set! (.valid self) false)))
+                                              0))
+                        (_ 0))))
 
 (impl EventSink CodexEventCounts
   (publish-event [(self (ptr CodexEventCounts)) (event (ptr Event))]
                  (-> i64)
                  (do
-                   (store! (field self total) (+ (load (field self total)) 1))
-                   (match-else (load (field event kind))
-                               (ModelRequestCompleted []
-                                                      (store! (field self completed)
-                                                              (+ (load (field self completed)) 1)))
-                               (ModelRequestFailed []
-                                                   (store! (field self failed)
-                                                           (+ (load (field self failed)) 1)))
-                               (_ 0))
+                   (set! (.total self) (+ (.total self) 1))
+                   (match (.kind event)
+                          (ModelRequestCompleted []
+                                                 (set! (.completed self) (+ (.completed self) 1)))
+                          (ModelRequestFailed []
+                                              (set! (.failed self) (+ (.failed self) 1)))
+                          (_ 0))
                    0)))
 
 (impl CodexTransport FakeCodexTransport
@@ -137,28 +130,23 @@
                          (message (ptr Json))]
                         (-> i64)
                         (do
-                          (store! (field self send-count)
-                                  (+ (load (field self send-count)) 1))
-                          (store! (field self sent-valid-json)
-                                  (match-else (load message)
-                                              (JsonObject [keys values] true)
-                                              (_ false)))
-                          (load (field self send-code))))
+                          (set! (.send-count self) (+ (.send-count self) 1))
+                          (set! (.sent-valid-json self)
+                                (match (load message) (JsonObject [keys values] true) (_ false)))
+                          (.send-code self)))
   (codex-transport-read [(self (ptr FakeCodexTransport))
                          (allocator (ptr Allocator))
                          (timeout-ms i64)
                          (result (mut CodexRead))]
                         (-> i64)
                         (do
-                          (store! (field self read-count)
-                                  (+ (load (field self read-count)) 1))
-                          (store! result (load (field self read-result)))
+                          (set! (.read-count self) (+ (.read-count self) 1))
+                          (set! result (.read-result self))
                           0))
   (codex-transport-close [(self (ptr FakeCodexTransport))]
                          (-> i64)
                          (do
-                           (store! (field self close-count)
-                                   (+ (load (field self close-count)) 1))
+                           (set! (.close-count self) (+ (.close-count self) 1))
                            0)))
 
 (impl ToolImplementation UnusedTool
@@ -167,7 +155,7 @@
                  (context (ptr ToolExecutionContext))
                  (allocator (ptr Allocator))]
                 (-> ToolResult)
-                (tool-result-empty (load (field call id)) (ToolSucceeded))))
+                (tool-result-empty (.id call) (ToolSucceeded))))
 
 (defn test-tool [(allocator (ptr Allocator))] (-> ToolDefinition)
   (let [parsed
@@ -175,14 +163,14 @@
                       "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false}")
         definition (alloc/stack ToolDefinition)
         implementation (box allocator UnusedTool (zeroed UnusedTool))]
-    (store! (field (field definition spec) name) "city_fact")
-    (store! (field (field definition spec) description) "Return one city fact")
-    (store! (field (field definition spec) input-schema) (load (field parsed value)))
-    (store! (field (field definition spec) strict) true)
-    (store! (field (field definition spec) effect) (ReadOnly))
-    (store! (field (field definition spec) idempotent) true)
-    (store! (field (field definition spec) timeout-ms) 1000)
-    (store! (field definition implementation) implementation)
+    (set! (.name (.spec definition)) "city_fact")
+    (set! (.description (.spec definition)) "Return one city fact")
+    (set! (.input-schema (.spec definition)) (.value parsed))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 1000)
+    (set! (.implementation definition) implementation)
     (load definition)))
 
 (defn test-request [(allocator (ptr Allocator))] (-> (ptr ModelRequest))
@@ -190,23 +178,23 @@
         (mut registry-value) (tool-registry-new allocator)
         request (box allocator ModelRequest (zeroed ModelRequest))
         message (alloc/stack Message)]
-    (store! (field message role) (UserRole))
-    (store! (field message content) "Use the tool twice.")
+    (set! (.role message) (UserRole))
+    (set! (.content message) "Use the tool twice.")
     (al-push! [Message] messages (load message))
     (tool-register! (mut registry-value) (test-tool allocator))
     (let [registry (box allocator ToolRegistry (load registry-value))]
-      (store! (field request run-id) "test-run")
-      (store! (field request operation-id) "test-operation")
-      (store! (field request model) "test-model")
-      (store! (field request instructions) "Be exact.")
-      (store! (field request messages) messages)
-      (store! (field request tools) registry)
-      (store! (field request tool-choice) (ToolsAuto))
-      (store! (field request parallel-tool-calls) true)
-      (store! (field request reasoning) "provider-future-level")
-      (store! (field request max-output-tokens) 512)
-      (store! (field request timeout-ms) 10000)
-      (store! (field (field request continuation) present) false)
+      (set! (.run-id request) "test-run")
+      (set! (.operation-id request) "test-operation")
+      (set! (.model request) "test-model")
+      (set! (.instructions request) "Be exact.")
+      (set! (.messages request) messages)
+      (set! (.tools request) registry)
+      (set! (.tool-choice request) (ToolsAuto))
+      (set! (.parallel-tool-calls request) true)
+      (set! (.reasoning request) "provider-future-level")
+      (set! (.max-output-tokens request) 512)
+      (set! (.timeout-ms request) 10000)
+      (set! (.present (.continuation request)) false)
       request)))
 
 (deftest shared-streaming-transport-drives-every-http-provider
@@ -245,7 +233,7 @@
            (assert (match (openai-execute-stream openai request emitter allocator)
                      (ModelOk [response]
                               (let [success response]
-                                (str-eq (load (field success response-id)) "resp-fixture")))
+                                (= (load (field success response-id)) "resp-fixture")))
                      (ModelErr [failure] false)))
            ;; DeepSeek OpenAI-compatible SSE fixture.
            (store! (field transport payload)
@@ -256,7 +244,7 @@
                                                           allocator)
                      (ModelOk [response]
                               (let [success response]
-                                (str-eq (load (field success response-id)) "chat-fixture")))
+                                (= (load (field success response-id)) "chat-fixture")))
                      (ModelErr [failure] false)))
            ;; DeepSeek Anthropic-compatible SSE fixture.
            (store! (field transport payload)
@@ -267,7 +255,7 @@
                                                              allocator)
                      (ModelOk [response]
                               (let [success response]
-                                (str-eq (load (field success response-id)) "msg-fixture")))
+                                (= (load (field success response-id)) "msg-fixture")))
                      (ModelErr [failure] false)))
            ;; Native Claude OAuth uses the same stream and tool parser.
            (assert (match (deepseek-anthropic-execute-stream (field claude messages)
@@ -276,8 +264,8 @@
                                                              allocator)
                      (ModelOk [response]
                               (let [success response]
-                                (and (str-eq (load (field success response-id)) "msg-fixture")
-                                     (str-eq (load (field success provider)) "claude-anthropic"))))
+                                (and (= (load (field success response-id)) "msg-fixture")
+                                     (= (load (field success provider)) "claude-anthropic"))))
                      (ModelErr [failure] false)))
            (assert-eq (load (field transport calls)) 4)))
 
@@ -287,10 +275,10 @@
                wire (openai-request-json allocator request)
                tool (json-array-get (json-get wire "tools") 0)]
            (assert (match (json-string-at wire "model")
-                     (Some [value] (str-eq value "test-model"))
+                     (Some [value] (= value "test-model"))
                      (None [] false)))
            (assert (match (json-string-at (json-get wire "reasoning") "effort")
-                     (Some [value] (str-eq value "provider-future-level"))
+                     (Some [value] (= value "provider-future-level"))
                      (None [] false)))
            (assert (match (json-bool-value (json-get wire "parallel_tool_calls"))
                      (Some [value] value)
@@ -299,7 +287,7 @@
                      (Some [value] value)
                      (None [] false)))
            (assert (match (json-string-at tool "type")
-                     (Some [value] (str-eq value "function"))
+                     (Some [value] (= value "function"))
                      (None [] false)))
            (assert (match (json-bool-value (json-get tool "strict"))
                      (Some [value] value)
@@ -329,7 +317,7 @@
            (assert (load (field sink valid)))
            (assert (load (field state completed)))
            (assert (match (json-string-at (load (field state response)) "id")
-                     (Some [value] (str-eq value "resp-stream"))
+                     (Some [value] (= value "resp-stream"))
                      (None [] false)))))
 
 (deftest openai-parses-parallel-function-calls
@@ -340,9 +328,9 @@
                response (openai-parse-response allocator (load (field parsed value)))]
            (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 2)
            (let [second (al-get [ToolCall] (load (field response tool-calls)) 1)]
-             (assert (str-eq (load (field second id)) "b"))
+             (assert (= (load (field second id)) "b"))
              (assert (match (json-string-at (load (field second arguments)) "city")
-                       (Some [value] (str-eq value "Lima"))
+                       (Some [value] (= value "Lima"))
                        (None [] false))))))
 
 (deftest openai-usage-parses-cache-read-and-write-telemetry
@@ -382,7 +370,7 @@
                        (None [] false)))
              (assert-eq (json-array-length messages) 3)
              (assert (match (json-string-at assistant "reasoning_content")
-                       (Some [value] (str-eq value "opaque reasoning"))
+                       (Some [value] (= value "opaque reasoning"))
                        (None [] false))))))
 
 (deftest deepseek-openai-stream-reconstructs-reasoning-tools-and-usage
@@ -420,7 +408,7 @@
            (assert-eq (load (field sink deltas)) 1)
            (assert (load (field sink valid)))
            (let [response (deepseek-stream-response state)]
-             (assert (str-eq (load (field response output-text)) "hi"))
+             (assert (= (load (field response output-text)) "hi"))
              (assert-eq (load (field (field response usage) input-tokens)) 7)
              (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 1)
              (let [call (al-get [ToolCall] (load (field response tool-calls)) 0)
@@ -429,10 +417,10 @@
                                                0)
                                "message")]
                (assert (match (json-string-at (load (field call arguments)) "city")
-                         (Some [value] (str-eq value "Oslo"))
+                         (Some [value] (= value "Oslo"))
                          (None [] false)))
                (assert (match (json-string-at message "reasoning_content")
-                         (Some [value] (str-eq value "think more"))
+                         (Some [value] (= value "think more"))
                          (None [] false)))))
            (sse-decoder-free! decoder)))
 
@@ -445,12 +433,12 @@
                      (Some [value] value)
                      (None [] false)))
            (assert (match (json-string-at tool "name")
-                     (Some [value] (str-eq value "city_fact"))
+                     (Some [value] (= value "city_fact"))
                      (None [] false)))
            (assert (json-object-has? tool "input_schema"))
            (assert (not (json-object-has? tool "strict")))
            (assert (match (json-string-at (json-get wire "tool_choice") "type")
-                     (Some [value] (str-eq value "auto"))
+                     (Some [value] (= value "auto"))
                      (None [] false)))))
 
 (deftest deepseek-anthropic-stream-reconstructs-content-tools-and-usage
@@ -479,8 +467,8 @@
            (assert-eq (load (field sink deltas)) 1)
            (assert (load (field sink valid)))
            (let [response (anthropic-stream-response state)]
-             (assert (str-eq (load (field response response-id)) "msg-stream"))
-             (assert (str-eq (load (field response output-text)) "hi"))
+             (assert (= (load (field response response-id)) "msg-stream"))
+             (assert (= (load (field response output-text)) "hi"))
              (assert-eq (load (field (field response usage) input-tokens)) 5)
              (assert-eq (load (field (field response usage) output-tokens)) 4)
              (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 1)
@@ -489,10 +477,10 @@
                      (json-array-get (json-get (load (field response raw-output)) "content")
                                      0)]
                (assert (match (json-string-at (load (field call arguments)) "city")
-                         (Some [value] (str-eq value "Oslo"))
+                         (Some [value] (= value "Oslo"))
                          (None [] false)))
                (assert (match (json-string-at thinking "signature")
-                         (Some [value] (str-eq value "sig"))
+                         (Some [value] (= value "sig"))
                          (None [] false)))))
            (sse-decoder-free! decoder)))
 
@@ -506,7 +494,7 @@
                                                     (load (field parsed value)))]
            (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 2)
            (let [first (al-get [ToolCall] (load (field response tool-calls)) 0)]
-             (assert (str-eq (load (field first id)) "a")))))
+             (assert (= (load (field first id)) "a")))))
 
 (deftest codex-app-server-control-contract
          (let [allocator (malloc-allocator)
@@ -525,32 +513,30 @@
                      (None [] false)))
            (let [resume (codex-thread-resume-request allocator "thread-1")]
              (assert (match (json-string-at resume "method")
-                       (Some [value] (str-eq value "thread/resume"))
+                       (Some [value] (= value "thread/resume"))
                        (None [] false)))
              (assert (match (json-string-at (json-get resume "params") "threadId")
-                       (Some [value] (str-eq value "thread-1"))
+                       (Some [value] (= value "thread-1"))
                        (None [] false))))
            (let [thread-start (codex-thread-start-request allocator context request)
                  dynamic-tools (json-get (json-get thread-start "params") "dynamicTools")
                  dynamic-tool (json-array-get dynamic-tools 0)]
              (assert-eq (json-array-length dynamic-tools) 1)
              (assert (match (json-string-at dynamic-tool "type")
-                       (Some [value] (str-eq value "function"))
+                       (Some [value] (= value "function"))
                        (None [] false)))
              (assert (match (json-string-at dynamic-tool "name")
-                       (Some [value] (str-eq value "city_fact"))
+                       (Some [value] (= value "city_fact"))
                        (None [] false)))
-             (assert (match-else (json-get dynamic-tool "inputSchema")
-                                 (JsonObject [keys values] true)
-                                 (_ false))))
+             (assert (match (json-get dynamic-tool "inputSchema") (JsonObject [keys values] true) (_ false))))
            (assert (match (json-string-at steer "method")
-                     (Some [value] (str-eq value "turn/steer"))
+                     (Some [value] (= value "turn/steer"))
                      (None [] false)))
            (assert (match (json-string-at (json-get steer "params") "expectedTurnId")
-                     (Some [value] (str-eq value "turn-1"))
+                     (Some [value] (= value "turn-1"))
                      (None [] false)))
            (assert (match (json-string-at interrupt "method")
-                     (Some [value] (str-eq value "turn/interrupt"))
+                     (Some [value] (= value "turn/interrupt"))
                      (None [] false)))))
 
 (deftest claude-oauth-wire-contract-includes-identity-and-native-tools
@@ -562,19 +548,18 @@
                identity (json-array-get system 0)
                instructions (json-array-get system 1)
                tool (json-array-get (json-get wire "tools") 0)]
-           (assert (str-eq (anthropic-auth-header allocator "oauth-token" true)
-                           "Authorization: Bearer oauth-token"))
+           (assert (= (anthropic-auth-header allocator "oauth-token" true) "Authorization: Bearer oauth-token"))
            (assert (> (slice-len [u8] encoded) 0))
            (assert-eq (json-array-length system) 2)
            (assert (match (json-string-at identity "text")
                      (Some [value]
-                           (str-eq value "You are Claude Code, Anthropic's official CLI for Claude."))
+                           (= value "You are Claude Code, Anthropic's official CLI for Claude."))
                      (None [] false)))
            (assert (match (json-string-at instructions "text")
-                     (Some [value] (str-eq value "Be exact."))
+                     (Some [value] (= value "Be exact."))
                      (None [] false)))
            (assert (match (json-string-at tool "name")
-                     (Some [value] (str-eq value "city_fact"))
+                     (Some [value] (= value "city_fact"))
                      (None [] false)))))
 
 (deftest codex-app-server-thread-id-contract
@@ -584,11 +569,11 @@
                              "{\"result\":{\"thread\":{\"id\":\"thread-1\"}}}")
                missing (json-parse allocator "{\"result\":{}}")]
            (assert (match (codex-thread-id (load (field parsed value)))
-                     (Ok [thread-id] (str-eq thread-id "thread-1"))
+                     (Ok [thread-id] (= thread-id "thread-1"))
                      (Err [message] false)))
            (assert (match (codex-thread-id (load (field missing value)))
                      (Ok [thread-id] false)
-                     (Err [message] (str-eq message "thread/start omitted thread id"))))))
+                     (Err [message] (= message "thread/start omitted thread id"))))))
 
 (deftest codex-conversation-input-sends-only-the-new-turn-to-native-thread-history
          (let [allocator (malloc-allocator)
@@ -603,7 +588,7 @@
            (store! (field user content) "What did you just say?")
            (al-push! [Message] messages (load user))
            (let [input (codex-conversation-input allocator request)]
-             (assert (str-eq input "What did you just say?")))))
+             (assert (= input "What did you just say?")))))
 
 (deftest completion-payload-exposes-provider-cache-telemetry
          (let [allocator (malloc-allocator)
@@ -617,13 +602,13 @@
              (store! (field request cache-key) "cache-key-v1")
              (let [payload (model-completion-payload allocator request (mut response))]
                (assert (match (json-string-at payload "response_id")
-                         (Some [value] (str-eq value "resp-cache"))
+                         (Some [value] (= value "resp-cache"))
                          (None [] false)))
                (assert (match (json-string-at payload "provider_session_id")
-                         (Some [value] (str-eq value "thread-cache"))
+                         (Some [value] (= value "thread-cache"))
                          (None [] false)))
                (assert (match (json-string-at payload "cache_key")
-                         (Some [value] (str-eq value "cache-key-v1"))
+                         (Some [value] (= value "cache-key-v1"))
                          (None [] false)))
                (assert-eq (json-number-i64 (json-get (json-get payload "usage") "cached_input_tokens"))
                           80)
@@ -672,7 +657,7 @@
                                       1
                                       "send failed")
                      (Ok [message] false)
-                     (Err [message] (str-eq message "send failed"))))
+                     (Err [message] (= message "send failed"))))
            (assert-eq (load (field failed send-count)) 1)
            (assert-eq (load (field failed read-count)) 0)))
 
@@ -694,8 +679,7 @@
            (assert (match (execute-model provider request emitter allocator)
                      (ModelOk [response]
                               (let [success response]
-                                (str-eq (load (field success output-text))
-                                        "strategy response")))
+                                (= (load (field success output-text)) "strategy response")))
                      (ModelErr [failure] false)))
            (assert-eq (codex-strategy-close! (load strategy-view)) 0)
            (assert-eq (load (field strategy prepare-count)) 1)
@@ -726,28 +710,27 @@
            (let [wire (codex-direct-request-json allocator request)
                  input (json-get wire "input")
                  include (json-get wire "include")]
-             (assert (str-eq (load (field context endpoint))
-                             "https://chatgpt.com/backend-api/codex/responses"))
+             (assert (= (load (field context endpoint)) "https://chatgpt.com/backend-api/codex/responses"))
              (assert (not (json-object-has? wire "max_output_tokens")))
              (assert (not (json-object-has? wire "previous_response_id")))
              (assert (match (json-bool-value (json-get wire "store"))
                        (Some [enabled] (not enabled))
                        (None [] false)))
              (assert (match (json-string-at wire "prompt_cache_key")
-                       (Some [value] (str-eq value "conversation-cache-key"))
+                       (Some [value] (= value "conversation-cache-key"))
                        (None [] false)))
              (assert (not (json-object-has? wire "prompt_cache_options")))
              (assert-eq (json-array-length input) 4)
              (assert (match (json-string-at (json-array-get input 1) "encrypted_content")
-                       (Some [value] (str-eq value "opaque"))
+                       (Some [value] (= value "opaque"))
                        (None [] false)))
              (assert (match (json-string-at (json-array-get input 3) "type")
-                       (Some [value] (str-eq value "function_call_output"))
+                       (Some [value] (= value "function_call_output"))
                        (None [] false)))
-             (assert (match-else (json-array-get include 0)
-                                 (JsonString [value]
-                                             (str-eq value "reasoning.encrypted_content"))
-                                 (_ false)))
+             (assert (match (json-array-get include 0)
+                            (JsonString [value]
+                                        (= value "reasoning.encrypted_content"))
+                            (_ false)))
              (assert (match (json-bool-value (json-get wire "stream"))
                        (Some [enabled] enabled)
                        (None [] false))))))
@@ -776,13 +759,13 @@
                  output (json-get cumulative "output")]
              (assert-eq (json-array-length output) 3)
              (assert (match (json-string-at (json-array-get output 0) "call_id")
-                       (Some [value] (str-eq value "call-1"))
+                       (Some [value] (= value "call-1"))
                        (None [] false)))
              (assert (match (json-string-at (json-array-get output 1) "type")
-                       (Some [value] (str-eq value "function_call_output"))
+                       (Some [value] (= value "function_call_output"))
                        (None [] false)))
              (assert (match (json-string-at (json-array-get output 2) "call_id")
-                       (Some [value] (str-eq value "call-2"))
+                       (Some [value] (= value "call-2"))
                        (None [] false))))))
 
 (deftest codex-connection-closes-and-emits-one-terminal-failure
@@ -807,8 +790,7 @@
                        (ModelOk [response] false)
                        (ModelErr [failure]
                                  (let [failed failure]
-                                   (str-eq (load (field failed message))
-                                           "could not initialize Codex app-server"))))))
+                                   (= (load (field failed message)) "could not initialize Codex app-server"))))))
            (assert-eq (load (field transport send-count)) 1)
            (assert-eq (load (field transport read-count)) 0)
            (assert-eq (load (field transport close-count)) 1)

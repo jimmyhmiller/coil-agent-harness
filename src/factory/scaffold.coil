@@ -20,12 +20,12 @@
     (loop (if (or (<= (load end) 0)
                   (!= (cast i64 (slice-get [u8] directory (- (load end) 1))) 47))
               (break)
-              (store! end (- (load end) 1))))
+              (set! end (- (load end) 1))))
     (let [(mut start) (load end)]
       (loop (if (or (<= (load start) 0)
                     (= (cast i64 (slice-get [u8] directory (- (load start) 1))) 47))
                 (break)
-                (store! start (- (load start) 1))))
+                (set! start (- (load start) 1))))
       (substr directory (load start) (load end)))))
 
 (defn scaffold-write [(allocator (ptr Allocator))
@@ -60,7 +60,7 @@
                           (sb-push-byte! (mut slug) (cast u8 45))
                           (store! last-dash true))
                       :else 0)
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     (let [value (sb-finish! (mut slug))
           length (slice-len [u8] value)]
       (if (and (> length 0)
@@ -94,11 +94,11 @@
                       (scaffold-step-slug allocator
                                           (al-get [(slice u8)] steps (load step-index)))]
                 (if (= (slice-len [u8] slug) 0)
-                    (do (store! steps-valid false) (break))
+                    (do (set! steps-valid false) (break))
                     (al-push! [(slice u8)]
                               (mut filenames)
                               (scaffold-worker-file allocator (+ (load step-index) 1) slug)))
-                (store! step-index (+ (load step-index) 1)))))
+                (set! step-index (+ (load step-index) 1)))))
     (cond (= (slice-len [u8] directory) 0) (FactoryScaffoldFailed "factory directory must not be empty")
           (= (slice-len [u8] name) 0) (FactoryScaffoldFailed "factory directory must have a final path component")
           (not (load steps-valid)) (FactoryScaffoldFailed "step names must contain a letter or number")

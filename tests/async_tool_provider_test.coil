@@ -38,9 +38,9 @@
                                 (al-get [ToolCall]
                                         (load (field value tool-calls))
                                         0)]
-                          (assert (str-eq (load (field call name)) "bash"))
+                          (assert (= (load (field call name)) "bash"))
                           (assert (match (json-string-at (load (field call arguments)) "command")
-                                    (Some [command] (str-eq command "echo ready"))
+                                    (Some [command] (= command "echo ready"))
                                     (None [] false)))))))))
 
 (deftest executes-an-ordinary-tool-through-a-durable-asynchronous-run
@@ -86,7 +86,7 @@
                         (assert (match (json-string-at (json-get (load (field value raw-output))
                                                                  "output")
                                                        "stdout")
-                                  (Some [stdout] (str-eq stdout "async-ready"))
+                                  (Some [stdout] (= stdout "async-ready"))
                                   (None [] false))))))
            (let [recovery (event-journal-recover allocator path)
                  (mut saw-tool) false
@@ -95,10 +95,10 @@
              (loop (if (>= (load i) (al-len [Json] (load (field recovery events))))
                        (break)
                        (let [event (al-get [Json] (load (field recovery events)) (load i))]
-                         (when (str-eq (command-string event "event") "tool.call.completed")
+                         (when (= (command-string event "event") "tool.call.completed")
                            (store! saw-tool true)
                            0)
-                         (when (str-eq (command-string event "event") "run.completed")
+                         (when (= (command-string event "event") "run.completed")
                            (store! saw-terminal true)
                            0)
                          (store! i (+ (load i) 1)))))

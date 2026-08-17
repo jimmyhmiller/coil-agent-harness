@@ -11,9 +11,9 @@
 
 (deftest a-run-topic-is-derived-from-the-run-id
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (run-topic allocator "chat-1") "run.chat-1"))
+           (assert (= (run-topic allocator "chat-1") "run.chat-1"))
            (assert (run-topic? "run.chat-1"))
-           (assert (str-eq (run-topic-id "run.chat-1") "chat-1"))))
+           (assert (= (run-topic-id "run.chat-1") "chat-1"))))
 
 ;; An empty run id must not produce the bare prefix -- that would be a topic
 ;; every subscriber to "run." silently joined.

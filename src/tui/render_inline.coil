@@ -33,14 +33,14 @@
         0
         (let [domain (allocation-domain-open owner)]
           (if (not (allocation-domain-valid? domain))
-              (do (store! (field renderer has-retained) false) 0)
+              (do (set! (.has-retained renderer) false) 0)
               (let [previous-domain (load (field renderer retained-domain))
-                    had-previous (load (field renderer has-retained))
+                    had-previous (.has-retained renderer)
                     clone (alloc/stack Frame)]
                 (frame-clone! (allocation-domain-allocator domain) live clone)
-                (store! (field renderer retained) (load clone))
-                (store! (field renderer retained-domain) domain)
-                (store! (field renderer has-retained) true)
+                (set! (.retained renderer) (load clone))
+                (set! (.retained-domain renderer) domain)
+                (set! (.has-retained renderer) true)
                 (when had-previous
                   (allocation-domain-close! owner previous-domain)
                   0)
@@ -59,16 +59,16 @@
 ;; A renderer that diffs consecutive live frames instead of repainting them.
 (defn inline-renderer-new-retaining [(owner (ptr Allocator))] (-> InlineRenderer)
   (let [renderer (alloc/stack InlineRenderer)]
-    (store! (field renderer previous-live-height) 0)
-    (store! (field renderer owner) owner)
-    (store! (field renderer has-retained) false)
+    (set! (.previous-live-height renderer) 0)
+    (set! (.owner renderer) owner)
+    (set! (.has-retained renderer) false)
     (load renderer)))
 
 (defn inline-renderer-new [] (-> InlineRenderer)
   (let [renderer (alloc/stack InlineRenderer)]
-    (store! (field renderer previous-live-height) 0)
-    (store! (field renderer owner) (cast (ptr Allocator) 0))
-    (store! (field renderer has-retained) false)
+    (set! (.previous-live-height renderer) 0)
+    (set! (.owner renderer) (cast (ptr Allocator) 0))
+    (set! (.has-retained renderer) false)
     (load renderer)))
 
 (defn inline-operations-new [(allocator (ptr Allocator))] (-> (ArrayList TerminalOperation))
@@ -119,26 +119,26 @@
 (defn inline-plan-frame! [(operations (ptr (ArrayList TerminalOperation)))
                           (frame (ref Frame))] (-> i64)
   (let [(mut at) 0
-        count (al-len [FrameLine] (load (field frame lines)))]
+        count (al-len [FrameLine] (.lines frame))]
     (loop (if (>= (load at) count)
               (break)
-              (let [line (al-get [FrameLine] (load (field frame lines)) (load at))]
+              (let [line (al-get [FrameLine] (.lines frame) (load at))]
                 (let [(mut span-at) 0
-                      span-count (al-len [FrameSpan] (load (field line spans)))]
+                      span-count (al-len [FrameSpan] (.spans line))]
                   (loop (if (>= (load span-at) span-count)
                             (break)
                             (let [span
                                     (al-get [FrameSpan]
-                                            (load (field line spans))
+                                            (.spans line)
                                             (load span-at))]
                               (inline-push! operations
-                                            (TerminalSetRole (load (field span role))))
+                                            (TerminalSetRole (.role span)))
                               (inline-push! operations
-                                            (TerminalWrite (load (field span text))))
-                              (store! span-at (+ (load span-at) 1))))))
+                                            (TerminalWrite (.text span)))
+                              (set! span-at (+ (load span-at) 1))))))
                 (inline-push! operations (TerminalResetStyle))
                 (inline-push! operations (TerminalLineBreak))
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     0))
 
 ;; Draw mutable rows without advancing past the final row. Inter-row CRLF is
@@ -146,28 +146,28 @@
 (defn inline-plan-live-frame! [(operations (ptr (ArrayList TerminalOperation)))
                                (frame (ref Frame))] (-> i64)
   (let [(mut at) 0
-        count (al-len [FrameLine] (load (field frame lines)))]
+        count (al-len [FrameLine] (.lines frame))]
     (loop (if (>= (load at) count)
               (break)
-              (let [line (al-get [FrameLine] (load (field frame lines)) (load at))]
+              (let [line (al-get [FrameLine] (.lines frame) (load at))]
                 (let [(mut span-at) 0
-                      span-count (al-len [FrameSpan] (load (field line spans)))]
+                      span-count (al-len [FrameSpan] (.spans line))]
                   (loop (if (>= (load span-at) span-count)
                             (break)
                             (let [span
                                     (al-get [FrameSpan]
-                                            (load (field line spans))
+                                            (.spans line)
                                             (load span-at))]
                               (inline-push! operations
-                                            (TerminalSetRole (load (field span role))))
+                                            (TerminalSetRole (.role span)))
                               (inline-push! operations
-                                            (TerminalWrite (load (field span text))))
-                              (store! span-at (+ (load span-at) 1))))))
+                                            (TerminalWrite (.text span)))
+                              (set! span-at (+ (load span-at) 1))))))
                 (inline-push! operations (TerminalResetStyle))
                 (when (< (+ (load at) 1) count)
                   (inline-push! operations (TerminalLineBreak))
                   0)
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     0))
 
 ;; Make room for a growing live frame before painting any of its content. If the
@@ -194,21 +194,21 @@
                                   (committed (ptr Frame))
                                   (live (ptr Frame))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
-        live-height (al-len [FrameLine] (load (field live lines)))]
+        live-height (al-len [FrameLine] (.lines live))]
     ;; Diff when the retained frame makes it valid; otherwise repaint. The two
     ;; paths leave the cursor in the same place and produce the same screen, so
     ;; declining the diff is always safe.
-    (if (and (load (field renderer has-retained))
+    (if (and (.has-retained renderer)
              (diffable? committed (field renderer retained) live))
         (plan-live-diff! (mut operations) (field renderer retained) live)
         (do
           (inline-plan-clear-live! (mut operations)
-                                   (load (field renderer previous-live-height)))
+                                   (.previous-live-height renderer))
           (inline-plan-frame! (mut operations) committed)
           (inline-plan-reserve-live! (mut operations) live-height)
           (inline-plan-live-frame! (mut operations) live)
           0))
-    (store! (field renderer previous-live-height) live-height)
+    (set! (.previous-live-height renderer) live-height)
     (inline-renderer-retain! renderer live)
     (load operations)))
 

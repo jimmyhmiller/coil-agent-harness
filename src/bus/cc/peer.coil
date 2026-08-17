@@ -65,9 +65,9 @@
                          (address (slice u8))
                          (name (slice u8))
                          (mode (slice u8))] (-> i64)
-  (store! (field identity address) address)
-  (store! (field identity name) name)
-  (store! (field identity mode) (if (= (slice-len [u8] mode) 0) "bypass" mode))
+  (set! (.address identity) address)
+  (set! (.name identity) name)
+  (set! (.mode identity) (if (= (slice-len [u8] mode) 0) "bypass" mode))
   0)
 
 ;; Write every byte of `line`, or fail. A partial write is a truncated frame,
@@ -84,11 +84,11 @@
               (match (socket/unix-write connection
                                         (primitive/index data (load sent))
                                         (- length (load sent)))
-                (Err [failure] (store! ok false))
+                (Err [failure] (set! ok false))
                 (Ok [n]
                     (if (<= n 0)
-                        (store! ok false)
-                        (store! sent (+ (load sent) n)))))))
+                        (set! ok false)
+                        (set! sent (+ (load sent) n)))))))
     (and (load ok) (>= (load sent) length))))
 
 ;; Deliver one already-serialized NDJSON line to a socket path.
@@ -125,15 +125,15 @@
         CC_SEND_UNRESOLVED
         (let [content
                 (cc-envelope-wrap allocator
-                                  (load (field identity address))
-                                  (load (field identity name))
-                                  (load (field identity mode))
+                                  (.address identity)
+                                  (.name identity)
+                                  (.mode identity)
                                   body)
               frame
                 (cc-user-frame allocator
                                (cc-new-message-id allocator)
                                content
-                               (load (field identity address))
+                               (.address identity)
                                "next"
                                session-id)]
           (cc-send-line allocator socket-path (cc-frame-line allocator frame))))))
@@ -174,5 +174,5 @@
                                                       (cc-new-message-id allocator)
                                                       status
                                                       reason
-                                                      (load (field identity address))
+                                                      (.address identity)
                                                       original-id))))))

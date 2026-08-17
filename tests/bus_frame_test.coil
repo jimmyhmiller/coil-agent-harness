@@ -19,19 +19,19 @@
    (chunk i64)])
 
 (defn chunked-new [(slot (ptr ChunkedTransport)) (chunk i64)] (-> i64)
-  (store! (field slot written) 0)
-  (store! (field slot cursor) 0)
-  (store! (field slot chunk) chunk)
+  (set! (.written slot) 0)
+  (set! (.cursor slot) 0)
+  (set! (.chunk slot) chunk)
   0)
 
 (impl Transport ChunkedTransport
   (transport-read [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)]
                   (-> i64)
-                  (let [available (- (load (field self written)) (load (field self cursor)))
+                  (let [available (- (.written self) (.cursor self))
                         bounded
-                          (if (< length (load (field self chunk)))
+                          (if (< length (.chunk self))
                               length
-                              (load (field self chunk)))
+                              (.chunk self))
                         n (if (< available bounded) available bounded)
                         source (primitive/cast (ptr u8) (field self bytes))
                         destination (primitive/cast (ptr u8) buffer)
@@ -39,12 +39,12 @@
                     (loop (if (>= (load i) n)
                               (break)
                               (do
-                                (store! (primitive/index destination (load i))
-                                        (load (primitive/index source
-                                                               (+ (load (field self cursor))
-                                                                  (load i)))))
-                                (store! i (+ (load i) 1)))))
-                    (store! (field self cursor) (+ (load (field self cursor)) n))
+                                (set! (primitive/index destination (load i))
+                                      (load (primitive/index source
+                                                             (+ (load (field self cursor))
+                                                                (load i)))))
+                                (set! i (+ (load i) 1)))))
+                    (set! (.cursor self) (+ (.cursor self) n))
                     n))
   (transport-write [(self (ptr ChunkedTransport)) (buffer (ptr i8)) (length i64)]
                    (-> i64)
@@ -54,12 +54,12 @@
                      (loop (if (>= (load i) length)
                                (break)
                                (do
-                                 (store! (primitive/index destination
-                                                          (+ (load (field self written))
-                                                             (load i)))
-                                         (load (primitive/index source (load i))))
-                                 (store! i (+ (load i) 1)))))
-                     (store! (field self written) (+ (load (field self written)) length))
+                                 (set! (primitive/index destination
+                                                        (+ (load (field self written))
+                                                           (load i)))
+                                       (load (primitive/index source (load i))))
+                                 (set! i (+ (load i) 1)))))
+                     (set! (.written self) (+ (.written self) length))
                      length))
   (transport-close! [(self (ptr ChunkedTransport))] (-> i64) 0))
 
@@ -73,7 +73,7 @@
         false
         (if (!= (frame-read transport allocator out) FRAME_OK)
             false
-            (str-eq (load out) payload)))))
+            (= (load out) payload)))))
 
 (deftest a-frame-round-trips-when-reads-return-everything
          (assert (round-trip-payload? 4096 "hello bus")))
@@ -156,6 +156,6 @@
                      (Err [_] (assert false))
                      (Ok [_]
                          (do
-                           (assert (str-eq (load (field decoded id)) "msg-1"))
+                           (assert (= (load (field decoded id)) "msg-1"))
                            (assert (address-eq (load (field decoded to))
                                                (Topic "run.chat-1")))))))))))

@@ -24,43 +24,43 @@
 
 (defn route-known-provider? [(provider (slice u8))] (-> bool)
   (let [capabilities (provider-capabilities-for provider)]
-    (> (load (field capabilities cost-tier)) 0)))
+    (> (.cost-tier capabilities) 0)))
 
 (defn route-default-model [(provider (slice u8))] (-> (slice u8))
-  (cond (str-eq provider "openai") "gpt-5.6-terra"
-        (str-eq provider "deepseek-openai") "deepseek-v4-flash"
-        (str-eq provider "deepseek-anthropic") "deepseek-v4-flash"
-        (str-eq provider "codex") "gpt-5.6-terra"
-        (str-eq provider "claude") "claude-sonnet-4-6"
+  (cond (= provider "openai") "gpt-5.6-terra"
+        (= provider "deepseek-openai") "deepseek-v4-flash"
+        (= provider "deepseek-anthropic") "deepseek-v4-flash"
+        (= provider "codex") "gpt-5.6-terra"
+        (= provider "claude") "claude-sonnet-4-6"
         :else ""))
 
 (defn route-profile-provider [(profile (slice u8))
                               (requires-subscription bool)] (-> (slice u8))
-  (cond (str-eq profile "low-cost") (if requires-subscription "claude" "deepseek-openai")
-        (str-eq profile "quality") (if requires-subscription "claude" "openai")
-        (str-eq profile "subscription") "claude"
-        (str-eq profile "external-agent") "codex"
-        (str-eq profile "balanced") "codex"
+  (cond (= profile "low-cost") (if requires-subscription "claude" "deepseek-openai")
+        (= profile "quality") (if requires-subscription "claude" "openai")
+        (= profile "subscription") "claude"
+        (= profile "external-agent") "codex"
+        (= profile "balanced") "codex"
         :else ""))
 
 (defn route-profile-reason [(profile (slice u8))] (-> (slice u8))
-  (cond (str-eq profile "low-cost") "selected the lowest relative cost tier satisfying requirements"
-        (str-eq profile "quality") "selected the quality-preferred direct provider satisfying requirements"
-        (str-eq profile "subscription") "selected native harness tools with subscription authentication"
-        (str-eq profile "external-agent") "selected the external Codex agent capability"
+  (cond (= profile "low-cost") "selected the lowest relative cost tier satisfying requirements"
+        (= profile "quality") "selected the quality-preferred direct provider satisfying requirements"
+        (= profile "subscription") "selected native harness tools with subscription authentication"
+        (= profile "external-agent") "selected the external Codex agent capability"
         :else "selected the balanced Codex subscription policy"))
 
 (defn route-capabilities-json [(allocator (ptr Allocator))
                                (capabilities ProviderCapabilities)] (-> Json)
   (let [(mut value) (json-object allocator)]
-    (json-put-bool! (mut value) "streaming" (load (field capabilities streaming)))
-    (json-put-bool! (mut value) "harness_tools" (load (field capabilities harness-tools)))
-    (json-put-bool! (mut value) "parallel_tools" (load (field capabilities parallel-tools)))
-    (json-put-bool! (mut value) "reasoning" (load (field capabilities reasoning)))
-    (json-put-bool! (mut value) "subscription_auth" (load (field capabilities subscription-auth)))
+    (json-put-bool! (mut value) "streaming" (.streaming capabilities))
+    (json-put-bool! (mut value) "harness_tools" (.harness-tools capabilities))
+    (json-put-bool! (mut value) "parallel_tools" (.parallel-tools capabilities))
+    (json-put-bool! (mut value) "reasoning" (.reasoning capabilities))
+    (json-put-bool! (mut value) "subscription_auth" (.subscription-auth capabilities))
     (json-object-put! (mut value)
                       "cost_tier"
-                      (json-integer allocator (load (field capabilities cost-tier))))
+                      (json-integer allocator (.cost-tier capabilities)))
     (load value)))
 
 (defn model-route-command! [(allocator (ptr Allocator))
@@ -69,7 +69,7 @@
         requested-model (route-command-string (load command) "model")
         automatic
           (or (= (slice-len [u8] requested-provider) 0)
-              (str-eq requested-provider "auto"))
+              (= requested-provider "auto"))
         profile-value (route-command-string (load command) "routing_profile")
         profile (if (= (slice-len [u8] profile-value) 0) "balanced" profile-value)
         requires-tools (route-command-bool (load command) "requires_harness_tools")
@@ -86,14 +86,14 @@
     (cond (= (slice-len [u8] selected-provider) 0) (ModelRouteRejected "unknown routing profile")
           (and automatic
                (and (> (slice-len [u8] requested-model) 0)
-                    (not (str-eq requested-model "auto"))))
+                    (not (= requested-model "auto"))))
             (ModelRouteRejected "automatic provider selection requires model to be omitted or auto")
           (and (not automatic)
                (and (not (route-known-provider? selected-provider))
                     (or requires-tools requires-subscription)))
             (ModelRouteRejected "custom provider capabilities are unavailable for requested constraints")
           (or (= (slice-len [u8] selected-model) 0)
-              (str-eq selected-model "auto"))
+              (= selected-model "auto"))
             (ModelRouteRejected "model must be set when provider is pinned")
           (and requires-tools (not (load (field capabilities harness-tools))))
             (ModelRouteRejected "selected provider does not support harness-native tools")

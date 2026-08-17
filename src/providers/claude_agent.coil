@@ -23,14 +23,13 @@
 (defn claude-anthropic-context-default [(allocator (ptr Allocator))] (-> ClaudeAnthropicContext)
   (let [context (alloc/stack ClaudeAnthropicContext)
         (mut messages) (deepseek-anthropic-context-default allocator)]
-    (store! (field messages endpoint) "https://api.anthropic.com/v1/messages")
-    (store! (field (field messages credential) primary-env) c"ANTHROPIC_OAUTH_TOKEN")
-    (store! (field (field messages credential) fallback-env) c"ANTHROPIC_AUTH_TOKEN")
-    (store! (field messages provider) "claude-anthropic")
-    (store! (field messages credential-error)
-            "ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_AUTH_TOKEN is not set")
-    (store! (field messages oauth) true)
-    (store! (field context messages) (load messages))
+    (set! (.endpoint messages) "https://api.anthropic.com/v1/messages")
+    (set! (.primary-env (.credential messages)) c"ANTHROPIC_OAUTH_TOKEN")
+    (set! (.fallback-env (.credential messages)) c"ANTHROPIC_AUTH_TOKEN")
+    (set! (.provider messages) "claude-anthropic")
+    (set! (.credential-error messages) "ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_AUTH_TOKEN is not set")
+    (set! (.oauth messages) true)
+    (set! (.messages context) (load messages))
     (load context)))
 
 (impl ModelProvider ClaudeAnthropicContext
@@ -48,8 +47,8 @@
                                                          (model-failure "claude-anthropic" 0 message))
                    (subscription/ClaudeCredentialsLoaded [loaded]
                                                          (let [credentials loaded]
-                                                           (store! (field (field self messages) credential-value)
-                                                                   (load (field credentials access-token)))
+                                                           (set! (.credential-value (.messages self))
+                                                                 (.access-token credentials))
                                                            (deepseek-anthropic-execute-stream (field self messages)
                                                                                               request
                                                                                               emitter

@@ -46,21 +46,19 @@
                     (client (ptr UnixTransport))
                     (server (ptr UnixTransport))] (-> bool)
   (remove-path SOCKET_PATH)
-  (match (socket/unix-listen listener SOCKET_PATH 8)
-    (Err [_] false)
-    (Ok [_]
-        (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
-            false
-            (match (time/duration-seconds 2)
-              (Err [_] false)
-              (Ok [duration]
-                  (let [accepted (alloc/stack socket/UnixConnection)]
-                    (match (socket/unix-accept-for listener accepted duration)
-                      (Err [_] false)
-                      (Ok [_]
-                          (do
-                            (unix-transport-adopt! server (load accepted))
-                            true))))))))))
+  (try (let [_ (try-or! (socket/unix-listen listener SOCKET_PATH 8) false)]
+            (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
+                false
+                (match (time/duration-seconds 2)
+                  (Err [_] false)
+                  (Ok [duration]
+                      (let [accepted (alloc/stack socket/UnixConnection)]
+                        (match (socket/unix-accept-for listener accepted duration)
+                          (Err [_] false)
+                          (Ok [_]
+                              (do
+                                (unix-transport-adopt! server (load accepted))
+                                true))))))))))
 
 ;; Move everything the observer queued onto the subscriber's transport. This is
 ;; the loop a real server runs; keeping it in the test until it earns a module
@@ -92,8 +90,8 @@
                                         (frame-write! transport bytes)
                                         (store! sent (+ (load sent) 1))
                                         0))))
-                              (store! r (+ (load r) 1)))))
-                  (store! i (+ (load i) 1))))))
+                              (set! r (+ (load r) 1)))))
+                  (set! i (+ (load i) 1))))))
     (bus-observer-clear! sink)
     (load sent)))
 
@@ -105,18 +103,17 @@
         envelope (alloc/stack Envelope)]
     (if (!= (frame-read transport allocator out) FRAME_OK)
         ""
-        (match (codec-decode codec allocator (load out) envelope)
-          (Err [_] "")
-          (Ok [_]
-              ;; The body is the journal's own canonical event JSON, so a
-              ;; subscriber reads exactly what the journal recorded.
-              (let [parsed (alloc/stack JsonParseResult)]
-                (store! parsed (json-parse allocator (load (field envelope body))))
-                (if (not (load (field parsed ok)))
-                    ""
-                    (match (json-string-at (load (field parsed value)) "event")
-                      (Some [name] name)
-                      (None [] "")))))))))
+        (try (let [_ (try-or! (codec-decode codec allocator (load out) envelope)
+                              "")]
+                  ;; The body is the journal's own canonical event JSON, so a
+                  ;; subscriber reads exactly what the journal recorded.
+                  (let [parsed (alloc/stack JsonParseResult)]
+                    (store! parsed (json-parse allocator (load (field envelope body))))
+                    (if (not (load (field parsed ok)))
+                        ""
+                        (match (json-string-at (load (field parsed value)) "event")
+                          (Some [name] name)
+                          (None [] "")))))))))
 
 (defn emit-sample [(emitter (ptr EventEmitter)) (kind EventKind)] (-> i64)
   (emit-event emitter 1000 kind "chat-1" "op-1" "" "fake" "fake-model" (JsonNull)))
@@ -162,9 +159,9 @@
                         3))
 
              ;; The subscriber sees real events, in emission order.
-             (assert (str-eq (receive-event-kind client codec allocator) "run.created"))
-             (assert (str-eq (receive-event-kind client codec allocator) "run.started"))
-             (assert (str-eq (receive-event-kind client codec allocator) "run.completed")))
+             (assert (= (receive-event-kind client codec allocator) "run.created"))
+             (assert (= (receive-event-kind client codec allocator) "run.started"))
+             (assert (= (receive-event-kind client codec allocator) "run.completed")))
 
            (event-journal-close! journal)
 

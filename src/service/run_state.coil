@@ -40,13 +40,13 @@
 
 (defn run-event? [(event Json) (run-id (slice u8))] (-> bool)
   (match (json-string-at event "run_id")
-    (Some [value] (str-eq value run-id))
+    (Some [value] (= value run-id))
     (None [] false)))
 
 (defn run-view-invalid! [(view (ptr DurableRunView))
                          (message (slice u8))] (-> i64)
-  (store! (field view valid) false)
-  (store! (field view error) message)
+  (set! (.valid view) false)
+  (set! (.error view) message)
   0)
 
 (defn run-view-transition! [(view (ptr DurableRunView))
@@ -55,70 +55,69 @@
           (match (json-string-at event "event")
             (Some [value] value)
             (None [] ""))
-        status (load (field view status))]
-    (cond (str-eq kind "run.created")
-            (match-else status
-                        (RunNotFound []
-                                     (do
-                                       (store! (field view status) (RunQueued))
-                                       (store! (field view provider)
-                                               (match (json-string-at event "provider")
-                                                 (Some [value] value)
-                                                 (None [] "")))
-                                       (store! (field view model)
-                                               (match (json-string-at event "model")
-                                                 (Some [value] value)
-                                                 (None [] "")))
-                                       0))
-                        (_ (run-view-invalid! view "duplicate run.created event")))
-          (str-eq kind "run.started")
-            (match-else status
-                        (RunQueued [] (store! (field view status) (RunRunning)))
-                        (_ (run-view-invalid! view "run.started from invalid state")))
-          (str-eq kind "run.cancellation_requested")
-            (match-else status
-                        (RunQueued [] (store! (field view status) (RunCancelling)))
-                        (RunRunning [] (store! (field view status) (RunCancelling)))
-                        (RunCancelling [] 0)
-                        (_ (run-view-invalid! view "cancellation requested from terminal state")))
-          (str-eq kind "run.completed")
-            (match-else status
-                        (RunRunning []
-                                    (do
-                                      (store! (field view status) (RunSucceeded))
-                                      (store! (field view terminal) true)))
-                        (_ (run-view-invalid! view "run.completed from invalid state")))
-          (str-eq kind "run.failed")
-            (match-else status
-                        (RunQueued []
-                                   (do
-                                     (store! (field view status) (RunErrored))
-                                     (store! (field view terminal) true)))
-                        (RunRunning []
-                                    (do
-                                      (store! (field view status) (RunErrored))
-                                      (store! (field view terminal) true)))
-                        (RunCancelling []
-                                       (do
-                                         (store! (field view status) (RunErrored))
-                                         (store! (field view terminal) true)))
-                        (_ (run-view-invalid! view "run.failed from invalid state")))
-          (str-eq kind "run.cancelled")
-            (match-else status
-                        (RunCancelling []
-                                       (do
-                                         (store! (field view status)
-                                                 (RunCancelledStatus))
-                                         (store! (field view terminal) true)))
-                        (RunRunning []
-                                    (do
-                                      (store! (field view status)
-                                              (RunCancelledStatus))
-                                      (store! (field view terminal) true)))
-                        (_ (run-view-invalid! view "run.cancelled from invalid state")))
+        status (.status view)]
+    (cond (= kind "run.created")
+            (match status
+                   (RunNotFound []
+                                (do
+                                  (store! (field view status) (RunQueued))
+                                  (store! (field view provider)
+                                          (match (json-string-at event "provider")
+                                            (Some [value] value)
+                                            (None [] "")))
+                                  (store! (field view model)
+                                          (match (json-string-at event "model")
+                                            (Some [value] value)
+                                            (None [] "")))
+                                  0))
+                   (_ (run-view-invalid! view "duplicate run.created event")))
+          (= kind "run.started")
+            (match status
+                   (RunQueued [] (store! (field view status) (RunRunning)))
+                   (_ (run-view-invalid! view "run.started from invalid state")))
+          (= kind "run.cancellation_requested")
+            (match status
+                   (RunQueued [] (store! (field view status) (RunCancelling)))
+                   (RunRunning [] (store! (field view status) (RunCancelling)))
+                   (RunCancelling [] 0)
+                   (_ (run-view-invalid! view "cancellation requested from terminal state")))
+          (= kind "run.completed")
+            (match status
+                   (RunRunning []
+                               (do
+                                 (store! (field view status) (RunSucceeded))
+                                 (store! (field view terminal) true)))
+                   (_ (run-view-invalid! view "run.completed from invalid state")))
+          (= kind "run.failed")
+            (match status
+                   (RunQueued []
+                              (do
+                                (store! (field view status) (RunErrored))
+                                (store! (field view terminal) true)))
+                   (RunRunning []
+                               (do
+                                 (store! (field view status) (RunErrored))
+                                 (store! (field view terminal) true)))
+                   (RunCancelling []
+                                  (do
+                                    (store! (field view status) (RunErrored))
+                                    (store! (field view terminal) true)))
+                   (_ (run-view-invalid! view "run.failed from invalid state")))
+          (= kind "run.cancelled")
+            (match status
+                   (RunCancelling []
+                                  (do
+                                    (store! (field view status)
+                                            (RunCancelledStatus))
+                                    (store! (field view terminal) true)))
+                   (RunRunning []
+                               (do
+                                 (store! (field view status)
+                                         (RunCancelledStatus))
+                                 (store! (field view terminal) true)))
+                   (_ (run-view-invalid! view "run.cancelled from invalid state")))
           :else 0)
-    (store! (field view last-sequence)
-            (json-number-i64 (json-get event "sequence")))
+    (set! (.last-sequence view) (json-number-i64 (json-get event "sequence")))
     0))
 
 ;; Rebuild one run from immutable journal events without assuming a process boundary.
@@ -127,21 +126,21 @@
   (let [view (alloc/stack DurableRunView)
         (mut i) 0
         n (al-len [Json] (load events))]
-    (store! (field view valid) true)
-    (store! (field view run-id) run-id)
-    (store! (field view provider) "")
-    (store! (field view model) "")
-    (store! (field view status) (RunNotFound))
-    (store! (field view last-sequence) 0)
-    (store! (field view terminal) false)
-    (store! (field view error) "")
+    (set! (.valid view) true)
+    (set! (.run-id view) run-id)
+    (set! (.provider view) "")
+    (set! (.model view) "")
+    (set! (.status view) (RunNotFound))
+    (set! (.last-sequence view) 0)
+    (set! (.terminal view) false)
+    (set! (.error view) "")
     (loop (if (>= (load i) n)
               (break)
               (let [event (al-get [Json] (load events) (load i))]
                 (when (run-event? event run-id)
                   (run-view-transition! view event)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load view)))
 
 ;; Recovery explicitly classifies in-flight work as interrupted. It is never replayed
@@ -149,10 +148,10 @@
 (defn project-run-after-restart [(events (ref (ArrayList Json)))
                                  (run-id (slice u8))] (-> DurableRunView)
   (let [(mut view) (project-run events run-id)]
-    (match-else (load (field view status))
-                (RunRunning [] (store! (field view status) (RunInterrupted)))
-                (RunCancelling [] (store! (field view status) (RunInterrupted)))
-                (_ 0))
+    (match (.status view)
+           (RunRunning [] (set! (.status view) (RunInterrupted)))
+           (RunCancelling [] (set! (.status view) (RunInterrupted)))
+           (_ 0))
     (load view)))
 
 (defn journal-command-sequence [(events (ref (ArrayList Json)))
@@ -166,28 +165,28 @@
                     payload (json-get event "payload")]
                 (match (json-string-at payload "command_id")
                   (Some [value]
-                        (when (str-eq value command-id)
+                        (when (= value command-id)
                           (store! found (json-number-i64 (json-get event "sequence")))
                           0))
                   (None [] 0))
                 (when (> (load found) 0) (break) 0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 (defn run-view-json [(allocator (ptr Allocator))
                      (view (ref DurableRunView))] (-> Json)
   (let [(mut result) (json-object allocator)]
-    (json-put-bool! (mut result) "valid" (load (field view valid)))
-    (json-put-string! (mut result) "run_id" (load (field view run-id)))
+    (json-put-bool! (mut result) "valid" (.valid view))
+    (json-put-string! (mut result) "run_id" (.run-id view))
     (json-put-string! (mut result)
                       "status"
-                      (durable-status-name (load (field view status))))
-    (json-put-string! (mut result) "provider" (load (field view provider)))
-    (json-put-string! (mut result) "model" (load (field view model)))
+                      (durable-status-name (.status view)))
+    (json-put-string! (mut result) "provider" (.provider view))
+    (json-put-string! (mut result) "model" (.model view))
     (json-object-put! (mut result)
                       "last_sequence"
-                      (json-integer allocator (load (field view last-sequence))))
-    (json-put-bool! (mut result) "terminal" (load (field view terminal)))
+                      (json-integer allocator (.last-sequence view)))
+    (json-put-bool! (mut result) "terminal" (.terminal view))
     (when (not (load (field view valid)))
       (json-put-string! (mut result) "error" (load (field view error)))
       0)

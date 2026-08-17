@@ -14,7 +14,7 @@
                              "{\"name\":\"coil\\nagent\",\"enabled\":true,\"items\":[1,null]}")]
            (assert (load (field parsed ok)))
            (assert (match (json-string-at (load (field parsed value)) "name")
-                     (Some [name] (str-eq name "coil\nagent"))
+                     (Some [name] (= name "coil\nagent"))
                      (None [] false)))
            (assert-eq (json-array-length (json-get (load (field parsed value)) "items")) 2)
            (let [encoded (json-stringify allocator (load (field parsed value)))

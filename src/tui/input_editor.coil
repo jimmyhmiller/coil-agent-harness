@@ -68,24 +68,24 @@
 (defn input-editor-new-with-commands [(allocator (ptr Allocator))
                                       (commands (ptr CommandRegistry))] (-> InputEditor)
   (let [editor (alloc/stack InputEditor)]
-    (store! (field editor allocator) allocator)
-    (store! (field editor bytes) (al-new [u8] allocator))
-    (store! (field editor cursor) 0)
-    (store! (field editor history) (al-new [(slice u8)] allocator))
-    (store! (field editor history-index) 0)
-    (store! (field editor commands) commands)
-    (store! (field editor menu-index) 0)
-    (store! (field editor menu-dismissed) false)
-    (store! (field editor search-active) false)
-    (store! (field editor search-query) (al-new [u8] allocator))
-    (store! (field editor search-index) 0)
-    (store! (field editor search-saved) "")
-    (store! (field editor status) "")
+    (set! (.allocator editor) allocator)
+    (set! (.bytes editor) (al-new [u8] allocator))
+    (set! (.cursor editor) 0)
+    (set! (.history editor) (al-new [(slice u8)] allocator))
+    (set! (.history-index editor) 0)
+    (set! (.commands editor) commands)
+    (set! (.menu-index editor) 0)
+    (set! (.menu-dismissed editor) false)
+    (set! (.search-active editor) false)
+    (set! (.search-query editor) (al-new [u8] allocator))
+    (set! (.search-index editor) 0)
+    (set! (.search-saved editor) "")
+    (set! (.status editor) "")
     (load editor)))
 
 (defn input-editor-set-status! [(editor (ptr InputEditor))
                                 (status (slice u8))] (-> i64)
-  (store! (field editor status) status)
+  (set! (.status editor) status)
   0)
 
 (defn input-editor-new [(allocator (ptr Allocator))] (-> InputEditor)
@@ -94,7 +94,7 @@
 (defn input-editor-text [(editor (ptr InputEditor))] (-> (slice u8))
   (slice-new [u8]
              (load (field (field editor bytes) data))
-             (al-len [u8] (load (field editor bytes)))))
+             (al-len [u8] (.bytes editor))))
 
 (defn input-copy [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)]
@@ -102,30 +102,29 @@
     (sb-finish! (mut output))))
 
 (defn input-editor-clear! [(editor (ptr InputEditor))] (-> i64)
-  (al-clear! [u8] (mut (field editor bytes)))
-  (store! (field editor cursor) 0)
-  (store! (field editor history-index)
-          (al-len [(slice u8)] (load (field editor history))))
+  (al-clear! [u8] (mut (.bytes editor)))
+  (set! (.cursor editor) 0)
+  (set! (.history-index editor) (al-len [(slice u8)] (.history editor)))
   0)
 
 (defn input-editor-insert-byte! [(editor (ptr InputEditor))
                                  (byte u8)] (-> i64)
-  (let [cursor (load (field editor cursor))
-        old-length (al-len [u8] (load (field editor bytes)))]
-    (al-push! [u8] (mut (field editor bytes)) byte)
+  (let [cursor (.cursor editor)
+        old-length (al-len [u8] (.bytes editor))]
+    (al-push! [u8] (mut (.bytes editor)) byte)
     (let [(mut at) old-length]
       (loop (if (<= (load at) cursor)
                 (break)
                 (do
                   (al-set! [u8]
-                           (mut (field editor bytes))
+                           (mut (.bytes editor))
                            (load at)
                            (al-get [u8]
-                                   (load (field editor bytes))
+                                   (.bytes editor)
                                    (- (load at) 1)))
-                  (store! at (- (load at) 1))))))
-    (al-set! [u8] (mut (field editor bytes)) cursor byte)
-    (store! (field editor cursor) (+ cursor 1))
+                  (set! at (- (load at) 1))))))
+    (al-set! [u8] (mut (.bytes editor)) cursor byte)
+    (set! (.cursor editor) (+ cursor 1))
     0))
 
 (defn input-editor-insert! [(editor (ptr InputEditor))
@@ -136,13 +135,13 @@
               (break)
               (do
                 (input-editor-insert-byte! editor (slice-get [u8] text (load at)))
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     0))
 
 (defn input-editor-remove-range! [(editor (ptr InputEditor))
                                   (start i64)
                                   (end i64)] (-> i64)
-  (let [length (al-len [u8] (load (field editor bytes)))
+  (let [length (al-len [u8] (.bytes editor))
         bounded-start (if (< start 0) 0 start)
         bounded-end (if (> end length) length end)
         amount (- bounded-end bounded-start)]
@@ -174,36 +173,36 @@
     (loop (if (or (<= (load at) 0)
                   (not (utf8-continuation? (cast i64
                                                  (al-get [u8]
-                                                         (load (field editor bytes))
+                                                         (.bytes editor)
                                                          (load at))))))
               (break)
-              (store! at (- (load at) 1))))
+              (set! at (- (load at) 1))))
     (if (< (load at) 0) 0 (load at))))
 
 (defn input-editor-previous-boundary [(editor (ptr InputEditor))] (-> i64)
   (input-editor-previous-boundary-from editor
-                                       (load (field editor cursor))))
+                                       (.cursor editor)))
 
 (defn input-editor-next-boundary [(editor (ptr InputEditor))] (-> i64)
-  (let [cursor (load (field editor cursor))
-        length (al-len [u8] (load (field editor bytes)))]
+  (let [cursor (.cursor editor)
+        length (al-len [u8] (.bytes editor))]
     (if (>= cursor length)
         length
         (let [scalar (utf8-decode (input-editor-text editor) cursor)]
-          (if (load (field scalar valid))
-              (+ cursor (load (field scalar length)))
+          (if (.valid scalar)
+              (+ cursor (.length scalar))
               (+ cursor 1))))))
 
 (defn input-editor-replace! [(editor (ptr InputEditor))
                              (text (slice u8))] (-> i64)
-  (al-clear! [u8] (mut (field editor bytes)))
-  (store! (field editor cursor) 0)
+  (al-clear! [u8] (mut (.bytes editor)))
+  (set! (.cursor editor) 0)
   (input-editor-insert! editor text))
 
 (defn input-editor-history! [(editor (ptr InputEditor))
                              (direction i64)] (-> InputIntent)
-  (let [count (al-len [(slice u8)] (load (field editor history)))
-        current (load (field editor history-index))
+  (let [count (al-len [(slice u8)] (.history editor))
+        current (.history-index editor)
         next
           (if (< direction 0)
               (if (> current 0) (- current 1) current)
@@ -211,12 +210,12 @@
     (if (= next current)
         (InputUnchanged)
         (do
-          (store! (field editor history-index) next)
+          (set! (.history-index editor) next)
           (input-editor-replace! editor
                                  (if (= next count)
                                      ""
                                      (al-get [(slice u8)]
-                                             (load (field editor history))
+                                             (.history editor)
                                              next)))
           (InputChanged)))))
 
@@ -249,8 +248,8 @@
                     (break)
                     (let [byte (slice-get [u8] text (load i))]
                       (if (or (= byte (cast u8 32)) (= byte (cast u8 10)))
-                          (do (store! ok false) (break))
-                          (store! i (+ (load i) 1))))))
+                          (do (set! ok false) (break))
+                          (set! i (+ (load i) 1))))))
           (if (load ok) text "")))))
 
 (defn input-editor-menu-matches [(editor (ptr InputEditor))] (-> (ArrayList i64))
@@ -262,7 +261,7 @@
         (command-matches (load (field editor allocator)) registry prefix))))
 
 (defn input-editor-menu-open? [(editor (ptr InputEditor))] (-> bool)
-  (if (or (load (field editor menu-dismissed)) (load (field editor search-active)))
+  (if (or (.menu-dismissed editor) (.search-active editor))
       false
       (let [(mut matches) (input-editor-menu-matches editor)]
         (> (al-len [i64] (load matches)) 0))))
@@ -272,7 +271,7 @@
 (defn input-editor-menu-selected [(editor (ptr InputEditor))] (-> i64)
   (let [(mut matches) (input-editor-menu-matches editor)
         count (al-len [i64] (load matches))
-        index (load (field editor menu-index))]
+        index (.menu-index editor)]
     (cond (<= count 0) -1
           (< index 0) 0
           (>= index count) (- count 1)
@@ -285,7 +284,7 @@
         (InputUnchanged)
         (let [current (input-editor-menu-selected editor)
               next (% (+ (+ current delta) count) count)]
-          (store! (field editor menu-index) next)
+          (set! (.menu-index editor) next)
           (InputChanged)))))
 
 ;; True when taking the highlighted row would actually change the line. Enter
@@ -298,10 +297,9 @@
         selected (input-editor-menu-selected editor)]
     (if (or (< selected 0) (= registry (cast (ptr CommandRegistry) 0)))
         false
-        (not (str-eq (load (field (command-at registry
-                                              (al-get [i64] (load matches) selected))
-                                  name))
-                     (input-editor-text editor))))))
+        (not (= (.name (command-at registry
+                                   (al-get [i64] (load matches) selected)))
+                (input-editor-text editor))))))
 
 (defn input-editor-menu-accept! [(editor (ptr InputEditor))] (-> InputIntent)
   (let [registry (load (field editor commands))
@@ -311,10 +309,9 @@
     (if (or (<= count 0) (< selected 0))
         (InputUnchanged)
         (let [name
-                (load (field (command-at registry (al-get [i64] (load matches) selected))
-                             name))]
+                (.name (command-at registry (al-get [i64] (load matches) selected)))]
           (input-editor-replace! editor name)
-          (store! (field editor menu-index) 0)
+          (set! (.menu-index editor) 0)
           (InputChanged)))))
 
 ;; Tab extends to the longest shared prefix first and only accepts the selection
@@ -337,7 +334,7 @@
                 (if (> (slice-len [u8] shared) (slice-len [u8] prefix))
                     (do
                       (input-editor-replace! editor shared)
-                      (store! (field editor menu-dismissed) false)
+                      (set! (.menu-dismissed editor) false)
                       (InputChanged))
                     (input-editor-menu-accept! editor))))))))
 
@@ -348,10 +345,10 @@
 (defn input-editor-search-text [(editor (ptr InputEditor))] (-> (slice u8))
   (slice-new [u8]
              (load (field (field editor search-query) data))
-             (al-len [u8] (load (field editor search-query)))))
+             (al-len [u8] (.search-query editor))))
 
 (defn input-editor-search-active? [(editor (ptr InputEditor))] (-> bool)
-  (load (field editor search-active)))
+  (.search-active editor))
 
 (defn input-contains? [(haystack (slice u8)) (needle (slice u8))] (-> bool)
   (let [n (slice-len [u8] haystack)
@@ -373,10 +370,10 @@
                                                 (slice-get [u8] needle (load i)))
                                         (store! same false)
                                         0)
-                                      (store! i (+ (load i) 1)))))
+                                      (set! i (+ (load i) 1)))))
                           (if (load same)
-                              (store! found true)
-                              (store! at (+ (load at) 1))))))
+                              (set! found true)
+                              (set! at (+ (load at) 1))))))
               (load found))))))
 
 ;; Search backwards from `from`, newest first. Returns -1 for no match, which
@@ -394,7 +391,7 @@
                                        needle)
                   (store! found (load at))
                   0)
-                (store! at (- (load at) 1)))))
+                (set! at (- (load at) 1)))))
     (load found)))
 
 (defn input-editor-search-apply! [(editor (ptr InputEditor)) (from i64)] (-> InputIntent)
@@ -402,22 +399,20 @@
     (if (< found 0)
         (InputChanged)
         (do
-          (store! (field editor search-index) found)
+          (set! (.search-index editor) found)
           (input-editor-replace! editor
-                                 (al-get [(slice u8)] (load (field editor history)) found))
+                                 (al-get [(slice u8)] (.history editor) found))
           (InputChanged)))))
 
 (defn input-editor-search-begin! [(editor (ptr InputEditor))] (-> InputIntent)
-  (if (load (field editor search-active))
+  (if (.search-active editor)
       ;; A second Ctrl-R steps to the next older match.
-      (input-editor-search-apply! editor (- (load (field editor search-index)) 1))
+      (input-editor-search-apply! editor (- (.search-index editor) 1))
       (do
-        (store! (field editor search-saved)
-                (input-copy (load (field editor allocator)) (input-editor-text editor)))
-        (al-clear! [u8] (mut (field editor search-query)))
-        (store! (field editor search-active) true)
-        (store! (field editor search-index)
-                (- (al-len [(slice u8)] (load (field editor history))) 1))
+        (set! (.search-saved editor) (input-copy (load (field editor allocator)) (input-editor-text editor)))
+        (al-clear! [u8] (mut (.search-query editor)))
+        (set! (.search-active editor) true)
+        (set! (.search-index editor) (- (al-len [(slice u8)] (.history editor)) 1))
         (InputChanged))))
 
 (defn input-editor-search-end! [(editor (ptr InputEditor)) (restore bool)] (-> i64)
@@ -435,39 +430,39 @@
 ;; ---------------------------------------------------------------------------
 
 (defn input-editor-word-start [(editor (ptr InputEditor))] (-> i64)
-  (let [(mut start) (load (field editor cursor))]
+  (let [(mut start) (.cursor editor)]
     (loop (if (<= (load start) 0)
               (break)
               (let [previous (input-editor-previous-boundary-from editor (load start))
-                    byte (al-get [u8] (load (field editor bytes)) previous)]
+                    byte (al-get [u8] (.bytes editor) previous)]
                 (if (or (= byte (cast u8 32)) (= byte (cast u8 10)))
-                    (store! start previous)
+                    (set! start previous)
                     (break)))))
     (loop (if (<= (load start) 0)
               (break)
               (let [previous (input-editor-previous-boundary-from editor (load start))
-                    byte (al-get [u8] (load (field editor bytes)) previous)]
+                    byte (al-get [u8] (.bytes editor) previous)]
                 (if (or (= byte (cast u8 32)) (= byte (cast u8 10)))
                     (break)
-                    (store! start previous)))))
+                    (set! start previous)))))
     (load start)))
 
 (defn input-editor-word-end [(editor (ptr InputEditor))] (-> i64)
-  (let [length (al-len [u8] (load (field editor bytes)))
-        saved (load (field editor cursor))
+  (let [length (al-len [u8] (.bytes editor))
+        saved (.cursor editor)
         (mut at) saved]
     (loop (if (>= (load at) length)
               (break)
-              (let [byte (al-get [u8] (load (field editor bytes)) (load at))]
+              (let [byte (al-get [u8] (.bytes editor) (load at))]
                 (if (or (= byte (cast u8 32)) (= byte (cast u8 10)))
-                    (store! at (+ (load at) 1))
+                    (set! at (+ (load at) 1))
                     (break)))))
     (loop (if (>= (load at) length)
               (break)
-              (let [byte (al-get [u8] (load (field editor bytes)) (load at))]
+              (let [byte (al-get [u8] (.bytes editor) (load at))]
                 (if (or (= byte (cast u8 32)) (= byte (cast u8 10)))
                     (break)
-                    (store! at (+ (load at) 1))))))
+                    (set! at (+ (load at) 1))))))
     (load at)))
 
 ;; ---------------------------------------------------------------------------
@@ -482,133 +477,131 @@
 
 (defn input-editor-search-key! [(editor (ptr InputEditor))
                                 (key InputKey)] (-> InputIntent)
-  (match-else key
-              (InputInsert [text]
-                           (do
-                             (let [(mut at) 0
-                                   count (slice-len [u8] text)]
-                               (loop (if (>= (load at) count)
-                                         (break)
-                                         (do
-                                           (al-push! [u8]
-                                                     (mut (field editor search-query))
-                                                     (slice-get [u8] text (load at)))
-                                           (store! at (+ (load at) 1))))))
-                             (input-editor-search-apply! editor
-                                                         (- (al-len [(slice u8)] (load (field editor history))) 1))))
-              (InputBackspace []
-                              (do
-                                (when (> (al-len [u8] (load (field editor search-query))) 0)
-                                  (al-pop! [u8] (mut (field editor search-query)))
-                                  0)
-                                (input-editor-search-apply! editor
-                                                            (- (al-len [(slice u8)] (load (field editor history))) 1))))
-              (InputReverseSearch [] (input-editor-search-begin! editor))
-              ;; Escape and Ctrl-C abandon the search and put back what was typed
-              ;; before it started. Neither interrupts the run.
-              (InputDismiss [] (do (input-editor-search-end! editor true) (InputChanged)))
-              (InputInterrupt [] (do (input-editor-search-end! editor true) (InputChanged)))
-              (InputSubmit []
-                           (do
-                             (input-editor-search-end! editor false)
-                             (input-editor-submit! editor)))
-              ;; Any movement key leaves search with the match in the buffer,
-              ;; which is how readline lets you land on a line and then edit it.
-              (_ (do (input-editor-search-end! editor false) (InputChanged)))))
+  (match key
+         (InputInsert [text]
+                      (do
+                        (let [(mut at) 0
+                              count (slice-len [u8] text)]
+                          (loop (if (>= (load at) count)
+                                    (break)
+                                    (do
+                                      (al-push! [u8]
+                                                (mut (.search-query editor))
+                                                (slice-get [u8] text (load at)))
+                                      (set! at (+ (load at) 1))))))
+                        (input-editor-search-apply! editor
+                                                    (- (al-len [(slice u8)] (.history editor)) 1))))
+         (InputBackspace []
+                         (do
+                           (when (> (al-len [u8] (load (field editor search-query))) 0)
+                             (al-pop! [u8] (mut (field editor search-query)))
+                             0)
+                           (input-editor-search-apply! editor
+                                                       (- (al-len [(slice u8)] (.history editor)) 1))))
+         (InputReverseSearch [] (input-editor-search-begin! editor))
+         ;; Escape and Ctrl-C abandon the search and put back what was typed
+         ;; before it started. Neither interrupts the run.
+         (InputDismiss [] (do (input-editor-search-end! editor true) (InputChanged)))
+         (InputInterrupt [] (do (input-editor-search-end! editor true) (InputChanged)))
+         (InputSubmit []
+                      (do
+                        (input-editor-search-end! editor false)
+                        (input-editor-submit! editor)))
+         ;; Any movement key leaves search with the match in the buffer,
+         ;; which is how readline lets you land on a line and then edit it.
+         (_ (do (input-editor-search-end! editor false) (InputChanged)))))
 
 (defn input-editor-apply! [(editor (ptr InputEditor))
                            (key InputKey)] (-> InputIntent)
-  (if (load (field editor search-active))
+  (if (.search-active editor)
       (input-editor-search-key! editor key)
       (let [menu (input-editor-menu-open? editor)]
         (match key
           (InputInsert [text]
                        (do
                          (input-editor-insert! editor text)
-                         (store! (field editor menu-dismissed) false)
-                         (store! (field editor menu-index) 0)
+                         (set! (.menu-dismissed editor) false)
+                         (set! (.menu-index editor) 0)
                          (InputChanged)))
           (InputLeft []
-                     (if (<= (load (field editor cursor)) 0)
+                     (if (<= (.cursor editor) 0)
                          (InputUnchanged)
                          (do
-                           (store! (field editor cursor)
-                                   (input-editor-previous-boundary editor))
+                           (set! (.cursor editor) (input-editor-previous-boundary editor))
                            (InputChanged))))
           (InputRight []
                       (let [next (input-editor-next-boundary editor)]
-                        (if (= next (load (field editor cursor)))
+                        (if (= next (.cursor editor))
                             (InputUnchanged)
-                            (do (store! (field editor cursor) next) (InputChanged)))))
+                            (do (set! (.cursor editor) next) (InputChanged)))))
           (InputWordLeft []
                          (let [start (input-editor-word-start editor)]
-                           (if (= start (load (field editor cursor)))
+                           (if (= start (.cursor editor))
                                (InputUnchanged)
-                               (do (store! (field editor cursor) start) (InputChanged)))))
+                               (do (set! (.cursor editor) start) (InputChanged)))))
           (InputWordRight []
                           (let [end (input-editor-word-end editor)]
-                            (if (= end (load (field editor cursor)))
+                            (if (= end (.cursor editor))
                                 (InputUnchanged)
-                                (do (store! (field editor cursor) end) (InputChanged)))))
+                                (do (set! (.cursor editor) end) (InputChanged)))))
           (InputHome []
-                     (do (store! (field editor cursor) 0) (InputChanged)))
+                     (do (set! (.cursor editor) 0) (InputChanged)))
           (InputEnd []
                     (do
-                      (store! (field editor cursor)
-                              (al-len [u8] (load (field editor bytes))))
+                      (set! (.cursor editor) (al-len [u8] (.bytes editor)))
                       (InputChanged)))
           (InputBackspace []
-                          (if (<= (load (field editor cursor)) 0)
+                          (if (<= (.cursor editor) 0)
                               (InputUnchanged)
                               (do
                                 (input-editor-remove-range! editor
                                                             (input-editor-previous-boundary editor)
-                                                            (load (field editor cursor)))
-                                (store! (field editor menu-dismissed) false)
+                                                            (.cursor editor))
+                                (set! (.menu-dismissed editor) false)
                                 (InputChanged))))
           (InputDelete []
                        (let [next (input-editor-next-boundary editor)]
-                         (if (= next (load (field editor cursor)))
+                         (if (= next (.cursor editor))
                              (InputUnchanged)
                              (do
                                (input-editor-remove-range! editor
-                                                           (load (field editor cursor))
+                                                           (.cursor editor)
                                                            next)
                                (InputChanged)))))
           (InputDeleteWord []
-                           (let [original (load (field editor cursor))
+                           (let [original (.cursor editor)
                                  start (input-editor-word-start editor)]
                              (if (= start original)
                                  (InputUnchanged)
                                  (do
                                    (input-editor-remove-range! editor start original)
-                                   (store! (field editor menu-dismissed) false)
+                                   (set! (.menu-dismissed editor) false)
                                    (InputChanged)))))
           (InputDeleteWordForward []
-                                  (let [original (load (field editor cursor))
+                                  (let [original (.cursor editor)
                                         end (input-editor-word-end editor)]
                                     (if (= end original)
                                         (InputUnchanged)
                                         (do
                                           (input-editor-remove-range! editor original end)
-                                          (store! (field editor cursor) original)
+                                          (set! (.cursor editor) original)
                                           (InputChanged)))))
           (InputKillToEnd []
-                          (let [cursor (load (field editor cursor))
-                                length (al-len [u8] (load (field editor bytes)))]
+                          (let [cursor (.cursor editor)
+                                length (al-len [u8] (.bytes editor))]
                             (if (>= cursor length)
                                 (InputUnchanged)
                                 (do
                                   (input-editor-remove-range! editor cursor length)
-                                  (store! (field editor cursor) cursor)
+                                  (set! (.cursor editor) cursor)
                                   (InputChanged)))))
           (InputKillToStart []
-                            (let [cursor (load (field editor cursor))]
+                            (let [cursor (.cursor editor)]
                               (if (<= cursor 0)
                                   (InputUnchanged)
                                   (do
                                     (input-editor-remove-range! editor 0 cursor)
-                                    (store! (field editor menu-dismissed) false)
+                                    (set! (.menu-dismissed editor) false)
                                     (InputChanged)))))
           (InputComplete [] (input-editor-complete! editor))
           (InputNewline []
@@ -634,7 +627,7 @@
           ;; dismissal and interruption are separate keys rather than one.
           (InputDismiss []
                         (if menu
-                            (do (store! (field editor menu-dismissed) true) (InputChanged))
+                            (do (set! (.menu-dismissed editor) true) (InputChanged))
                             (InputUnchanged)))
           (InputInterrupt [] (InputInterrupted))
           (InputSuspend [] (InputSuspended))

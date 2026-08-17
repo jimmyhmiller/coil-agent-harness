@@ -78,7 +78,7 @@
     (Err [failure] (JsonNull))
     (Ok [contents]
         (let [parsed (json-parse allocator contents)]
-          (if (load (field parsed ok)) (load (field parsed value)) (JsonNull))))))
+          (if (.ok parsed) (.value parsed) (JsonNull))))))
 
 (defn auth-write-secure-json [(allocator (ptr Allocator))
                               (path (slice u8))
@@ -95,7 +95,7 @@
       (Ok [opened]
           (let [file (alloc/stack fs/File)
                 writer (alloc/stack io/Writer)]
-            (store! file opened)
+            (set! file opened)
             (let [written
                     (match (io/write-all (fs/file-writer writer file)
                                          (cast (ptr i8) (slice-data [u8] serialized))
@@ -144,21 +144,20 @@
     (al-push! [(slice u8)] headers (concat-or-empty allocator "Content-Type: " content-type))
     (al-push! [(slice u8)] headers "Accept: application/json")
     (al-push! [(slice u8)] headers "User-Agent: coil-agent-harness/0.1")
-    (store! (field request url) url)
-    (store! (field request headers) headers)
-    (store! (field request body) body)
-    (store! (field request timeout-ms) 30000)
-    (store! (field request cancellation) (cast (ptr CancellationToken) 0))
-    (store! (field (field request chunks) context) (cast (ptr i8) 0))
-    (store! (field (field request chunks) consume)
-            (fnptr-of discard-http-chunk))
+    (set! (.url request) url)
+    (set! (.headers request) headers)
+    (set! (.body request) body)
+    (set! (.timeout-ms request) 30000)
+    (set! (.cancellation request) (cast (ptr CancellationToken) 0))
+    (set! (.context (.chunks request)) (cast (ptr i8) 0))
+    (set! (.consume (.chunks request)) (fnptr-of discard-http-chunk))
     (let [response (http-post allocator request)
           result response]
-      (if (and (= (load (field result transport-code)) 0)
-               (>= (load (field result status-code)) 200)
-               (< (load (field result status-code)) 300))
-          (let [parsed (json-parse allocator (load (field result body)))]
-            (if (load (field parsed ok)) (load (field parsed value)) (JsonNull)))
+      (if (and (= (.transport-code result) 0)
+               (>= (.status-code result) 200)
+               (< (.status-code result) 300))
+          (let [parsed (json-parse allocator (.body result))]
+            (if (.ok parsed) (.value parsed) (JsonNull)))
           (JsonNull)))))
 
 (defn auth-form-pair! [(allocator (ptr Allocator))
@@ -192,13 +191,11 @@
 
 (defn codex-from-tokens [(allocator (ptr Allocator)) (tokens Json)] (-> CodexCredentials)
   (let [credentials (alloc/stack CodexCredentials)]
-    (store! (field credentials access-token)
-            (match (json-string-at tokens "access_token") (Some [value] value) (None [] "")))
-    (store! (field credentials refresh-token)
-            (match (json-string-at tokens "refresh_token") (Some [value] value) (None [] "")))
-    (store! (field credentials id-token)
-            (match (json-string-at tokens "id_token") (Some [value] value) (None [] "")))
-    (store! (field credentials account-id) (codex-account-id allocator tokens))
+    (set! (.access-token credentials) (match (json-string-at tokens "access_token") (Some [value] value) (None [] "")))
+    (set! (.refresh-token credentials)
+          (match (json-string-at tokens "refresh_token") (Some [value] value) (None [] "")))
+    (set! (.id-token credentials) (match (json-string-at tokens "id_token") (Some [value] value) (None [] "")))
+    (set! (.account-id credentials) (codex-account-id allocator tokens))
     (load credentials)))
 
 (defn codex-token-expiring? [(allocator (ptr Allocator))
@@ -226,7 +223,7 @@
                                    endpoint
                                    (sb-finish! (mut form))
                                    "application/x-www-form-urlencoded")]
-            (when (not (match-else (load response) (JsonNull [] true) (_ false)))
+            (when (not (match (load response) (JsonNull [] true) (_ false)))
               (let [(mut key-index) 0
                     keys
                       (let [(mut names) (al-new [(slice u8)] allocator)]
@@ -260,10 +257,10 @@
   (let [environment (auth-env allocator "HARNESS_CODEX_ACCESS_TOKEN")]
     (if (> (slice-len [u8] environment) 0)
         (let [credentials (alloc/stack CodexCredentials)]
-          (store! (field credentials access-token) environment)
-          (store! (field credentials refresh-token) "")
-          (store! (field credentials id-token) "")
-          (store! (field credentials account-id) (auth-env allocator "HARNESS_CODEX_ACCOUNT_ID"))
+          (set! (.access-token credentials) environment)
+          (set! (.refresh-token credentials) "")
+          (set! (.id-token credentials) "")
+          (set! (.account-id credentials) (auth-env allocator "HARNESS_CODEX_ACCOUNT_ID"))
           (CodexCredentialsLoaded (load credentials)))
         (let [lock (auth-lock allocator "codex-auth.lock")
               harness-path (codex-harness-auth-path allocator)
@@ -279,7 +276,7 @@
                      (> (slice-len [u8] (load access)) 0))]
           (when (and (load ok) (codex-token-expiring? allocator (load access)))
             (let [refreshed (codex-refresh-native allocator (load tokens))]
-              (if (match-else refreshed (JsonNull [] true) (_ false))
+              (if (match refreshed (JsonNull [] true) (_ false))
                   (store! ok false)
                   (do
                     (store! tokens refreshed)
@@ -342,7 +339,7 @@
                                    "https://auth.openai.com/oauth/token"
                                    (codex-code-form allocator code verifier redirect)
                                    "application/x-www-form-urlencoded")]
-            (if (match-else (load tokens) (JsonNull [] true) (_ false))
+            (if (match (load tokens) (JsonNull [] true) (_ false))
                 1
                 (do
                   (json-put-string! (mut tokens) "account_id" (codex-account-id allocator (load tokens)))
@@ -366,11 +363,9 @@
 
 (defn claude-from-json [(value Json)] (-> ClaudeCredentials)
   (let [credentials (alloc/stack ClaudeCredentials)]
-    (store! (field credentials access-token)
-            (match (json-string-at value "access") (Some [token] token) (None [] "")))
-    (store! (field credentials refresh-token)
-            (match (json-string-at value "refresh") (Some [token] token) (None [] "")))
-    (store! (field credentials expires-ms) (json-number-i64 (json-get value "expires")))
+    (set! (.access-token credentials) (match (json-string-at value "access") (Some [token] token) (None [] "")))
+    (set! (.refresh-token credentials) (match (json-string-at value "refresh") (Some [token] token) (None [] "")))
+    (set! (.expires-ms credentials) (json-number-i64 (json-get value "expires")))
     (load credentials)))
 
 (defn claude-token-document [(allocator (ptr Allocator))
@@ -402,7 +397,7 @@
                              endpoint
                              (json-stringify allocator (load body))
                              "application/json")]
-      (when (and (not (match-else (load response) (JsonNull [] true) (_ false)))
+      (when (and (not (match (load response) (JsonNull [] true) (_ false)))
                  (= (slice-len [u8]
                                (match (json-string-at (load response) "refresh_token")
                                  (Some [value] value)
@@ -426,9 +421,9 @@
               (auth-env allocator "ANTHROPIC_AUTH_TOKEN"))]
     (if (> (slice-len [u8] environment) 0)
         (let [credentials (alloc/stack ClaudeCredentials)]
-          (store! (field credentials access-token) environment)
-          (store! (field credentials refresh-token) "")
-          (store! (field credentials expires-ms) 0)
+          (set! (.access-token credentials) environment)
+          (set! (.refresh-token credentials) "")
+          (set! (.expires-ms credentials) 0)
           (ClaudeCredentialsLoaded (load credentials)))
         (let [lock (auth-lock allocator "auth.lock")
               path (claude-auth-path allocator)
@@ -437,12 +432,12 @@
               (mut credentials) (claude-from-json (load value))
               (mut ok)
                 (and (!= lock (cast (ptr fs/File) 0))
-                     (> (slice-len [u8] (load (field credentials access-token))) 0))]
+                     (> (slice-len [u8] (.access-token credentials)) 0))]
           (when (and (load ok)
                      (> (load (field credentials expires-ms)) 0)
                      (<= (load (field credentials expires-ms)) (+ (now-ms) 300000)))
             (let [response (claude-refresh-native allocator (load (field credentials refresh-token)))]
-              (if (match-else response (JsonNull [] true) (_ false))
+              (if (match response (JsonNull [] true) (_ false))
                   (store! ok false)
                   (do
                     (store! document (claude-token-document allocator response))
@@ -503,7 +498,7 @@
                                    (json-stringify allocator
                                                    (claude-code-body allocator code verifier redirect))
                                    "application/json")]
-            (if (match-else response (JsonNull [] true) (_ false))
+            (if (match response (JsonNull [] true) (_ false))
                 1
                 (if (auth-write-secure-json allocator
                                             (claude-auth-path allocator)

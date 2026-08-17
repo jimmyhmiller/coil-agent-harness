@@ -9,13 +9,13 @@
                            (no-color bool)
                            (columns i64)] (-> TerminalFacts)
   (let [facts (alloc/stack TerminalFacts)]
-    (store! (field facts input-tty) input-tty)
-    (store! (field facts output-tty) output-tty)
-    (store! (field facts term-dumb) term-dumb)
-    (store! (field facts no-color) no-color)
-    (store! (field facts unicode) true)
-    (store! (field facts columns) columns)
-    (store! (field facts rows) 24)
+    (set! (.input-tty facts) input-tty)
+    (set! (.output-tty facts) output-tty)
+    (set! (.term-dumb facts) term-dumb)
+    (set! (.no-color facts) no-color)
+    (set! (.unicode facts) true)
+    (set! (.columns facts) columns)
+    (set! (.rows facts) 24)
     (load facts)))
 
 (deftest selects-interactive-capabilities-only-for-a-real-terminal

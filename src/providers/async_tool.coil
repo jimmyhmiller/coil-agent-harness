@@ -20,11 +20,11 @@
 
 (defn async-tool-failure [(message (slice u8))] (-> ModelResult)
   (let [failure (alloc/stack ModelFailure)]
-    (store! (field failure kind) (ConfigurationFailure))
-    (store! (field failure provider) "async-tool")
-    (store! (field failure status-code) 0)
-    (store! (field failure message) message)
-    (store! (field failure retryable) false)
+    (set! (.kind failure) (ConfigurationFailure))
+    (set! (.provider failure) "async-tool")
+    (set! (.status-code failure) 0)
+    (set! (.message failure) message)
+    (set! (.retryable failure) false)
     (ModelErr (load failure))))
 
 (defn async-tool-event [(emitter (ptr EventEmitter))
@@ -34,8 +34,8 @@
   (emit-event emitter
               (now-ms)
               kind
-              (load (field request run-id))
-              (load (field request operation-id))
+              (.run-id request)
+              (.operation-id request)
               ""
               "async-tool"
               "async-tool"
@@ -47,14 +47,14 @@
             (= (al-len [Message] (load messages)) 0))
         ""
         (let [message (al-get [Message] (load messages) 0)]
-          (load (field message content))))))
+          (.content message)))))
 
 (defn async-tool-first-response [(request (ptr ModelRequest))
                                  (allocator (ptr Allocator))] (-> ModelResult)
   (let [parsed (json-parse allocator (async-tool-prompt request))]
-    (if (not (load (field parsed ok)))
+    (if (not (.ok parsed))
         (async-tool-failure "invalid asynchronous tool request")
-        (let [spec (load (field parsed value))
+        (let [spec (.value parsed)
               name
                 (match (json-string-at spec "tool_name")
                   (Some [value] value)
@@ -63,23 +63,21 @@
               (async-tool-failure "asynchronous tool name is missing")
               (let [(mut response) (response-empty allocator)
                     (mut call) (zeroed ToolCall)]
-                (store! (field response provider) "async-tool")
-                (store! (field response model) "async-tool")
-                (store! (field response response-id)
-                        (concat-or-empty allocator
-                                         "async-tool:"
-                                         (load (field request run-id))))
-                (store! (field call id)
-                        (concat-or-empty allocator
-                                         "async-call:"
-                                         (load (field request run-id))))
-                (store! (field call name) name)
-                (store! (field call arguments)
-                        (json-clone allocator (json-get spec "arguments")))
-                (store! (field call raw-arguments)
-                        (json-stringify allocator (json-get spec "arguments")))
+                (set! (.provider response) "async-tool")
+                (set! (.model response) "async-tool")
+                (set! (.response-id response)
+                      (concat-or-empty allocator
+                                       "async-tool:"
+                                       (.run-id request)))
+                (set! (.id call)
+                      (concat-or-empty allocator
+                                       "async-call:"
+                                       (.run-id request)))
+                (set! (.name call) name)
+                (set! (.arguments call) (json-clone allocator (json-get spec "arguments")))
+                (set! (.raw-arguments call) (json-stringify allocator (json-get spec "arguments")))
                 (al-push! [ToolCall]
-                          (mut (field response tool-calls))
+                          (mut (.tool-calls response))
                           (load call))
                 (ModelOk (load response))))))))
 
@@ -96,23 +94,22 @@
         (mut response) (response-empty allocator)]
     (json-put-string! (mut payload)
                       "status"
-                      (match (load (field result status))
+                      (match (.status result)
                         (ToolSucceeded [] "completed")
                         (ToolErrored [] "failed")
                         (ToolDenied [] "denied")
                         (ToolUnknown [] "unknown")))
     (json-object-put! (mut payload)
                       "output"
-                      (json-clone allocator (load (field result output))))
-    (json-put-string! (mut payload) "error" (load (field result error)))
+                      (json-clone allocator (.output result)))
+    (json-put-string! (mut payload) "error" (.error result))
     (let [text (json-stringify allocator (load payload))]
       (async-tool-event emitter request (ModelResponseDelta) (JsonString text))
-      (store! (field response provider) "async-tool")
-      (store! (field response model) "async-tool")
-      (store! (field response response-id)
-              (concat-or-empty allocator "async-tool:" (load (field request run-id))))
-      (store! (field response output-text) text)
-      (store! (field response raw-output) (load payload))
+      (set! (.provider response) "async-tool")
+      (set! (.model response) "async-tool")
+      (set! (.response-id response) (concat-or-empty allocator "async-tool:" (.run-id request)))
+      (set! (.output-text response) text)
+      (set! (.raw-output response) (load payload))
       (ModelOk (load response)))))
 
 (impl ModelProvider AsyncToolProvider
@@ -127,7 +124,7 @@
                  (-> ModelResult)
                  (async-tool-event emitter request (ModelRequestStarted) (JsonNull))
                  (let [result
-                         (if (load (field (field request continuation) present))
+                         (if (.present (.continuation request))
                              (async-tool-terminal-response request emitter allocator)
                              (async-tool-first-response request allocator))]
                    (async-tool-event emitter
@@ -135,5 +132,5 @@
                                      (ModelRequestCompleted)
                                      (JsonString (concat-or-empty allocator
                                                                   "async-tool:"
-                                                                  (load (field request run-id)))))
+                                                                  (.run-id request))))
                    result)))

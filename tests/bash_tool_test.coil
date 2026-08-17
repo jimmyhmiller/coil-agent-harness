@@ -17,10 +17,10 @@
   (let [call (alloc/stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-object-put! (mut arguments) "command" (JsonString command))
-    (store! (field call id) id)
-    (store! (field call name) "bash")
-    (store! (field call arguments) (load arguments))
-    (store! (field call raw-arguments) "")
+    (set! (.id call) id)
+    (set! (.name call) "bash")
+    (set! (.arguments call) (load arguments))
+    (set! (.raw-arguments call) "")
     (load call)))
 
 (deftest bash-captures-both-streams-and-exit-status
@@ -40,14 +40,12 @@
            (store! (field context tool-deadline-monotonic-ms) 0)
            (let [result (execute-bash tool call context allocator)
                  output (load (field result output))]
-             (assert (match-else (load (field result status))
-                                 (ToolSucceeded [] true)
-                                 (_ false)))
+             (assert (match (load (field result status)) (ToolSucceeded [] true) (_ false)))
              (assert (match (json-string-at output "stdout")
-                       (Some [value] (str-eq value "hello"))
+                       (Some [value] (= value "hello"))
                        (None [] false)))
              (assert (match (json-string-at output "stderr")
-                       (Some [value] (str-eq value "problem"))
+                       (Some [value] (= value "problem"))
                        (None [] false)))
              (assert-eq (json-number-i64 (json-get output "exit_code")) 7))))
 
@@ -65,10 +63,8 @@
            (store! (field context run-deadline-monotonic-ms) 0)
            (store! (field context tool-deadline-monotonic-ms) 0)
            (let [result (execute-bash tool call context allocator)]
-             (assert (match-else (load (field result status))
-                                 (ToolErrored [] true)
-                                 (_ false)))
-             (assert (str-eq (load (field result error)) "command cancelled")))
+             (assert (match (load (field result status)) (ToolErrored [] true) (_ false)))
+             (assert (= (load (field result error)) "command cancelled")))
            (cancellation-token-close! cancellation)))
 
 (deftest bash-honors-an-optional-shorter-timeout
@@ -87,9 +83,7 @@
            (store! (field context tool-deadline-monotonic-ms) 0)
            (let [result (execute-bash tool call context allocator)
                  output (load (field result output))]
-             (assert (match-else (load (field result status))
-                                 (ToolErrored [] true)
-                                 (_ false)))
+             (assert (match (load (field result status)) (ToolErrored [] true) (_ false)))
              (assert (match (json-bool-value (json-get output "timed_out"))
                        (Some [value] value)
                        (None [] false))))))
@@ -129,8 +123,7 @@
                        (None [] false)))
              (assert (match (json-string-at output "stdout_artifact")
                        (Some [value]
-                             (str-eq value
-                                     ".factory-artifacts/tool-output/bash-large-output.stdout"))
+                             (= value ".factory-artifacts/tool-output/bash-large-output.stdout"))
                        (None [] false)))
              (match (bounded-read-file allocator
                                        ".factory-artifacts/tool-output/bash-large-output.stdout")
@@ -160,8 +153,8 @@
                        (None [] false)))
              (assert (match (json-string-at output "stdout")
                        (Some [value]
-                             (str-eq value
-                                     "[stdout contained binary or invalid UTF-8; complete bytes are in stdout_artifact]"))
+                             (= value
+                                "[stdout contained binary or invalid UTF-8; complete bytes are in stdout_artifact]"))
                        (None [] false)))
              (match (bounded-read-file allocator
                                        ".factory-artifacts/tool-output/bash-binary-output.stdout")

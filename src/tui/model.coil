@@ -68,10 +68,10 @@
 
 (defn presentation-model-new [(allocator (ptr Allocator))] (-> PresentationModel)
   (let [model (alloc/stack PresentationModel)]
-    (store! (field model allocator) allocator)
-    (store! (field model blocks) (al-new [PresentationBlock] allocator))
-    (store! (field model last-sequence) 0)
-    (store! (field model terminal) false)
+    (set! (.allocator model) allocator)
+    (set! (.blocks model) (al-new [PresentationBlock] allocator))
+    (set! (.last-sequence model) 0)
+    (set! (.terminal model) false)
     (load model)))
 
 (defn presentation-block-index [(model (ptr PresentationModel))
@@ -79,42 +79,30 @@
                                 (kind PresentationKind)] (-> i64)
   (let [(mut found) -1
         (mut i) 0
-        count (al-len [PresentationBlock] (load (field model blocks)))]
+        count (al-len [PresentationBlock] (.blocks model))]
     (loop (if (>= (load i) count)
               (break)
               (let [block
                       (al-get [PresentationBlock]
-                              (load (field model blocks))
+                              (.blocks model)
                               (load i))]
-                (when (and (str-eq (load (field block id)) id)
+                (when (and (= (load (field block id)) id)
                            (match kind
                              (UserBlock []
-                                        (match-else (load (field block kind))
-                                                    (UserBlock [] true)
-                                                    (_ false)))
+                                        (match (load (field block kind)) (UserBlock [] true) (_ false)))
                              (AssistantBlock []
-                                             (match-else (load (field block kind))
-                                                         (AssistantBlock [] true)
-                                                         (_ false)))
+                                             (match (load (field block kind)) (AssistantBlock [] true) (_ false)))
                              (ToolBlock []
-                                        (match-else (load (field block kind))
-                                                    (ToolBlock [] true)
-                                                    (_ false)))
+                                        (match (load (field block kind)) (ToolBlock [] true) (_ false)))
                              (AgentBlock []
-                                         (match-else (load (field block kind))
-                                                     (AgentBlock [] true)
-                                                     (_ false)))
+                                         (match (load (field block kind)) (AgentBlock [] true) (_ false)))
                              (WorkflowBlock []
-                                            (match-else (load (field block kind))
-                                                        (WorkflowBlock [] true)
-                                                        (_ false)))
+                                            (match (load (field block kind)) (WorkflowBlock [] true) (_ false)))
                              (ErrorBlock []
-                                         (match-else (load (field block kind))
-                                                     (ErrorBlock [] true)
-                                                     (_ false)))))
+                                         (match (load (field block kind)) (ErrorBlock [] true) (_ false)))))
                   (store! found (load i))
                   (break))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 (defn presentation-push! [(model (ptr PresentationModel))
@@ -127,18 +115,16 @@
                           (result Json)
                           (detail (slice u8))] (-> i64)
   (let [block (alloc/stack PresentationBlock)]
-    (store! (field block id) (json-copy-string (load (field model allocator)) id))
-    (store! (field block kind) kind)
-    (store! (field block state) state)
-    (store! (field block title) (json-copy-string (load (field model allocator)) title))
-    (store! (field block body) (json-copy-string (load (field model allocator)) body))
-    (store! (field block arguments)
-            (json-clone (load (field model allocator)) arguments))
-    (store! (field block result)
-            (json-clone (load (field model allocator)) result))
-    (store! (field block detail) (json-copy-string (load (field model allocator)) detail))
-    (al-push! [PresentationBlock] (mut (field model blocks)) (load block))
-    (- (al-len [PresentationBlock] (load (field model blocks))) 1)))
+    (set! (.id block) (json-copy-string (load (field model allocator)) id))
+    (set! (.kind block) kind)
+    (set! (.state block) state)
+    (set! (.title block) (json-copy-string (load (field model allocator)) title))
+    (set! (.body block) (json-copy-string (load (field model allocator)) body))
+    (set! (.arguments block) (json-clone (load (field model allocator)) arguments))
+    (set! (.result block) (json-clone (load (field model allocator)) result))
+    (set! (.detail block) (json-copy-string (load (field model allocator)) detail))
+    (al-push! [PresentationBlock] (mut (.blocks model)) (load block))
+    (- (al-len [PresentationBlock] (.blocks model)) 1)))
 
 (defn presentation-block-slot [(model (ptr PresentationModel))
                                (index-value i64)] (-> (ptr PresentationBlock))
@@ -159,7 +145,7 @@
                       (let [byte (cast i64 (slice-get [u8] text (load end)))]
                         (or (< byte 128) (> byte 191)))))
               (break)
-              (store! end (- (load end) 1))))
+              (set! end (- (load end) 1))))
     (load end)))
 
 (defn presentation-append-bounded [(allocator (ptr Allocator))
@@ -198,12 +184,12 @@
                                       (state PresentationState)
                                       (detail (slice u8))] (-> i64)
   (let [(mut at) 0
-        count (al-len [PresentationBlock] (load (field model blocks)))]
+        count (al-len [PresentationBlock] (.blocks model))]
     (loop (if (>= (load at) count)
               (break)
               (let [block (presentation-block-slot model (load at))
                     open
-                      (match (load (field block state))
+                      (match (.state block)
                         (PresentationPending [] true)
                         (PresentationRunning [] true)
                         (PresentationSucceeded [] false)
@@ -218,7 +204,7 @@
                             (json-copy-string (load (field model allocator)) detail))
                     0)
                   0)
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     0))
 
 (defn presentation-apply-action! [(model (ptr PresentationModel))
@@ -264,11 +250,11 @@
                                                      "")
                                  found)
                            block (presentation-block-slot model at)]
-                       (store! (field block body)
-                               (presentation-append-bounded (load (field model allocator))
-                                                            (load (field block body))
-                                                            text
-                                                            PRESENTATION_ASSISTANT_TEXT_LIMIT))
+                       (set! (.body block)
+                             (presentation-append-bounded (load (field model allocator))
+                                                          (.body block)
+                                                          text
+                                                          PRESENTATION_ASSISTANT_TEXT_LIMIT))
                        0))
     (FinishAssistant [id]
                      (let [found (presentation-block-index model id (AssistantBlock))]
@@ -292,9 +278,8 @@
                                                    detail)
                                found)
                          block (presentation-block-slot model at)]
-                     (store! (field block state) (PresentationFailed))
-                     (store! (field block detail)
-                             (json-copy-string (load (field model allocator)) detail))
+                     (set! (.state block) (PresentationFailed))
+                     (set! (.detail block) (json-copy-string (load (field model allocator)) detail))
                      0))
     (ProposeTool [id name arguments]
                  (let [found (presentation-block-index model id (ToolBlock))]
@@ -309,10 +294,8 @@
                                            (JsonNull)
                                            "")
                        (let [block (presentation-block-slot model found)]
-                         (store! (field block title)
-                                 (json-copy-string (load (field model allocator)) name))
-                         (store! (field block arguments)
-                                 (json-clone (load (field model allocator)) arguments))
+                         (set! (.title block) (json-copy-string (load (field model allocator)) name))
+                         (set! (.arguments block) (json-clone (load (field model allocator)) arguments))
                          0))))
     (StartTool [id name]
                (let [found (presentation-block-index model id (ToolBlock))]
@@ -327,9 +310,8 @@
                                          (JsonNull)
                                          "")
                      (let [block (presentation-block-slot model found)]
-                       (store! (field block title)
-                               (json-copy-string (load (field model allocator)) name))
-                       (store! (field block state) (PresentationRunning))
+                       (set! (.title block) (json-copy-string (load (field model allocator)) name))
+                       (set! (.state block) (PresentationRunning))
                        0))))
     (FinishTool [id result]
                 (let [found (presentation-block-index model id (ToolBlock))
@@ -346,9 +328,8 @@
                                                 "")
                             found)
                       block (presentation-block-slot model at)]
-                  (store! (field block state) (PresentationSucceeded))
-                  (store! (field block result)
-                          (json-clone (load (field model allocator)) result))
+                  (set! (.state block) (PresentationSucceeded))
+                  (set! (.result block) (json-clone (load (field model allocator)) result))
                   0))
     (FailTool [id detail]
               (let [found (presentation-block-index model id (ToolBlock))
@@ -365,9 +346,8 @@
                                               detail)
                           found)
                     block (presentation-block-slot model at)]
-                (store! (field block state) (PresentationFailed))
-                (store! (field block detail)
-                        (json-copy-string (load (field model allocator)) detail))
+                (set! (.state block) (PresentationFailed))
+                (set! (.detail block) (json-copy-string (load (field model allocator)) detail))
                 0))
     (RejectTool [id detail]
                 (let [found (presentation-block-index model id (ToolBlock))
@@ -384,9 +364,8 @@
                                                 detail)
                             found)
                       block (presentation-block-slot model at)]
-                  (store! (field block state) (PresentationRejected))
-                  (store! (field block detail)
-                          (json-copy-string (load (field model allocator)) detail))
+                  (set! (.state block) (PresentationRejected))
+                  (set! (.detail block) (json-copy-string (load (field model allocator)) detail))
                   0))
     (DelegateAgent [id]
                    (presentation-push! model
@@ -445,7 +424,7 @@
                                    (JsonNull)
                                    (JsonNull)
                                    detail)
-               (store! (field model terminal) true)
+               (set! (.terminal model) true)
                0))
     (CancelRun [id]
                (do
@@ -461,5 +440,5 @@
                                      (JsonNull)
                                      (JsonNull)
                                      "run cancelled")
-                 (store! (field model terminal) true)
+                 (set! (.terminal model) true)
                  0))))

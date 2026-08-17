@@ -14,10 +14,10 @@
     (loop (if (>= (load at) (slice-len [u8] text))
               (break)
               (do
-                (store! result
-                        (input-decoder-feed! decoder
-                                             (slice-get [u8] text (load at))))
-                (store! at (+ (load at) 1)))))
+                (set! result
+                      (input-decoder-feed! decoder
+                                           (slice-get [u8] text (load at))))
+                (set! at (+ (load at) 1)))))
     (load result)))
 
 (defn decoder-feed-escape! [(decoder (ptr InputDecoder))
@@ -28,54 +28,39 @@
 (deftest decodes-navigation-and-editing-sequences
          (let [allocator (malloc-allocator)
                (mut decoder) (input-decoder-new allocator)]
-           (assert (match-else (input-decoder-feed! (mut decoder) (cast u8 27))
-                               (InputNeedMore [] true)
-                               (_ false)))
-           (assert (match-else (input-decoder-feed! (mut decoder) (cast u8 91))
-                               (InputNeedMore [] true)
-                               (_ false)))
-           (assert (match-else (input-decoder-feed! (mut decoder) (cast u8 68))
-                               (InputDecoded [key]
-                                             (match-else key
-                                                         (InputLeft [] true)
-                                                         (_ false)))
-                               (_ false)))
-           (assert (match-else (decoder-feed-escape! (mut decoder) "[3~")
-                               (InputDecoded [key]
-                                             (match-else key
-                                                         (InputDelete [] true)
-                                                         (_ false)))
-                               (_ false)))
-           (assert (match-else (decoder-feed-escape! (mut decoder) "[13;2u")
-                               (InputDecoded [key]
-                                             (match-else key
-                                                         (InputNewline [] true)
-                                                         (_ false)))
-                               (_ false)))))
+           (assert (match (input-decoder-feed! (mut decoder) (cast u8 27)) (InputNeedMore [] true) (_ false)))
+           (assert (match (input-decoder-feed! (mut decoder) (cast u8 91)) (InputNeedMore [] true) (_ false)))
+           (assert (match (input-decoder-feed! (mut decoder) (cast u8 68))
+                          (InputDecoded [key]
+                                        (match key (InputLeft [] true) (_ false)))
+                          (_ false)))
+           (assert (match (decoder-feed-escape! (mut decoder) "[3~")
+                          (InputDecoded [key]
+                                        (match key (InputDelete [] true) (_ false)))
+                          (_ false)))
+           (assert (match (decoder-feed-escape! (mut decoder) "[13;2u")
+                          (InputDecoded [key]
+                                        (match key (InputNewline [] true) (_ false)))
+                          (_ false)))))
 
 (deftest bracketed-paste-is-one-insertion-even-with-newlines
          (let [allocator (malloc-allocator)
                (mut decoder) (input-decoder-new allocator)]
            (decoder-feed-escape! (mut decoder) "[200~")
            (decoder-feed-text! (mut decoder) "first\n/quit\nlast")
-           (match-else (decoder-feed-escape! (mut decoder) "[201~")
-                       (InputDecoded [key]
-                                     (match-else key
-                                                 (InputInsert [text]
-                                                              (assert (str-eq text
-                                                                              "first\n/quit\nlast")))
-                                                 (_ (assert false))))
-                       (_ (assert false)))))
+           (match (decoder-feed-escape! (mut decoder) "[201~")
+                  (InputDecoded [key]
+                                (match key
+                                       (InputInsert [text]
+                                                    (assert (= text "first\n/quit\nlast")))
+                                       (_ (assert false))))
+                  (_ (assert false)))))
 
 (deftest escape-becomes-dismiss-only-after-sequence-timeout
          (let [allocator (malloc-allocator)
                (mut decoder) (input-decoder-new allocator)]
-           (assert (match-else (input-decoder-feed! (mut decoder) (cast u8 27))
-                               (InputNeedMore [] true)
-                               (_ false)))
-           (assert (match-else (input-decoder-timeout! (mut decoder))
-                               (InputDecoded [key]
-                                             (match-else key
-                                                         (InputDismiss [] true)
-                                                         (_ false)))
-                               (_ false)))))
+           (assert (match (input-decoder-feed! (mut decoder) (cast u8 27)) (InputNeedMore [] true) (_ false)))
+           (assert (match (input-decoder-timeout! (mut decoder))
+                          (InputDecoded [key]
+                                        (match key (InputDismiss [] true) (_ false)))
+                          (_ false)))))

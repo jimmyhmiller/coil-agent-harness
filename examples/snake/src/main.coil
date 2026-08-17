@@ -1,6 +1,36 @@
 (module snake)
 
-(import "std/io" (println print))
+(import "coil.io" :use [println print])
+
+(defn next-x [(x i64) (key u8)] (-> i64)
+  (cond (= key (cast u8 97)) (- x 1)
+        (= key (cast u8 100)) (+ x 1)
+        :else x))
+
+(defn next-y [(y i64) (key u8)] (-> i64)
+  (cond (= key (cast u8 119)) (- y 1)
+        (= key (cast u8 115)) (+ y 1)
+        :else y))
+
+(defn wall-hit? [(x i64) (y i64)] (-> bool)
+  (or (<= x 0) (or (>= x 11) (<= y 0))))
+
+(defn body-has? [(xs (array i64 96))
+                 (ys (array i64 96))
+                 (len i64)
+                 (x i64)
+                 (y i64)] (-> bool)
+  (let [(mut i) 0
+        (mut found) false]
+    (loop (if (or (>= (load i) len) (load found))
+              (break)
+              (do
+                (when (and (= (load (index xs (load i))) x)
+                           (= (load (index ys (load i))) y))
+                  (set! found true)
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
 
 (defn main [] (-> i64)
   (println "Snake")

@@ -22,24 +22,22 @@
                     (listener (ptr socket/TcpListener))
                     (client (ptr TcpTransport))
                     (server (ptr TcpTransport))] (-> bool)
-  (match (socket/tcp-listen allocator listener "127.0.0.1" 0 true 8)
-    (Err [_] false)
-    (Ok [_]
-        (match (socket/tcp-listener-port listener)
-          (Err [_] false)
-          (Ok [port]
-              (if (!= (tcp-transport-connect! allocator client "127.0.0.1" port) 0)
-                  false
-                  (match (time/duration-seconds 2)
-                    (Err [_] false)
-                    (Ok [duration]
-                        (let [accepted (alloc/stack socket/TcpConnection)]
-                          (match (socket/tcp-accept-for listener accepted duration)
-                            (Err [_] false)
-                            (Ok [_]
-                                (do
-                                  (tcp-transport-adopt! server (load accepted))
-                                  true))))))))))))
+  (try (let [_ (try-or! (socket/tcp-listen allocator listener "127.0.0.1" 0 true 8) false)]
+            (match (socket/tcp-listener-port listener)
+              (Err [_] false)
+              (Ok [port]
+                  (if (!= (tcp-transport-connect! allocator client "127.0.0.1" port) 0)
+                      false
+                      (match (time/duration-seconds 2)
+                        (Err [_] false)
+                        (Ok [duration]
+                            (let [accepted (alloc/stack socket/TcpConnection)]
+                              (match (socket/tcp-accept-for listener accepted duration)
+                                (Err [_] false)
+                                (Ok [_]
+                                    (do
+                                      (tcp-transport-adopt! server (load accepted))
+                                      true))))))))))))
 
 (deftest an-envelope-crosses-a-real-socket
          (let [allocator (malloc-allocator)
@@ -67,9 +65,8 @@
                      (Err [_] (assert false))
                      (Ok [_]
                          (do
-                           (assert (str-eq (load (field decoded id)) "msg-1"))
-                           (assert (str-eq (load (field decoded body))
-                                           "summarize the diff"))
+                           (assert (= (load (field decoded id)) "msg-1"))
+                           (assert (= (load (field decoded body)) "summarize the diff"))
                            (assert (address-eq (load (field decoded to))
                                                (Topic "run.chat-1")))))))))
            (transport-close! client)
@@ -93,9 +90,9 @@
            (assert (= (frame-read server allocator first-out) FRAME_OK))
            (assert (= (frame-read server allocator second-out) FRAME_OK))
            (assert (= (frame-read server allocator third-out) FRAME_OK))
-           (assert (str-eq (load first-out) "one"))
+           (assert (= (load first-out) "one"))
            (assert (= (slice-len (load second-out)) 0))
-           (assert (str-eq (load third-out) "three"))
+           (assert (= (load third-out) "three"))
            (transport-close! client)
            (transport-close! server)
            (socket/tcp-listener-close! listener)))

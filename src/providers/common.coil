@@ -17,8 +17,8 @@
 (const TOOL_LAYOUT_ANTHROPIC 2)
 
 (defn model-request-remaining-ms [(request (ptr ModelRequest))] (-> i64)
-  (deadline-remaining-ms (load (field request deadline-monotonic-ms))
-                         (load (field request timeout-ms))))
+  (deadline-remaining-ms (.deadline-monotonic-ms request)
+                         (.timeout-ms request)))
 
 (defstruct ApiCredential
   [(primary-env (ptr i8))
@@ -52,13 +52,13 @@
 
 (defn tool-spec-wire [(allocator (ptr Allocator)) (spec ToolSpec) (layout i64)] (-> Json)
   (let [(mut function) (json-object allocator)]
-    (json-put-string! (mut function) "name" (load (field spec name)))
-    (json-put-string! (mut function) "description" (load (field spec description)))
+    (json-put-string! (mut function) "name" (.name spec))
+    (json-put-string! (mut function) "description" (.description spec))
     (json-object-put! (mut function)
                       (if (= layout TOOL_LAYOUT_ANTHROPIC)
                           "input_schema"
                           "parameters")
-                      (load (field spec input-schema)))
+                      (.input-schema spec))
     (when (!= layout TOOL_LAYOUT_ANTHROPIC)
       (json-put-bool! (mut function) "strict" (load (field spec strict)))
       0)
@@ -83,9 +83,9 @@
               (let [definition (al-get [ToolDefinition] (load definitions) (load i))]
                 (json-array-push! (mut tools)
                                   (tool-spec-wire allocator
-                                                  (load (field definition spec))
+                                                  (.spec definition)
                                                   layout))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load tools)))
 
 (defn messages-wire [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
@@ -98,12 +98,12 @@
                     (mut object) (json-object allocator)]
                 (json-put-string! (mut object)
                                   "role"
-                                  (message-role-name (load (field message role))))
+                                  (message-role-name (.role message)))
                 (json-put-string! (mut object)
                                   "content"
-                                  (load (field message content)))
+                                  (.content message))
                 (json-array-push! (mut result) (load object))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load result)))
 
 (defn tool-choice-responses [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
@@ -143,26 +143,26 @@
     (load value)))
 
 (defn json-number-i64 [(value Json)] (-> i64)
-  (match-else value
-              (JsonNumber [raw]
-                          (match (str-parse-int raw)
-                            (Some [number] number)
-                            (None [] 0)))
-              (_ 0)))
+  (match value
+         (JsonNumber [raw]
+                     (match (str-parse-int raw)
+                       (Some [number] number)
+                       (None [] 0)))
+         (_ 0)))
 
 (defn usage-empty [] (-> ModelUsage)
   (zeroed ModelUsage))
 
 (defn response-empty [(allocator (ptr Allocator))] (-> ModelResponse)
   (let [response (alloc/stack ModelResponse)]
-    (store! (field response provider) "")
-    (store! (field response model) "")
-    (store! (field response response-id) "")
-    (store! (field response provider-session-id) "")
-    (store! (field response output-text) "")
-    (store! (field response tool-calls) (al-new [ToolCall] allocator))
-    (store! (field response usage) (usage-empty))
-    (store! (field response raw-output) (JsonNull))
+    (set! (.provider response) "")
+    (set! (.model response) "")
+    (set! (.response-id response) "")
+    (set! (.provider-session-id response) "")
+    (set! (.output-text response) "")
+    (set! (.tool-calls response) (al-new [ToolCall] allocator))
+    (set! (.usage response) (usage-empty))
+    (set! (.raw-output response) (JsonNull))
     (load response)))
 
 (defn model-completion-payload [(allocator (ptr Allocator))
@@ -170,28 +170,28 @@
                                 (response (ptr ModelResponse))] (-> Json)
   (let [(mut usage) (json-object allocator)
         (mut payload) (json-object allocator)]
-    (json-put-string! (mut payload) "response_id" (load (field response response-id)))
+    (json-put-string! (mut payload) "response_id" (.response-id response))
     (json-put-string! (mut payload)
                       "provider_session_id"
-                      (load (field response provider-session-id)))
-    (json-put-string! (mut payload) "cache_key" (load (field request cache-key)))
+                      (.provider-session-id response))
+    (json-put-string! (mut payload) "cache_key" (.cache-key request))
     (json-object-put! (mut usage)
                       "input_tokens"
-                      (json-integer allocator (load (field (field response usage) input-tokens))))
+                      (json-integer allocator (.input-tokens (.usage response))))
     (json-object-put! (mut usage)
                       "output_tokens"
-                      (json-integer allocator (load (field (field response usage) output-tokens))))
+                      (json-integer allocator (.output-tokens (.usage response))))
     (json-object-put! (mut usage)
                       "reasoning_tokens"
-                      (json-integer allocator (load (field (field response usage) reasoning-tokens))))
+                      (json-integer allocator (.reasoning-tokens (.usage response))))
     (json-object-put! (mut usage)
                       "cached_input_tokens"
                       (json-integer allocator
-                                    (load (field (field response usage) cached-input-tokens))))
+                                    (.cached-input-tokens (.usage response))))
     (json-object-put! (mut usage)
                       "cache_write_tokens"
                       (json-integer allocator
-                                    (load (field (field response usage) cache-write-tokens))))
+                                    (.cache-write-tokens (.usage response))))
     (json-object-put! (mut payload) "usage" (load usage))
     (load payload)))
 
@@ -204,13 +204,13 @@
                   (or (= status 401) (= status 403)) (AuthenticationFailure)
                   (= status 429) (RateLimitFailure)
                   :else (ProviderFailure)))
-    (store! (field failure provider) provider)
-    (store! (field failure status-code) status)
-    (store! (field failure message) message)
-    (store! (field failure retryable)
-            (or (= status 0)
-                (or (= status 408)
-                    (or (= status 429) (>= status 500)))))
+    (set! (.provider failure) provider)
+    (set! (.status-code failure) status)
+    (set! (.message failure) message)
+    (set! (.retryable failure)
+          (or (= status 0)
+              (or (= status 408)
+                  (or (= status 429) (>= status 500)))))
     (ModelErr (load failure))))
 
 (defn json-error-message [(root Json) (fallback (slice u8))] (-> (slice u8))
@@ -224,13 +224,13 @@
                         (raw-arguments (slice u8))] (-> ToolCall)
   (let [call (alloc/stack ToolCall)
         parsed (json-parse allocator raw-arguments)]
-    (store! (field call id) id)
-    (store! (field call name) name)
-    (store! (field call raw-arguments) raw-arguments)
-    (store! (field call arguments)
-            (if (load (field parsed ok))
-                (load (field parsed value))
-                (JsonNull)))
+    (set! (.id call) id)
+    (set! (.name call) name)
+    (set! (.raw-arguments call) raw-arguments)
+    (set! (.arguments call)
+          (if (.ok parsed)
+              (.value parsed)
+              (JsonNull)))
     (load call)))
 
 ;; `int->str` is a comptime primitive, so a runtime status code is formatted by
@@ -245,7 +245,7 @@
                   (break)
                   (do
                     (al-push! [i64] (mut digits) (% (load remaining) 10))
-                    (store! remaining (/ (load remaining) 10)))))
+                    (set! remaining (/ (load remaining) 10)))))
         (let [n (al-len [i64] (load digits))
               (mut i) 0]
           (loop (if (>= (load i) n)
@@ -253,5 +253,5 @@
                     (do
                       (sb-push-byte! (mut buffer)
                                      (cast u8 (+ 48 (al-get [i64] (load digits) (- (- n 1) (load i))))))
-                      (store! i (+ (load i) 1))))))
+                      (set! i (+ (load i) 1))))))
         (sb-finish! (mut buffer)))))

@@ -19,7 +19,7 @@
                                   "/tmp/harness-factory-scaffold-"
                                   (json-stringify allocator (json-integer allocator (now-ms))))]
            (assert (match (scaffold-factory allocator directory)
-                     (FactoryScaffolded [created] (str-eq created directory))
+                     (FactoryScaffolded [created] (= created directory))
                      (FactoryScaffoldFailed [message] false)))
            (assert (path-exists? allocator (path-join allocator directory "factory.json")))
            (assert (path-exists? allocator (path-join allocator directory "context.md")))
@@ -27,8 +27,7 @@
            (assert (match (load-factory-definition allocator directory)
                      (FactoryLoaded [definition]
                        (let [loaded definition]
-                         (and (str-eq (load (field loaded name))
-                                      (factory-directory-name directory))
+                         (and (= (load (field loaded name)) (factory-directory-name directory))
                               (= (al-len [FactoryWorker]
                                          (load (field loaded workers)))
                                  1))))
@@ -36,7 +35,7 @@
            (assert (match (scaffold-factory allocator directory)
                      (FactoryScaffolded [created] false)
                      (FactoryScaffoldFailed [message]
-                       (str-eq message "refusing to overwrite an existing path"))))))
+                       (= message "refusing to overwrite an existing path"))))))
 
 (deftest scaffolds-named-steps-in-the-requested-order
          (let [allocator (malloc-allocator)
@@ -60,9 +59,6 @@
                              second (al-get [FactoryWorker] workers 1)
                              third (al-get [FactoryWorker] workers 2)]
                          (and (= (al-len [FactoryWorker] workers) 3)
-                              (and (str-eq (load (field first file))
-                                           "01-architect.md")
-                                   (and (str-eq (load (field second file))
-                                                "02-implement.md")
-                                        (str-eq (load (field third file))
-                                                "03-verify.md"))))))))))
+                              (and (= (load (field first file)) "01-architect.md")
+                                   (and (= (load (field second file)) "02-implement.md")
+                                        (= (load (field third file)) "03-verify.md"))))))))))

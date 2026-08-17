@@ -61,11 +61,11 @@
 
 ;; X of segment `i` (0 is the head).
 (defn game-segment-x [(g Game) (i i64)] (-> i64)
-  (load (field (index (field g body) i) x)))
+  (.x (index (field g body) i)))
 
 ;; Y of segment `i` (0 is the head).
 (defn game-segment-y [(g Game) (i i64)] (-> i64)
-  (load (field (index (field g body) i) y)))
+  (.y (index (field g body) i)))
 
 ;; X of the snake head.
 (defn game-head-x [(g Game)] (-> i64)
@@ -77,29 +77,29 @@
 
 ;; Number of live snake segments.
 (defn game-length [(g Game)] (-> i64)
-  (load (field g length)))
+  (.length g))
 
 ;; Food eaten so far.
 (defn game-score [(g Game)] (-> i64)
-  (load (field g score)))
+  (.score g))
 
 ;; True once the snake has run into itself; wrapping never sets this.
 (defn game-over? [(g Game)] (-> bool)
-  (load (field g over)))
+  (.over g))
 
 ;; X of the current food cell.
 (defn game-food-x [(g Game)] (-> i64)
-  (load (field (field g food) x)))
+  (.x (.food g)))
 
 ;; Y of the current food cell.
 (defn game-food-y [(g Game)] (-> i64)
-  (load (field (field g food) y)))
+  (.y (.food g)))
 
 ;; Direction the next step will move in, as a cell delta.
 (defn game-dir-x [(g Game)] (-> i64)
-  (load (field g next-x)))
+  (.next-x g))
 (defn game-dir-y [(g Game)] (-> i64)
-  (load (field g next-y)))
+  (.next-y g))
 
 ;; True when any live segment sits on (x, y).
 (defn game-occupied? [(g Game) (x i64) (y i64)] (-> bool)
@@ -116,24 +116,24 @@
 
 ;; Move segment `i` to (cx, cy).
 (defn set-segment! [(g (mut Game)) (i i64) (cx i64) (cy i64)] (-> i64)
-  (store! (field (index (field g body) i) x) cx)
-  (store! (field (index (field g body) i) y) cy)
+  (set! (.x (index (field g body) i)) cx)
+  (set! (.y (index (field g body) i)) cy)
   0)
 
 ;; xorshift64* — a deterministic, dependency-free source of food positions, so a
 ;; given seed always produces the same game.
 (defn next-random [(g (mut Game))] (-> i64)
-  (let [(mut s) (load (field g rng))]
-    (store! s (primitive/ixor (load s) (primitive/ishl (load s) 13)))
-    (store! s (primitive/ixor (load s) (primitive/ishr (load s) 7)))
-    (store! s (primitive/ixor (load s) (primitive/ishl (load s) 17)))
-    (store! (field g rng) (load s))
+  (let [(mut s) (.rng g)]
+    (set! s (primitive/ixor (load s) (primitive/ishl (load s) 13)))
+    (set! s (primitive/ixor (load s) (primitive/ishr (load s) 7)))
+    (set! s (primitive/ixor (load s) (primitive/ishl (load s) 17)))
+    (set! (.rng g) (load s))
     (primitive/cast i64 (primitive/ishr (load s) 1))))
 
 ;; Put the food on a uniformly chosen free cell. A full board leaves the food
 ;; where it is; there is nowhere else for it to go.
 (defn place-food! [(g (mut Game))] (-> i64)
-  (let [free (- (* BOARD-COLS BOARD-ROWS) (load (field g length)))]
+  (let [free (- (* BOARD-COLS BOARD-ROWS) (.length g))]
     (if (<= free 0)
         0
         (let [(mut pick) (% (next-random (mut g)) free)
@@ -162,11 +162,11 @@
                          (dir-x i64)
                          (dir-y i64)
                          (len i64)] (-> i64)
-  (store! (field g length) len)
-  (store! (field g dir-x) dir-x)
-  (store! (field g dir-y) dir-y)
-  (store! (field g next-x) dir-x)
-  (store! (field g next-y) dir-y)
+  (set! (.length g) len)
+  (set! (.dir-x g) dir-x)
+  (set! (.dir-y g) dir-y)
+  (set! (.next-x g) dir-x)
+  (set! (.next-y g) dir-y)
   (for [i 0 len]
     (set-segment! (mut g)
                   i
@@ -177,16 +177,16 @@
 ;; Pin the food to a specific cell. Deterministic setup for tests, and the way
 ;; the engine keeps food off the snake after a restart.
 (defn game-set-food! [(g (mut Game)) (cx i64) (cy i64)] (-> i64)
-  (store! (field (field g food) x) (wrap-col cx))
-  (store! (field (field g food) y) (wrap-row cy))
+  (set! (.x (.food g)) (wrap-col cx))
+  (set! (.y (.food g)) (wrap-row cy))
   0)
 
 ;; Start (or restart) a game: a three-segment snake in the middle of the board
 ;; heading right, score zero, not over, food somewhere free.
 (defn game-reset! [(g (mut Game)) (seed i64)] (-> i64)
-  (store! (field g rng) (primitive/ior (primitive/cast u64 seed) 1))
-  (store! (field g score) 0)
-  (store! (field g over) false)
+  (set! (.rng g) (primitive/ior (primitive/cast u64 seed) 1))
+  (set! (.score g) 0)
+  (set! (.over g) false)
   (game-place-snake! (mut g) (/ BOARD-COLS 2) (/ BOARD-ROWS 2) 1 0 3)
   (place-food! (mut g))
   0)
@@ -194,13 +194,13 @@
 ;; Queue a direction change. A reversal onto the neck is ignored, and a finished
 ;; game does not steer.
 (defn game-steer! [(g (mut Game)) (dx i64) (dy i64)] (-> i64)
-  (if (or (load (field g over))
-          (and (= dx (- 0 (load (field g dir-x))))
-               (= dy (- 0 (load (field g dir-y))))))
+  (if (or (.over g)
+          (and (= dx (- 0 (.dir-x g)))
+               (= dy (- 0 (.dir-y g)))))
       0
       (do
-        (store! (field g next-x) dx)
-        (store! (field g next-y) dy)
+        (set! (.next-x g) dx)
+        (set! (.next-y g) dy)
         0)))
 
 ;; Advance one tick.
@@ -211,19 +211,19 @@
 ;; is still terminal. Landing on the food grows the snake, scores a point, and
 ;; respawns the food.
 (defn game-step! [(g (mut Game))] (-> i64)
-  (if (load (field g over))
+  (if (.over g)
       0
       (do
-        (store! (field g dir-x) (load (field g next-x)))
-        (store! (field g dir-y) (load (field g next-y)))
+        (set! (.dir-x g) (.next-x g))
+        (set! (.dir-y g) (.next-y g))
         ; Wrapping the new head is the whole edge rule: nothing checks the head
         ; against the board bounds, it simply reappears on the opposite side.
-        (let [nx (wrap-col (+ (game-head-x (load g)) (load (field g dir-x))))
-              ny (wrap-row (+ (game-head-y (load g)) (load (field g dir-y))))
+        (let [nx (wrap-col (+ (game-head-x (load g)) (.dir-x g)))
+              ny (wrap-row (+ (game-head-y (load g)) (.dir-y g)))
               eats (and (= nx (game-food-x (load g))) (= ny (game-food-y (load g))))
               ; When the snake is not growing, the tail cell is vacated by this
               ; very step, so moving into it is legal.
-              checked (if eats (load (field g length)) (- (load (field g length)) 1))
+              checked (if eats (.length g) (- (.length g) 1))
               (mut crash) false]
           (for [i 0 checked]
             (if (and (= (game-segment-x (load g) i) nx)
@@ -231,11 +231,11 @@
                 (store! crash true)
                 0))
           (if (load crash)
-              (do (store! (field g over) true) 0)
+              (do (set! (.over g) true) 0)
               (let [grown
-                      (if (and eats (< (load (field g length)) MAX-SEGMENTS))
-                          (+ (load (field g length)) 1)
-                          (load (field g length)))
+                      (if (and eats (< (.length g) MAX-SEGMENTS))
+                          (+ (.length g) 1)
+                          (.length g))
                     (mut i) (- grown 1)]
                 (while (> (load i) 0)
                   (set-segment! (mut g)
@@ -243,11 +243,11 @@
                                 (game-segment-x (load g) (- (load i) 1))
                                 (game-segment-y (load g) (- (load i) 1)))
                   (store! i (- (load i) 1)))
-                (store! (field g length) grown)
+                (set! (.length g) grown)
                 (set-segment! (mut g) 0 nx ny)
                 (if eats
                     (do
-                      (store! (field g score) (+ (load (field g score)) 1))
+                      (set! (.score g) (+ (.score g) 1))
                       (place-food! (mut g))
                       0)
                     0)))))))

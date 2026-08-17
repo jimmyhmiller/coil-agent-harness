@@ -18,7 +18,7 @@
   (start-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                      (-> i64)
                      (do
-                       (store! (field self starts) (+ (load (field self starts)) 1))
+                       (set! (.starts self) (+ (.starts self) 1))
                        0))
   (request-cancel-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                               (-> i64)
@@ -26,7 +26,7 @@
   (cancel-durable-run [(self (ptr FakeRunController)) (command (ptr Json))]
                       (-> RunCancellationResult)
                       (do
-                        (store! (field self cancels) (+ (load (field self cancels)) 1))
+                        (set! (.cancels self) (+ (.cancels self) 1))
                         (RunCancellationAccepted)))
   ;; No registry behind this double, which is the case the service reports as
   ;; 501 rather than pretending an empty tool list is the truth.
@@ -74,12 +74,12 @@
                             (can-observe bool)
                             (can-control bool)] (-> ServiceResponse)
   (let [request (alloc/stack ServiceHttpRequest)]
-    (store! (field request method) method)
-    (store! (field request target) target)
-    (store! (field request body) body)
-    (store! (field request principal) principal)
-    (store! (field request can-observe) can-observe)
-    (store! (field request can-control) can-control)
+    (set! (.method request) method)
+    (set! (.target request) target)
+    (set! (.body request) body)
+    (set! (.principal request) principal)
+    (set! (.can-observe request) can-observe)
+    (set! (.can-control request) can-control)
     (service-handle-http service request)))
 
 (defn http-service-call [(service (ptr RunService))
@@ -89,7 +89,7 @@
   (http-service-call-as service method target body "test-operator" true true))
 
 (defn response-status [(response ServiceResponse)] (-> i64)
-  (load (field response status)))
+  (.status response))
 
 (deftest subagents-have-private-clean-slate-conversations
          (let [allocator (malloc-allocator)
@@ -140,31 +140,28 @@
              (loop (if (>= (load i) (al-len [Json] (load events)))
                        (break)
                        (let [event (al-get [Json] (load events) (load i))]
-                         (when (str-eq (command-string event "event") "run.created")
-                           (cond (str-eq (command-string event "run_id") "child-a")
+                         (when (= (command-string event "event") "run.created")
+                           (cond (= (command-string event "run_id") "child-a")
                                    (store! child-a-payload (json-get event "payload"))
-                                 (str-eq (command-string event "run_id") "child-b")
+                                 (= (command-string event "run_id") "child-b")
                                    (store! child-b-payload (json-get event "payload"))
-                                 (str-eq (command-string event "run_id") "grandchild")
+                                 (= (command-string event "run_id") "grandchild")
                                    (store! grandchild-payload (json-get event "payload"))
                                  :else 0)
                            0)
                          (store! i (+ (load i) 1)))))
-             (assert (str-eq (command-string (load child-a-payload) "conversation_id")
-                             "agent:child-a"))
-             (assert (str-eq (command-string (load child-b-payload) "conversation_id")
-                             "agent:child-b"))
-             (assert (str-eq (command-string (load grandchild-payload) "conversation_id")
-                             "agent:grandchild"))
-             (assert (str-eq (command-string (load grandchild-payload)
-                                             "parent_conversation_id")
-                             "agent:child-a"))
+             (assert (= (command-string (load child-a-payload) "conversation_id") "agent:child-a"))
+             (assert (= (command-string (load child-b-payload) "conversation_id") "agent:child-b"))
+             (assert (= (command-string (load grandchild-payload) "conversation_id") "agent:grandchild"))
+             (assert (= (command-string (load grandchild-payload)
+                                        "parent_conversation_id")
+                        "agent:child-a"))
              (assert-eq (json-array-length (json-get (load child-a-payload) "messages")) 1)
              (assert-eq (json-array-length (json-get (load child-b-payload) "messages")) 1)
              (assert-eq (json-array-length (json-get (load grandchild-payload) "messages")) 1)
-             (assert (str-eq (command-string (json-array-get (json-get (load grandchild-payload) "messages") 0)
-                                             "content")
-                             "Write one line")))
+             (assert (= (command-string (json-array-get (json-get (load grandchild-payload) "messages") 0)
+                                        "content")
+                        "Write one line")))
            (event-journal-close! journal)))
 
 (deftest worker-claims-and-completes-a-durable-run-without-local-execution
@@ -215,11 +212,11 @@
              (assert-eq (load (field created status)) 202)
              (assert-eq (load (field registered status)) 200)
              (assert-eq (load (field controller starts)) 0)
-             (assert (str-eq (command-string (load (field claimed body)) "status") "claimed"))
-             (assert (str-eq (command-string (load (field claimed body)) "run_id") "remote-worker-run"))
-             (assert (str-eq (command-string (load (field replayed-claim body)) "lease_id") "lease-1"))
-             (assert (str-eq (command-string (load (field replayed-claim body)) "run_id") "remote-worker-run"))
-             (assert (str-eq (command-string (json-get (load (field claimed body)) "assignment") "prompt") "hello"))
+             (assert (= (command-string (load (field claimed body)) "status") "claimed"))
+             (assert (= (command-string (load (field claimed body)) "run_id") "remote-worker-run"))
+             (assert (= (command-string (load (field replayed-claim body)) "lease_id") "lease-1"))
+             (assert (= (command-string (load (field replayed-claim body)) "run_id") "remote-worker-run"))
+             (assert (= (command-string (json-get (load (field claimed body)) "assignment") "prompt") "hello"))
              (assert-eq (load (field second-claim status)) 409))
            (let [heartbeat
                    (http-service-call service
@@ -241,11 +238,11 @@
                                       "POST"
                                       "/v1/workers/complete"
                                       "{\"version\":1,\"run_id\":\"remote-worker-run\",\"worker_id\":\"worker-1\",\"lease_id\":\"lease-1\",\"outcome\":\"succeeded\",\"output\":\"done\"}")]
-             (assert (str-eq (command-string (load (field heartbeat body)) "status") "renewed"))
+             (assert (= (command-string (load (field heartbeat body)) "status") "renewed"))
              (assert-eq (load (field progress status)) 202)
              (assert-eq (load (field rejected status)) 409)
              (assert-eq (load (field completed status)) 200)
-             (assert (str-eq (command-string (load (field completed body)) "status") "succeeded")))
+             (assert (= (command-string (load (field completed body)) "status") "succeeded")))
            (event-journal-close! journal)))
 
 (deftest persists-idempotent-create-cancel-and-cursor-queries
@@ -290,7 +287,7 @@
              (assert-eq (load (field queried status)) 200)
              (assert-eq (load (field controller starts)) 1)
              (assert (match (json-string-at (load (field queried body)) "status")
-                       (Some [value] (str-eq value "queued"))
+                       (Some [value] (= value "queued"))
                        (None [] false))))
            (let [observed
                    (http-service-call-as service
@@ -314,7 +311,7 @@
            (let [recovery (event-journal-recover allocator path)
                  created-event (al-get [Json] (load (field recovery events)) 0)
                  payload (json-get created-event "payload")]
-             (assert (str-eq (command-string payload "actor") "test-operator")))
+             (assert (= (command-string payload "actor") "test-operator")))
            (let [events
                    (http-service-call service
                                       "GET"
@@ -334,7 +331,7 @@
              (assert-eq (json-array-length (json-get (load (field after-create body)) "events"))
                         1)
              (assert (match (json-string-at (load (field cancelled body)) "status")
-                       (Some [value] (str-eq value "queued"))
+                       (Some [value] (= value "queued"))
                        (None [] false))))
            (let [automatic
                    (http-service-call service
@@ -347,9 +344,9 @@
                  routed-event (al-get [Json] (load (field recovery events)) 2)
                  payload (json-get routed-event "payload")
                  routing (json-get payload "routing")]
-             (assert (str-eq (command-string payload "provider") "deepseek-openai"))
-             (assert (str-eq (command-string payload "model") "deepseek-v4-flash"))
-             (assert (str-eq (command-string routing "policy") "low-cost")))
+             (assert (= (command-string payload "provider") "deepseek-openai"))
+             (assert (= (command-string payload "model") "deepseek-v4-flash"))
+             (assert (= (command-string routing "policy") "low-cost")))
            (let [delegated
                    (http-service-call service
                                       "POST"
@@ -368,28 +365,25 @@
                  created-agent-event (al-get [Json] (load (field recovery events)) 6)
                  payload (json-get delegated-event "payload")
                  message (json-get payload "message")]
-             (assert (str-eq (command-string delegated-event "event") "agent.delegated"))
-             (assert (str-eq (command-string delegated-event "run_id") "run-1"))
-             (assert (str-eq (command-string delegated-event "agent_id") "run-1"))
-             (assert (str-eq (command-string payload "parent_agent_id") "run-1"))
-             (assert (str-eq (command-string payload "provider") "fake"))
-             (assert (str-eq (command-string payload "model") "fake-model"))
-             (assert (str-eq (command-string payload "conversation_id")
-                             "agent:child-agent"))
-             (assert (str-eq (command-string payload "parent_conversation_id")
-                             "root-conversation"))
+             (assert (= (command-string delegated-event "event") "agent.delegated"))
+             (assert (= (command-string delegated-event "run_id") "run-1"))
+             (assert (= (command-string delegated-event "agent_id") "run-1"))
+             (assert (= (command-string payload "parent_agent_id") "run-1"))
+             (assert (= (command-string payload "provider") "fake"))
+             (assert (= (command-string payload "model") "fake-model"))
+             (assert (= (command-string payload "conversation_id") "agent:child-agent"))
+             (assert (= (command-string payload "parent_conversation_id") "root-conversation"))
              ;; A new subagent is a clean slate: its request contains only the
              ;; delegation, never the parent's instruction or sibling history.
              (let [messages (json-get payload "messages")]
                (assert-eq (json-array-length messages) 1)
-               (assert (str-eq (command-string (json-array-get messages 0) "content")
-                               "research this")))
-             (assert (str-eq (command-string message "kind") "delegation"))
-             (assert (str-eq (command-string message "from") "run-1"))
-             (assert (str-eq (command-string message "to") "child-agent"))
-             (assert (str-eq (command-string message "content") "research this"))
-             (assert (str-eq (command-string created-agent-event "event") "agent.created"))
-             (assert (str-eq (command-string created-agent-event "agent_id") "child-agent")))
+               (assert (= (command-string (json-array-get messages 0) "content") "research this")))
+             (assert (= (command-string message "kind") "delegation"))
+             (assert (= (command-string message "from") "run-1"))
+             (assert (= (command-string message "to") "child-agent"))
+             (assert (= (command-string message "content") "research this"))
+             (assert (= (command-string created-agent-event "event") "agent.created"))
+             (assert (= (command-string created-agent-event "agent_id") "child-agent")))
            (let [first-node
                    (http-service-call service
                                       "POST"
@@ -419,7 +413,7 @@
              (loop (if (>= (load i) n)
                        (break)
                        (let [event (al-get [Json] (load (field recovery events)) (load i))]
-                         (when (str-eq (command-string event "event") "workflow.node.created")
+                         (when (= (command-string event "event") "workflow.node.created")
                            (store! workflow-created (+ (load workflow-created) 1))
                            0)
                          (store! i (+ (load i) 1)))))
@@ -470,13 +464,13 @@
              (loop (if (>= (load i) n)
                        (break)
                        (let [event (json-array-get records (load i))]
-                         (when (str-eq (command-string event "event") "supervisor.assessment.recorded")
+                         (when (= (command-string event "event") "supervisor.assessment.recorded")
                            (store! saw-assessment true)
                            0)
-                         (when (str-eq (command-string event "event") "supervisor.intervention.applied")
+                         (when (= (command-string event "event") "supervisor.intervention.applied")
                            (store! saw-intervention true)
                            0)
-                         (when (str-eq (command-string event "event") "supervisor.intervention.requested")
+                         (when (= (command-string event "event") "supervisor.intervention.requested")
                            (store! intervention-requests (+ (load intervention-requests) 1))
                            0)
                          (store! i (+ (load i) 1)))))
@@ -589,10 +583,10 @@
            (let [running (service-query-run service "running")
                  cancelling (service-query-run service "cancelling")]
              (assert (match (json-string-at (load (field running body)) "status")
-                       (Some [value] (str-eq value "failed"))
+                       (Some [value] (= value "failed"))
                        (None [] false)))
              (assert (match (json-string-at (load (field cancelling body)) "status")
-                       (Some [value] (str-eq value "cancelled"))
+                       (Some [value] (= value "cancelled"))
                        (None [] false))))
            (event-journal-close! journal)))
 

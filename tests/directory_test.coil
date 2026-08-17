@@ -23,10 +23,10 @@
     (loop (if (or (>= (load i) n) (load found))
               (break)
               (do
-                (when (str-eq (al-get [(slice u8)] names (load i)) wanted)
+                (when (= (al-get [(slice u8)] names (load i)) wanted)
                   (store! found true)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 (defn write-empty! [(allocator (ptr Allocator)) (path (slice u8))] (-> bool)
@@ -109,6 +109,6 @@
 
 (deftest joining-paths-does-not-double-the-separator
          (let [allocator (malloc-allocator)]
-           (assert (str-eq (path-join allocator "/tmp" "a.sock") "/tmp/a.sock"))
-           (assert (str-eq (path-join allocator "/tmp/" "a.sock") "/tmp/a.sock"))
-           (assert (str-eq (path-join allocator "" "a.sock") "a.sock"))))
+           (assert (= (path-join allocator "/tmp" "a.sock") "/tmp/a.sock"))
+           (assert (= (path-join allocator "/tmp/" "a.sock") "/tmp/a.sock"))
+           (assert (= (path-join allocator "" "a.sock") "a.sock"))))

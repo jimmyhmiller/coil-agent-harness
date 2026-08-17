@@ -35,9 +35,9 @@
 
 (defn codex-direct-context [(allocator (ptr Allocator))] (-> CodexDirectContext)
   (let [context (alloc/stack CodexDirectContext)]
-    (store! (field context endpoint) "https://chatgpt.com/backend-api/codex/responses")
-    (store! (field (field context credentials) access-token) "")
-    (store! (field (field context credentials) account-id) "")
+    (set! (.endpoint context) "https://chatgpt.com/backend-api/codex/responses")
+    (set! (.access-token (.credentials context)) "")
+    (set! (.account-id (.credentials context)) "")
     (store! (field context transport)
             (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
@@ -48,12 +48,12 @@
     (subscription/CodexCredentialsFailed [message] false)
     (subscription/CodexCredentialsLoaded [loaded]
                                          (let [credentials loaded]
-                                           (store! (field (field self credentials) access-token)
-                                                   (load (field credentials access-token)))
-                                           (store! (field (field self credentials) account-id)
-                                                   (load (field credentials account-id)))
+                                           (set! (.access-token (.credentials self))
+                                                 (.access-token credentials))
+                                           (set! (.account-id (.credentials self))
+                                                 (.account-id credentials))
                                            (> (slice-len [u8]
-                                                         (load (field (field self credentials) access-token)))
+                                                         (.access-token (.credentials self)))
                                               0)))))
 
 (defn codex-direct-event [(emitter (ptr EventEmitter))
@@ -63,11 +63,11 @@
   (emit-event emitter
               (now-ms)
               kind
-              (load (field request run-id))
-              (load (field request operation-id))
+              (.run-id request)
+              (.operation-id request)
               ""
               "codex-direct"
-              (load (field request model))
+              (.model request)
               payload))
 
 (defstruct CodexDirectStreamState
@@ -89,9 +89,9 @@
                          (if (str-eq data "[DONE]")
                              true
                              (let [parsed (json-parse (load (field self allocator)) data)]
-                               (if (not (load (field parsed ok)))
-                                   (do (store! (field self failed) true) false)
-                                   (let [wire (load (field parsed value))
+                               (if (not (.ok parsed))
+                                   (do (set! (.failed self) true) false)
+                                   (let [wire (.value parsed)
                                          kind
                                            (if (> (slice-len [u8] event-name) 0)
                                                event-name
@@ -186,14 +186,14 @@
                         (store! i (+ (load i) 1))))))
           0))
       0)
-    (let [current (json-get (load (field response raw-output)) "output")
+    (let [current (json-get (.raw-output response) "output")
           (mut i) 0
           count (json-array-length current)]
       (loop (if (>= (load i) count)
                 (break)
                 (do
                   (json-array-push! (mut combined) (json-array-get current (load i)))
-                  (store! i (+ (load i) 1))))))
+                  (set! i (+ (load i) 1))))))
     (let [(mut envelope) (json-object allocator)]
       (json-object-put! (mut envelope) "output" (load combined))
       (load envelope))))
@@ -202,17 +202,17 @@
                                  (request (ptr ModelRequest))] (-> Json)
   (let [request-value (load request)
         local (alloc/stack ModelRequest)]
-    (store! local request-value)
+    (set! local request-value)
     ;; Prevent the generic stored-Responses continuation shape. Direct mode
     ;; reconstructs input above because this endpoint requires store=false.
-    (store! (field (field local continuation) present) false)
+    (set! (.present (.continuation local)) false)
     (let [(mut wire) (openai-request-json-with-output-limit allocator local false)
           (mut include) (json-array allocator)]
       (json-put-bool! (mut wire) "store" false)
       (json-object-put! (mut wire) "input" (codex-direct-input allocator request))
       (json-put-string! (mut wire)
                         "prompt_cache_key"
-                        (load (field request prompt-cache-key)))
+                        (.prompt-cache-key request))
       ;; The ChatGPT subscription endpoint rejects prompt_cache_options. Its
       ;; omission selects the documented implicit/default caching behavior;
       ;; prompt_cache_key remains the stable routing hint.
@@ -236,11 +236,11 @@
             authorization
               (concat-or-empty allocator
                                "Authorization: Bearer "
-                               (load (field (field self credentials) access-token)))
+                               (.access-token (.credentials self)))
             account-header
               (concat-or-empty allocator
                                "ChatGPT-Account-Id: "
-                               (load (field (field self credentials) account-id)))
+                               (.account-id (.credentials self)))
             state (alloc/stack CodexDirectStreamState)
             decoder (alloc/stack SseDecoder)
             http-request (alloc/stack HttpRequest)]
@@ -252,23 +252,23 @@
         (when (> (slice-len [u8] (load (field (field self credentials) account-id))) 0)
           (al-push! [(slice u8)] headers account-header)
           0)
-        (store! (field state allocator) allocator)
-        (store! (field state request) request)
-        (store! (field state emitter) emitter)
-        (store! (field state completed) false)
-        (store! (field state failed) false)
-        (store! (field state output) (json-array allocator))
-        (store! (field state response) (JsonNull))
-        (store! decoder (sse-decoder-new allocator state 1048576))
-        (store! (field http-request url) (load (field self endpoint)))
-        (store! (field http-request headers) headers)
-        (store! (field http-request body)
-                (json-stringify allocator
-                                (codex-direct-request-json allocator request)))
-        (store! (field http-request cancellation) (load (field request cancellation)))
-        (store! (field http-request timeout-ms) (model-request-remaining-ms request))
-        (store! (field (field http-request chunks) context) (cast (ptr i8) decoder))
-        (store! (field (field http-request chunks) consume) (fnptr-of sse-http-chunk))
+        (set! (.allocator state) allocator)
+        (set! (.request state) request)
+        (set! (.emitter state) emitter)
+        (set! (.completed state) false)
+        (set! (.failed state) false)
+        (set! (.output state) (json-array allocator))
+        (set! (.response state) (JsonNull))
+        (set! decoder (sse-decoder-new allocator state 1048576))
+        (set! (.url http-request) (.endpoint self))
+        (set! (.headers http-request) headers)
+        (set! (.body http-request)
+              (json-stringify allocator
+                              (codex-direct-request-json allocator request)))
+        (set! (.cancellation http-request) (load (field request cancellation)))
+        (set! (.timeout-ms http-request) (model-request-remaining-ms request))
+        (set! (.context (.chunks http-request)) (cast (ptr i8) decoder))
+        (set! (.consume (.chunks http-request)) (fnptr-of sse-http-chunk))
         ;; Size and turn count go on the started event so a later rejection can
         ;; be diagnosed from the journal alone. A request that grew past the
         ;; model's limit is indistinguishable from a malformed one otherwise.
@@ -276,24 +276,24 @@
           (json-object-put! (mut started)
                             "request_bytes"
                             (json-integer allocator
-                                          (slice-len [u8] (load (field http-request body)))))
+                                          (slice-len [u8] (.body http-request))))
           (json-object-put! (mut started)
                             "messages"
                             (json-integer allocator
                                           (al-len [Message] (load (load (field request messages))))))
-          (json-put-string! (mut started) "effort" (load (field request reasoning)))
+          (json-put-string! (mut started) "effort" (.reasoning request))
           (json-put-string! (mut started)
                             "prompt_cache_key"
-                            (load (field request prompt-cache-key)))
+                            (.prompt-cache-key request))
           (codex-direct-event emitter request (ModelRequestStarted) (load started)))
-        (let [http (streaming-http-send (load (field self transport)) allocator http-request)
-              status (load (field http status-code))]
+        (let [http (streaming-http-send (.transport self) allocator http-request)
+              status (.status-code http)]
           (sse-decoder-free! decoder)
-          (if (or (!= (load (field http transport-code)) 0)
+          (if (or (!= (.transport-code http) 0)
                   (< status 200)
                   (>= status 300)
-                  (load (field state failed))
-                  (not (load (field state completed))))
+                  (.failed state)
+                  (not (.completed state)))
               (if (model-request-cancelled? request)
                   ;; Cancellation deliberately interrupts libcurl/SSE. It is a
                   ;; run lifecycle event, not a provider failure, and the partial
@@ -301,14 +301,14 @@
                   (model-failure "codex-direct" 0 "request cancelled")
                   (let [message
                           (if (or (< status 200) (>= status 300))
-                              (let [parsed (json-parse allocator (load (field http body)))]
-                                (if (load (field parsed ok))
-                                    (json-error-message (load (field parsed value))
-                                                        (load (field http body)))
-                                    (load (field http body))))
-                              (if (load (field state failed))
+                              (let [parsed (json-parse allocator (.body http))]
+                                (if (.ok parsed)
+                                    (json-error-message (.value parsed)
+                                                        (.body http))
+                                    (.body http)))
+                              (if (.failed state)
                                   "Direct Codex stream failed"
-                                  (load (field http error))))]
+                                  (.error http)))]
                     ;; The bare body ("{\"detail\":\"Bad Request\"}") says nothing
                     ;; about which provider rejected it or why. Carrying the status
                     ;; is what separates "the request was malformed or too large"
@@ -323,12 +323,10 @@
                                 (concat-or-empty allocator "codex-direct: " message))]
                       (codex-direct-event emitter request (ModelRequestFailed) (JsonString described))
                       (model-failure "codex-direct" status described))))
-              (let [(mut response) (openai-parse-response allocator (load (field state response)))]
-                (store! (field response provider) "codex-direct")
-                (store! (field response provider-session-id)
-                        (load (field response response-id)))
-                (store! (field response raw-output)
-                        (codex-direct-cumulative-raw-output allocator request (mut response)))
+              (let [(mut response) (openai-parse-response allocator (.response state))]
+                (set! (.provider response) "codex-direct")
+                (set! (.provider-session-id response) (.response-id response))
+                (set! (.raw-output response) (codex-direct-cumulative-raw-output allocator request (mut response)))
                 ;; Keep the aggregate in addressable storage across the dynamic
                 ;; EventSink call. Passing this nested Json return as a temporary
                 ;; corrupts its ArrayList-backed object representation on the

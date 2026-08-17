@@ -21,8 +21,8 @@
                                        (workspace (slice u8))] (-> bool)
   (let [args (alloc/stack (array (slice u8) 2))
         run-result (alloc/stack subprocess/RunResult)]
-    (store! (index args 0) "init")
-    (store! (index args 1) "--quiet")
+    (set! (index args 0) "init")
+    (set! (index args 1) "--quiet")
     (let [options
             (subprocess/run-options "/usr/bin/git"
                                     (slice-new [(slice u8)] (index args 0) 2)
@@ -36,7 +36,7 @@
         (Err [failure] false)
         (Ok [completed]
             (let [success
-                    (match (load (field completed status))
+                    (match (.status completed)
                       (subprocess/Exited [code] (= code 0))
                       (subprocess/Signaled [signal] false))]
               (subprocess/run-result-free allocator completed)
@@ -58,9 +58,9 @@
         (let [destination (path-join allocator root (sb-finish! (mut name)))
               args (alloc/stack (array (slice u8) 3))
               run-result (alloc/stack subprocess/RunResult)]
-          (store! (index args 0) "-R")
-          (store! (index args 1) source)
-          (store! (index args 2) destination)
+          (set! (index args 0) "-R")
+          (set! (index args 1) source)
+          (set! (index args 2) destination)
           (let [options
                   (subprocess/run-options "/bin/cp"
                                           (slice-new [(slice u8)] (index args 0) 3)
@@ -74,7 +74,7 @@
               (Err [failure] (FactorySnapshotFailed "could not copy factory definition"))
               (Ok [completed]
                   (let [success
-                          (match (load (field completed status))
+                          (match (.status completed)
                             (subprocess/Exited [code] (= code 0))
                             (subprocess/Signaled [signal] false))]
                     (subprocess/run-result-free allocator completed)
@@ -99,9 +99,9 @@
                                                    (FactorySnapshotFailed "could not read copied factory.json"))
                                               (Ok [manifest-text]
                                                   (let [parsed (json-parse allocator manifest-text)]
-                                                    (if (not (load (field parsed ok)))
+                                                    (if (not (.ok parsed))
                                                         (FactorySnapshotFailed "copied factory.json is invalid")
-                                                        (let [(mut manifest) (load (field parsed value))
+                                                        (let [(mut manifest) (.value parsed)
                                                               (mut contexts) (json-array allocator)]
                                                           ;; destination is
                                                           ;; workspace/.factory/definitions/definition-N.

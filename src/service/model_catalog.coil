@@ -42,28 +42,28 @@
                     (effort bool)
                     (default-effort (slice u8))] (-> ModelChoice)
   (let [choice (alloc/stack ModelChoice)]
-    (store! (field choice provider) provider)
-    (store! (field choice model) model)
-    (store! (field choice label) label)
-    (store! (field choice summary) summary)
-    (store! (field choice effort) effort)
-    (store! (field choice default-effort) default-effort)
+    (set! (.provider choice) provider)
+    (set! (.model choice) model)
+    (set! (.label choice) label)
+    (set! (.summary choice) summary)
+    (set! (.effort choice) effort)
+    (set! (.default-effort choice) default-effort)
     (load choice)))
 
 (defn model-catalog-new [(allocator (ptr Allocator))] (-> ModelCatalog)
   (let [catalog (alloc/stack ModelCatalog)]
-    (store! (field catalog choices) (al-new [ModelChoice] allocator))
+    (set! (.choices catalog) (al-new [ModelChoice] allocator))
     (load catalog)))
 
 (defn model-catalog-add! [(catalog (ptr ModelCatalog)) (choice ModelChoice)] (-> i64)
-  (al-push! [ModelChoice] (mut (field catalog choices)) choice)
+  (al-push! [ModelChoice] (mut (.choices catalog)) choice)
   0)
 
 (defn model-catalog-count [(catalog (ptr ModelCatalog))] (-> i64)
-  (al-len [ModelChoice] (load (field catalog choices))))
+  (al-len [ModelChoice] (.choices catalog)))
 
 (defn model-catalog-at [(catalog (ptr ModelCatalog)) (at i64)] (-> (ptr ModelChoice))
-  (al-elem [ModelChoice] (mut (field catalog choices)) at))
+  (al-elem [ModelChoice] (mut (.choices catalog)) at))
 
 ;; Registration order is menu order, so the list reads newest-and-strongest
 ;; first rather than alphabetically.
@@ -171,11 +171,11 @@
     (loop (if (or (>= (load i) n) (>= (load found) 0))
               (break)
               (let [choice (model-catalog-at catalog (load i))]
-                (when (and (str-eq (load (field choice provider)) provider)
-                           (str-eq (load (field choice model)) model))
+                (when (and (= (load (field choice provider)) provider)
+                           (= (load (field choice model)) model))
                   (store! found (load i))
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load found)))
 
 ;; ---------------------------------------------------------------------------
@@ -191,9 +191,9 @@
                      (label (slice u8))
                      (summary (slice u8))] (-> EffortChoice)
   (let [choice (alloc/stack EffortChoice)]
-    (store! (field choice effort) effort)
-    (store! (field choice label) label)
-    (store! (field choice summary) summary)
+    (set! (.effort choice) effort)
+    (set! (.label choice) label)
+    (set! (.summary choice) summary)
     (load choice)))
 
 (const EFFORT_CHOICE_COUNT 5)
@@ -210,11 +210,11 @@
         :else (effort-choice "max" "max" "correctness over cost")))
 
 (defn effort-index [(effort (slice u8))] (-> i64)
-  (cond (str-eq effort "low") 0
-        (str-eq effort "medium") 1
-        (str-eq effort "high") 2
-        (str-eq effort "xhigh") 3
-        (str-eq effort "max") 4
+  (cond (= effort "low") 0
+        (= effort "medium") 1
+        (= effort "high") 2
+        (= effort "xhigh") 3
+        (= effort "max") 4
         :else -1))
 
 (defn effort-from-name [(name (slice u8))] (-> (slice u8))

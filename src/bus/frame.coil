@@ -91,14 +91,10 @@
 ;; in a hex dump.
 (defn header-encode! [(header (ptr FrameHeader)) (length i64)] (-> i64)
   (let [bytes (primitive/cast (ptr u8) (field header bytes))]
-    (store! (primitive/index bytes 0)
-            (primitive/cast u8 (primitive/iand (primitive/ishr length 24) 255)))
-    (store! (primitive/index bytes 1)
-            (primitive/cast u8 (primitive/iand (primitive/ishr length 16) 255)))
-    (store! (primitive/index bytes 2)
-            (primitive/cast u8 (primitive/iand (primitive/ishr length 8) 255)))
-    (store! (primitive/index bytes 3)
-            (primitive/cast u8 (primitive/iand length 255)))
+    (set! (primitive/index bytes 0) (primitive/cast u8 (primitive/iand (primitive/ishr length 24) 255)))
+    (set! (primitive/index bytes 1) (primitive/cast u8 (primitive/iand (primitive/ishr length 16) 255)))
+    (set! (primitive/index bytes 2) (primitive/cast u8 (primitive/iand (primitive/ishr length 8) 255)))
+    (set! (primitive/index bytes 3) (primitive/cast u8 (primitive/iand length 255)))
     0))
 
 (defn header-decode [(header (ptr FrameHeader))] (-> i64)

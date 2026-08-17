@@ -85,7 +85,7 @@
                       (sb-push-byte! (mut buffer) (cast u8 37))
                       (sb-push-byte! (mut buffer) (cc-hex-digit (/ byte 16)))
                       (sb-push-byte! (mut buffer) (cc-hex-digit (% byte 16)))))
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (sb-finish! (mut buffer))))
 
 ;; Decode percent escapes. A malformed escape is left verbatim rather than
@@ -105,13 +105,13 @@
                       (if (or (< high 0) (< low 0))
                           (do
                             (sb-push-byte! (mut buffer) (cast u8 byte))
-                            (store! i (+ (load i) 1)))
+                            (set! i (+ (load i) 1)))
                           (do
                             (sb-push-byte! (mut buffer) (cast u8 (+ (* high 16) low)))
-                            (store! i (+ (load i) 3)))))
+                            (set! i (+ (load i) 3)))))
                     (do
                       (sb-push-byte! (mut buffer) (cast u8 byte))
-                      (store! i (+ (load i) 1)))))))
+                      (set! i (+ (load i) 1)))))))
     (sb-finish! (mut buffer))))
 
 ;; True when `address` satisfies the receiver's own validation. Checked before
@@ -126,7 +126,7 @@
                 (when (not (or (= byte 37) (cc-address-safe-byte? byte)))
                   (store! ok false)
                   0)
-                (store! i (+ (load i) 1)))))
+                (set! i (+ (load i) 1)))))
     (load ok)))
 
 ;; ---------------------------------------------------------------------------
@@ -210,13 +210,13 @@
       (let [(mut divisor) 1]
         (loop (if (> (* (load divisor) 10) value)
                   (break)
-                  (store! divisor (* (load divisor) 10))))
+                  (set! divisor (* (load divisor) 10))))
         (loop (do
                 (sb-push-byte! (mut buffer)
                                (cast u8 (+ 48 (% (/ value (load divisor)) 10))))
                 (if (= (load divisor) 1)
                     (break)
-                    (store! divisor (/ (load divisor) 10)))))
+                    (set! divisor (/ (load divisor) 10)))))
         0)))
 
 ;; The socket path for a pid, with the reference client's length fallback. The

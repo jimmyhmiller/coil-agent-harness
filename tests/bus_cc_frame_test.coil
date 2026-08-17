@@ -23,8 +23,8 @@
 (deftest a-user-frame-has-the-shape-the-receiver-validates
          (let [allocator (malloc-allocator)
                frame (user-frame-json allocator "uds:/tmp/x.sock" "")]
-           (assert (str-eq (json-stringify allocator frame)
-                           "{\"msgV\":1,\"msg_id\":\"id-1\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"priority\":\"next\",\"from\":\"uds:/tmp/x.sock\"}"))))
+           (assert (= (json-stringify allocator frame)
+                      "{\"msgV\":1,\"msg_id\":\"id-1\",\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"},\"priority\":\"next\",\"from\":\"uds:/tmp/x.sock\"}"))))
 
 ;; A present-but-wrong session_id is dropped without a trace, so it must be
 ;; absent unless the caller is deliberately pinning a session.
@@ -46,19 +46,19 @@
                frame (cc-user-frame allocator "id-1" "hi" "" "" "")]
            (match (json-string-at frame "priority")
              (None [] (assert false))
-             (Some [value] (assert (str-eq value "next"))))))
+             (Some [value] (assert (= value "next"))))))
 
 (deftest a-rename-frame-carries-the-new-name
          (let [allocator (malloc-allocator)
                frame (cc-rename-frame allocator "id-2" "harness")]
-           (assert (str-eq (json-stringify allocator frame)
-                           "{\"msgV\":1,\"msg_id\":\"id-2\",\"type\":\"control\",\"action\":\"rename\",\"name\":\"harness\"}"))))
+           (assert (= (json-stringify allocator frame)
+                      "{\"msgV\":1,\"msg_id\":\"id-2\",\"type\":\"control\",\"action\":\"rename\",\"name\":\"harness\"}"))))
 
 (deftest a-status-frame-names-the-message-it-answers
          (let [allocator (malloc-allocator)
                frame (cc-status-frame allocator "id-3" "held" "" "uds:/tmp/x.sock" "id-1")]
-           (assert (str-eq (json-stringify allocator frame)
-                           "{\"msgV\":1,\"msg_id\":\"id-3\",\"type\":\"control\",\"action\":\"peer_message_status\",\"status\":\"held\",\"from\":\"uds:/tmp/x.sock\",\"orig_msg_id\":\"id-1\"}"))))
+           (assert (= (json-stringify allocator frame)
+                      "{\"msgV\":1,\"msg_id\":\"id-3\",\"type\":\"control\",\"action\":\"peer_message_status\",\"status\":\"held\",\"from\":\"uds:/tmp/x.sock\",\"orig_msg_id\":\"id-1\"}"))))
 
 (deftest a-frame-line-is-one-json-object-with-a-trailing-newline
          (let [allocator (malloc-allocator)
@@ -104,10 +104,10 @@
                  (cc-frame-line allocator
                                 (cc-user-frame allocator "id-1" "hello" "uds:/tmp/x.sock" "next" ""))]
            (assert (cc-frame-parse allocator line parsed))
-           (assert (str-eq (load (field parsed message-id)) "id-1"))
-           (assert (str-eq (load (field parsed content)) "hello"))
-           (assert (str-eq (load (field parsed from)) "uds:/tmp/x.sock"))
-           (assert (str-eq (load (field parsed priority)) "next"))))
+           (assert (= (load (field parsed message-id)) "id-1"))
+           (assert (= (load (field parsed content)) "hello"))
+           (assert (= (load (field parsed from)) "uds:/tmp/x.sock"))
+           (assert (= (load (field parsed priority)) "next"))))
 
 (deftest a-control-frame-parses-back
          (let [allocator (malloc-allocator)
@@ -116,9 +116,9 @@
                  (cc-frame-line allocator
                                 (cc-status-frame allocator "id-3" "held" "" "uds:/tmp/x.sock" "id-1"))]
            (assert (cc-frame-parse allocator line parsed))
-           (assert (str-eq (load (field parsed action)) "peer_message_status"))
-           (assert (str-eq (load (field parsed status)) "held"))
-           (assert (str-eq (load (field parsed original-id)) "id-1"))))
+           (assert (= (load (field parsed action)) "peer_message_status"))
+           (assert (= (load (field parsed status)) "held"))
+           (assert (= (load (field parsed original-id)) "id-1"))))
 
 ;; The minimal injection from the protocol's own debug log -- no msgV, no
 ;; msg_id, no from. It must work, because that is what a shell one-liner sends.
@@ -128,7 +128,7 @@
            (assert (cc-frame-parse allocator
                                    "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}"
                                    parsed))
-           (assert (str-eq (load (field parsed content)) "hello"))))
+           (assert (= (load (field parsed content)) "hello"))))
 
 ;; An unrecognized type is a future frame kind, not a protocol error: dropping
 ;; the connection over one would make us fail against a newer Claude Code.
@@ -169,5 +169,4 @@
 ;; wrong outstanding message.
 (deftest message-ids-do-not-repeat
          (let [allocator (malloc-allocator)]
-           (assert (not (str-eq (cc-new-message-id allocator)
-                                (cc-new-message-id allocator))))))
+           (assert (not (= (cc-new-message-id allocator) (cc-new-message-id allocator))))))

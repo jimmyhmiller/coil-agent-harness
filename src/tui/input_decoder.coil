@@ -21,10 +21,10 @@
 
 (defn input-decoder-new [(allocator (ptr Allocator))] (-> InputDecoder)
   (let [decoder (alloc/stack InputDecoder)]
-    (store! (field decoder allocator) allocator)
-    (store! (field decoder escape) (al-new [u8] allocator))
-    (store! (field decoder paste) (al-new [u8] allocator))
-    (store! (field decoder pasting) false)
+    (set! (.allocator decoder) allocator)
+    (set! (.escape decoder) (al-new [u8] allocator))
+    (set! (.paste decoder) (al-new [u8] allocator))
+    (set! (.pasting decoder) false)
     (load decoder)))
 
 (defn input-array-slice [(bytes (ref (ArrayList u8)))] (-> (slice u8))
@@ -43,7 +43,7 @@
                           (slice-get [u8] expected (load at)))
                   (store! matches false)
                   0)
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     (load matches)))
 
 (defn input-array-eq? [(bytes (ref (ArrayList u8)))
@@ -67,7 +67,7 @@
                           (slice-get [u8] suffix (- (load at) 1)))
                   (store! matches false)
                   0)
-                (store! at (+ (load at) 1)))))
+                (set! at (+ (load at) 1)))))
     (load matches)))
 
 (defn input-escape-eq? [(bytes (ref (ArrayList u8)))
@@ -80,7 +80,7 @@
   (input-copy (load (field decoder allocator)) (input-array-slice bytes)))
 
 (defn input-paste-ended? [(decoder (ptr InputDecoder))] (-> bool)
-  (let [count (al-len [u8] (load (field decoder paste)))
+  (let [count (al-len [u8] (.paste decoder))
         suffix "[201~"
         marker-count 6]
     (if (< count marker-count)
@@ -92,7 +92,7 @@
                     (do
                       (let [actual
                               (al-get [u8]
-                                      (load (field decoder paste))
+                                      (.paste decoder)
                                       (+ (- count marker-count) (load at)))
                             expected
                               (if (= (load at) 0)
@@ -101,31 +101,31 @@
                         (when (!= actual expected)
                           (store! matches false)
                           0))
-                      (store! at (+ (load at) 1)))))
+                      (set! at (+ (load at) 1)))))
           (load matches)))))
 
 (defn input-decoder-finish-paste! [(decoder (ptr InputDecoder))] (-> InputDecode)
   (let [marker-count 6
-        content-count (- (al-len [u8] (load (field decoder paste))) marker-count)
+        content-count (- (al-len [u8] (.paste decoder)) marker-count)
         content
           (input-copy (load (field decoder allocator))
                       (slice-new [u8]
                                  (load (field (field decoder paste) data))
                                  content-count))]
-    (al-clear! [u8] (mut (field decoder paste)))
-    (store! (field decoder pasting) false)
+    (al-clear! [u8] (mut (.paste decoder)))
+    (set! (.pasting decoder) false)
     (InputDecoded (InputInsert content))))
 
 (defn input-decoder-escape-known-prefix? [(decoder (ptr InputDecoder))] (-> bool)
-  (or (input-escape-prefix? (mut (field decoder escape)) "[A")
-      (or (input-escape-prefix? (mut (field decoder escape)) "[B")
-          (or (input-escape-prefix? (mut (field decoder escape)) "[C")
-              (or (input-escape-prefix? (mut (field decoder escape)) "[D")
-                  (or (input-escape-prefix? (mut (field decoder escape)) "[H")
-                      (or (input-escape-prefix? (mut (field decoder escape)) "[F")
-                          (or (input-escape-prefix? (mut (field decoder escape)) "[3~")
-                              (or (input-escape-prefix? (mut (field decoder escape)) "[200~")
-                                  (input-escape-prefix? (mut (field decoder escape))
+  (or (input-escape-prefix? (mut (.escape decoder)) "[A")
+      (or (input-escape-prefix? (mut (.escape decoder)) "[B")
+          (or (input-escape-prefix? (mut (.escape decoder)) "[C")
+              (or (input-escape-prefix? (mut (.escape decoder)) "[D")
+                  (or (input-escape-prefix? (mut (.escape decoder)) "[H")
+                      (or (input-escape-prefix? (mut (.escape decoder)) "[F")
+                          (or (input-escape-prefix? (mut (.escape decoder)) "[3~")
+                              (or (input-escape-prefix? (mut (.escape decoder)) "[200~")
+                                  (input-escape-prefix? (mut (.escape decoder))
                                                         "[13;2u"))))))))))
 
 ;; ESC immediately followed by a byte that is not `[` is an Alt-modified key, not
@@ -139,7 +139,7 @@
         :else (InputIgnored)))
 
 (defn input-decoder-finish-escape! [(decoder (ptr InputDecoder))] (-> InputDecode)
-  (let [escape (mut (field decoder escape))]
+  (let [escape (mut (.escape decoder))]
     (cond (input-escape-eq? escape "[A") (InputDecoded (InputHistoryPrevious))
           (input-escape-eq? escape "[B") (InputDecoded (InputHistoryNext))
           (input-escape-eq? escape "[C") (InputDecoded (InputRight))
@@ -156,7 +156,7 @@
           :else (InputIgnored))))
 
 (defn input-decoder-escape-complete? [(decoder (ptr InputDecoder))] (-> bool)
-  (let [escape (mut (field decoder escape))]
+  (let [escape (mut (.escape decoder))]
     (or (input-escape-eq? escape "[A")
         (or (input-escape-eq? escape "[B")
             (or (input-escape-eq? escape "[C")
@@ -226,10 +226,10 @@
 ;; transcript, and cancelling an active run is the busy reader's job, not this
 ;; one's -- the composer is not even accepting input then.
 (defn input-decoder-timeout! [(decoder (ptr InputDecoder))] (-> InputDecode)
-  (if (= (al-len [u8] (load (field decoder escape))) 1)
+  (if (= (al-len [u8] (.escape decoder)) 1)
       (do
-        (al-clear! [u8] (mut (field decoder escape)))
+        (al-clear! [u8] (mut (.escape decoder)))
         (InputDecoded (InputDismiss)))
       (do
-        (al-clear! [u8] (mut (field decoder escape)))
+        (al-clear! [u8] (mut (.escape decoder)))
         (InputIgnored))))

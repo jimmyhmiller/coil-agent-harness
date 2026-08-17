@@ -64,19 +64,19 @@
                  (continuation-prefix (slice u8))
                  (text (slice u8))] (-> ViewNode)
   (let [flow (alloc/stack ViewFlow)]
-    (store! (field flow role) role)
-    (store! (field flow first-prefix) first-prefix)
-    (store! (field flow continuation-prefix) continuation-prefix)
-    (store! (field flow text) text)
+    (set! (.role flow) role)
+    (set! (.first-prefix flow) first-prefix)
+    (set! (.continuation-prefix flow) continuation-prefix)
+    (set! (.text flow) text)
     (ViewFlowNode (load flow))))
 
 (defn view-menu-entry [(label (slice u8))
                        (detail (slice u8))
                        (selected bool)] (-> ViewMenuEntry)
   (let [entry (alloc/stack ViewMenuEntry)]
-    (store! (field entry label) label)
-    (store! (field entry detail) detail)
-    (store! (field entry selected) selected)
+    (set! (.label entry) label)
+    (set! (.detail entry) detail)
+    (set! (.selected entry) selected)
     (load entry)))
 
 (defn view-input-with-menu [(prompt (slice u8))
@@ -86,12 +86,12 @@
                             (menu (ptr (ArrayList ViewMenuEntry)))
                             (menu-overflow i64)] (-> ViewNode)
   (let [input (alloc/stack ViewInput)]
-    (store! (field input prompt) prompt)
-    (store! (field input text) text)
-    (store! (field input cursor-offset) cursor-offset)
-    (store! (field input row-budget) row-budget)
-    (store! (field input menu) menu)
-    (store! (field input menu-overflow) menu-overflow)
+    (set! (.prompt input) prompt)
+    (set! (.text input) text)
+    (set! (.cursor-offset input) cursor-offset)
+    (set! (.row-budget input) row-budget)
+    (set! (.menu input) menu)
+    (set! (.menu-overflow input) menu-overflow)
     (ViewInputNode (load input))))
 
 (defn view-input [(prompt (slice u8))
@@ -109,9 +109,9 @@
                  (code (slice u8))
                  (prefix (slice u8))] (-> ViewNode)
   (let [value (alloc/stack ViewCode)]
-    (store! (field value language) language)
-    (store! (field value code) code)
-    (store! (field value prefix) prefix)
+    (set! (.language value) language)
+    (set! (.code value) code)
+    (set! (.prefix value) prefix)
     (ViewCodeNode (load value))))
 
 (defn view-decorated-flow [(line-role StyleRole)
@@ -123,14 +123,14 @@
                            (suffix (slice u8))
                            (suffix-role StyleRole)] (-> ViewNode)
   (let [flow (alloc/stack ViewDecoratedFlow)]
-    (store! (field flow line-role) line-role)
-    (store! (field flow first-prefix) first-prefix)
-    (store! (field flow prefix-role) prefix-role)
-    (store! (field flow continuation-prefix) continuation-prefix)
-    (store! (field flow body) body)
-    (store! (field flow body-role) body-role)
-    (store! (field flow suffix) suffix)
-    (store! (field flow suffix-role) suffix-role)
+    (set! (.line-role flow) line-role)
+    (set! (.first-prefix flow) first-prefix)
+    (set! (.prefix-role flow) prefix-role)
+    (set! (.continuation-prefix flow) continuation-prefix)
+    (set! (.body flow) body)
+    (set! (.body-role flow) body-role)
+    (set! (.suffix flow) suffix)
+    (set! (.suffix-role flow) suffix-role)
     (ViewDecoratedFlowNode (load flow))))
 
 (defn view-spacer [(rows i64)] (-> ViewNode)
@@ -149,12 +149,12 @@
                       (al-new [ViewNode] allocator))))
 
 (defn view-stack-push! [(stack-node (ptr ViewNode)) (child ViewNode)] (-> i64)
-  (match-else (load stack-node)
-              (ViewStackNode [gap children]
-                             (do (al-push! [ViewNode] children child) 0))
-              (_ 0)))
+  (match (load stack-node)
+         (ViewStackNode [gap children]
+                        (do (al-push! [ViewNode] children child) 0))
+         (_ 0)))
 
 (defn terminal-view [(root ViewNode)] (-> TerminalView)
   (let [view (alloc/stack TerminalView)]
-    (store! (field view root) root)
+    (set! (.root view) root)
     (load view)))

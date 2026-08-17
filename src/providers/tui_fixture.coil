@@ -22,11 +22,11 @@
   (emit-event emitter
               (now-ms)
               kind
-              (load (field request run-id))
-              (load (field request operation-id))
+              (.run-id request)
+              (.operation-id request)
               ""
               "tui-fixture"
-              (load (field request model))
+              (.model request)
               payload))
 
 (defn tui-fixture-delta [(emitter (ptr EventEmitter))
@@ -57,9 +57,9 @@
                                     (ModelRequestCompleted)
                                     (JsonString "tui-fixture-response"))
                  (let [(mut response) (response-empty allocator)]
-                   (store! (field response provider) "tui-fixture")
-                   (store! (field response model) (load (field request model)))
-                   (store! (field response response-id) "tui-fixture-response")
-                   (store! (field response output-text)
-                           "It looks like that may have been accidental—what would you like to work on?")
+                   (set! (.provider response) "tui-fixture")
+                   (set! (.model response) (.model request))
+                   (set! (.response-id response) "tui-fixture-response")
+                   (set! (.output-text response)
+                         "It looks like that may have been accidental—what would you like to work on?")
                    (ModelOk (load response)))))

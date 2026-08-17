@@ -17,34 +17,34 @@
 (defn shutdown-signal-new [] (-> ShutdownSignal)
   (let [shutdown (alloc/stack ShutdownSignal)]
     (match (cancellation/cancellation-init (field shutdown cancellation))
-      (Err [failure] (store! (field shutdown valid) false))
-      (Ok [token] (store! (field shutdown valid) true)))
-    (store! (field shutdown installed) false)
+      (Err [failure] (set! (.valid shutdown) false))
+      (Ok [token] (set! (.valid shutdown) true)))
+    (set! (.installed shutdown) false)
     (load shutdown)))
 
 (defn shutdown-signal-valid? [(shutdown (ptr ShutdownSignal))] (-> bool)
-  (load (field shutdown valid)))
+  (.valid shutdown))
 
 (defn shutdown-signal-install! [(shutdown (ptr ShutdownSignal))] (-> i64)
   (let [numbers (alloc/stack (array i32 2))]
-    (store! (index numbers 0) 2)
-    (store! (index numbers 1) 15)
+    (set! (index numbers 0) 2)
+    (set! (index numbers 1) 15)
     (match (signals/signal-subscribe (field shutdown signals)
                                      (slice-new [i32] (index numbers 0) 2))
       (Err [failure] -1)
       (Ok [subscription]
-          (do (store! (field shutdown installed) true) 0)))))
+          (do (set! (.installed shutdown) true) 0)))))
 
 (defn shutdown-signal-request! [(shutdown (ptr ShutdownSignal))] (-> i64)
   (cancellation/cancellation-request! (field shutdown cancellation)))
 
 (defn shutdown-signal-drain! [(shutdown (ptr ShutdownSignal))] (-> bool)
-  (if (not (load (field shutdown installed)))
+  (if (not (.installed shutdown))
       false
       (match (time/duration-millis 0)
         (Err [failure] false)
         (Ok [duration]
-            (match (selectors/wait-fd-for (load (field (field shutdown signals) read-fd))
+            (match (selectors/wait-fd-for (.read-fd (.signals shutdown))
                                           (selectors/interest-readable)
                                           duration)
               (Err [failure] false)
@@ -65,13 +65,12 @@
                                      (listener-fd i64)
                                      (timeout-ms i64)] (-> i64)
   (let [watches (alloc/stack (array selectors/Watch 3))
-        count (if (load (field shutdown installed)) 3 2)]
-    (store! (index watches 0)
-            (selectors/watch (cast i32 listener-fd)
-                             (selectors/interest-readable)
-                             1))
-    (store! (index watches 1)
-            (cancellation/cancellation-watch (field shutdown cancellation) 2))
+        count (if (.installed shutdown) 3 2)]
+    (set! (index watches 0)
+          (selectors/watch (cast i32 listener-fd)
+                           (selectors/interest-readable)
+                           1))
+    (set! (index watches 1) (cancellation/cancellation-watch (field shutdown cancellation) 2))
     (when (load (field shutdown installed))
       (store! (index watches 2)
               (signals/signal-watch (field shutdown signals) 3))
@@ -91,7 +90,7 @@
                    (selectors/Syscall [code] -1)))
             (Ok [selection]
                 (let [selected (alloc/stack selectors/Selection)]
-                  (store! selected selection)
+                  (set! selected selection)
                   (cond (= (load (field selected token)) 1) 1
                         (= (load (field selected token)) 2) 2
                         :else

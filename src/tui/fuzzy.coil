@@ -59,12 +59,12 @@
                         (let [want (fuzzy-lower (slice-get [u8] query (load qi)))
                               have (fuzzy-lower (slice-get [u8] candidate (load ci)))]
                           (if (!= want have)
-                              (store! ci (+ (load ci) 1))
+                              (set! ci (+ (load ci) 1))
                               (do
                                 (when (< (load first-match) 0)
                                   (store! first-match (load ci))
                                   0)
-                                (store! score (+ (load score) 1))
+                                (set! score (+ (load score) 1))
                                 ;; Contiguity dominates: "terra" beating a
                                 ;; scattered t-e-r-r-a is the whole point.
                                 (when (= (load ci) (+ (load previous-match) 1))
@@ -76,9 +76,9 @@
                                                                        (- (load ci) 1))))
                                   (store! score (+ (load score) 6))
                                   0)
-                                (store! previous-match (load ci))
-                                (store! qi (+ (load qi) 1))
-                                (store! ci (+ (load ci) 1)))))))
+                                (set! previous-match (load ci))
+                                (set! qi (+ (load qi) 1))
+                                (set! ci (+ (load ci) 1)))))))
               (if (< (load qi) q)
                   FUZZY_NO_MATCH
                   ;; A late first match is weak evidence; cap the penalty so a

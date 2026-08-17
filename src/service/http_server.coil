@@ -31,25 +31,25 @@
     (loop (if (>= (load i) limit)
               (break)
               (do
-                (store! difference
-                        (| (load difference)
-                           (^ (cast i64 (slice-get [u8] left (load i)))
-                              (cast i64 (slice-get [u8] right (load i))))))
-                (store! i (+ (load i) 1)))))
+                (set! difference
+                      (| (load difference)
+                         (^ (cast i64 (slice-get [u8] left (load i)))
+                            (cast i64 (slice-get [u8] right (load i))))))
+                (set! i (+ (load i) 1)))))
     (= (load difference) 0)))
 
 (defn authenticate-service-request [(allocator (ptr Allocator))
                                     (auth (ptr ServiceAuth))
                                     (supplied (slice u8))] (-> AuthenticatedPrincipal)
   (let [principal (alloc/stack AuthenticatedPrincipal)
-        operator-token (load (field auth operator-token))
-        observer-token (load (field auth observer-token))
+        operator-token (.operator-token auth)
+        observer-token (.observer-token auth)
         operator-header (concat-or-empty allocator "Bearer " operator-token)
         observer-header (concat-or-empty allocator "Bearer " observer-token)]
-    (store! (field principal authenticated) false)
-    (store! (field principal name) "")
-    (store! (field principal can-observe) false)
-    (store! (field principal can-control) false)
+    (set! (.authenticated principal) false)
+    (set! (.name principal) "")
+    (set! (.can-observe principal) false)
+    (set! (.can-control principal) false)
     (cond (and (> (slice-len [u8] operator-token) 0)
                (secure-token-eq supplied operator-header))
             (do
@@ -71,8 +71,8 @@
                                (response ServiceResponse)] (-> i64)
   (write-http-response allocator
                        client-fd
-                       (load (field response status))
-                       (json-stringify allocator (load (field response body)))))
+                       (.status response)
+                       (json-stringify allocator (.body response))))
 
 (defn handle-accepted-request! [(allocator (ptr Allocator))
                                 (client-fd i64)
@@ -86,29 +86,29 @@
         previous-allocator (load (field service allocator))
         (mut result) -1]
     (if (not (allocation-domain-valid? domain))
-        (store! result -1)
+        (set! result -1)
         (do
-          (store! (field service allocator) request-allocator)
-          (if (not (load (field principal authenticated)))
-              (store! result
+          (set! (.allocator service) request-allocator)
+          (if (not (.authenticated principal))
+              (set! result
+                    (write-service-response! request-allocator
+                                             client-fd
+                                             (service-error request-allocator
+                                                            401
+                                                            "unauthorized"
+                                                            "valid bearer authentication is required")))
+              (let [request (alloc/stack ServiceHttpRequest)]
+                (set! (.method request) (http/method request-value))
+                (set! (.target request) (http/target request-value))
+                (set! (.body request) (http/body request-value))
+                (set! (.principal request) (.name principal))
+                (set! (.can-observe request) (.can-observe principal))
+                (set! (.can-control request) (.can-control principal))
+                (set! result
                       (write-service-response! request-allocator
                                                client-fd
-                                               (service-error request-allocator
-                                                              401
-                                                              "unauthorized"
-                                                              "valid bearer authentication is required")))
-              (let [request (alloc/stack ServiceHttpRequest)]
-                (store! (field request method) (http/method request-value))
-                (store! (field request target) (http/target request-value))
-                (store! (field request body) (http/body request-value))
-                (store! (field request principal) (load (field principal name)))
-                (store! (field request can-observe) (load (field principal can-observe)))
-                (store! (field request can-control) (load (field principal can-control)))
-                (store! result
-                        (write-service-response! request-allocator
-                                                 client-fd
-                                                 (service-handle-http service request)))))
-          (store! (field service allocator) previous-allocator)))
+                                               (service-handle-http service request)))))
+          (set! (.allocator service) previous-allocator)))
     (http/request-free request-value)
     (allocation-domain-close! allocator domain)
     (load result)))
@@ -161,7 +161,7 @@
               (let [ready
                       (shutdown-signal-wait-listener shutdown
                                                      allocator
-                                                     (load (field listener fd))
+                                                     (.fd listener)
                                                      100)]
                 (cond (= ready 0) 0
                       (= ready 2) (break)

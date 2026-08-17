@@ -13,7 +13,7 @@
                (to Address)
                (out (mut (ArrayList i64)))] (-> i64)
   (let [envelope (alloc/stack Envelope)]
-    (store! envelope (envelope-new "m" from to (Instruction) "body"))
+    (set! envelope (envelope-new "m" from to (Instruction) "body"))
     (router-recipients router envelope (mut out))))
 
 (defn only-recipient [(out (ArrayList i64))] (-> i64)

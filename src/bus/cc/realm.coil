@@ -110,28 +110,24 @@
           (if (= (slice-len [u8] name) 0)
               (cc-realm-configured-name allocator)
               name)]
-    (store! (field realm name) chosen)
-    (if (str-eq chosen CC_REALM_CLAUDE_CODE)
+    (set! (.name realm) chosen)
+    (if (= chosen CC_REALM_CLAUDE_CODE)
         (do
-          (store! (field realm socket-dir) (cc-socket-dir allocator))
-          (store! (field realm sessions-dir) (cc-claude-sessions-dir allocator))
+          (set! (.socket-dir realm) (cc-socket-dir allocator))
+          (set! (.sessions-dir realm) (cc-claude-sessions-dir allocator))
           ;; Claude Code exports this to its child processes. It is the only way
           ;; a child can recognize its own parent in the directory: the pid it
           ;; would compare against is the session's, not its own.
-          (store! (field realm self-socket)
-                  (cc-env-or allocator "CLAUDE_CODE_MESSAGING_SOCKET" ""))
-          (store! (field realm interop) true)
+          (set! (.self-socket realm) (cc-env-or allocator "CLAUDE_CODE_MESSAGING_SOCKET" ""))
+          (set! (.interop realm) true)
           0)
         (do
-          (store! (field realm socket-dir)
-                  (cc-realm-private-socket-dir allocator chosen))
-          (store! (field realm sessions-dir)
-                  (cc-realm-private-sessions-dir allocator chosen))
+          (set! (.socket-dir realm) (cc-realm-private-socket-dir allocator chosen))
+          (set! (.sessions-dir realm) (cc-realm-private-sessions-dir allocator chosen))
           ;; Nothing to inherit: a private realm has no ambient parent, so self
           ;; is empty until this process binds a socket of its own.
-          (store! (field realm self-socket)
-                  (cc-env-or allocator "HARNESS_BUS_SOCKET" ""))
-          (store! (field realm interop) false)
+          (set! (.self-socket realm) (cc-env-or allocator "HARNESS_BUS_SOCKET" ""))
+          (set! (.interop realm) false)
           0))))
 
 ;; Claude Code's registry. `CLAUDE_CONFIG_DIR` relocates it, but every
@@ -152,7 +148,7 @@
   (let [(mut buffer) (sb-new allocator)]
     (cc-push-decimal! (mut buffer) pid)
     (sb-push-str! (mut buffer) ".sock")
-    (path-join allocator (load (field realm socket-dir)) (sb-str (load buffer)))))
+    (path-join allocator (.socket-dir realm) (sb-str (load buffer)))))
 
 ;; Create the realm's directories. Private realms own theirs, so this is how one
 ;; comes into existence; for the claude-code realm the directories already exist
@@ -163,6 +159,6 @@
 ;; machine to any local process.
 (defn cc-realm-ensure-directories! [(realm (ptr CcRealm))
                                     (allocator (ptr Allocator))] (-> i64)
-  (directory-create-all allocator (load (field realm socket-dir)) 448)
-  (directory-create-all allocator (load (field realm sessions-dir)) 448)
+  (directory-create-all allocator (.socket-dir realm) 448)
+  (directory-create-all allocator (.sessions-dir realm) 448)
   0)
