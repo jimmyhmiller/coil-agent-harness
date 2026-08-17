@@ -27,7 +27,24 @@
                               0)
   (cancel-durable-run [(self (ptr OrchestrationController)) (command (ptr Json))]
                       (-> RunCancellationResult)
-                      (RunCancellationAccepted)))
+                      (RunCancellationAccepted))
+  (describe-tools [(self (ptr OrchestrationController))
+                   (allocator (ptr Allocator))
+                   (out (ptr Json))]
+                  (-> i64)
+                  -1)
+  (authorize-tool-call [(self (ptr OrchestrationController))
+                        (command (ptr Json))
+                        (allocator (ptr Allocator))
+                        (out (ptr Json))]
+                       (-> i64)
+                       -1)
+  (invoke-tool [(self (ptr OrchestrationController))
+                (command (ptr Json))
+                (allocator (ptr Allocator))
+                (out (ptr Json))]
+               (-> i64)
+               -1))
 
 (defn orchestration-call [(allocator (ptr Allocator))
                           (id (slice u8))

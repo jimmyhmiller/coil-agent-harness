@@ -62,3 +62,4 @@ dist/
 *.dSYM/
 .DS_Store
 .claude/settings.local.json
+/agent-sdk/node_modules/

@@ -27,7 +27,26 @@
                       (-> RunCancellationResult)
                       (do
                         (store! (field self cancels) (+ (load (field self cancels)) 1))
-                        (RunCancellationAccepted))))
+                        (RunCancellationAccepted)))
+  ;; No registry behind this double, which is the case the service reports as
+  ;; 501 rather than pretending an empty tool list is the truth.
+  (describe-tools [(self (ptr FakeRunController))
+                   (allocator (ptr Allocator))
+                   (out (ptr Json))]
+                  (-> i64)
+                  -1)
+  (authorize-tool-call [(self (ptr FakeRunController))
+                        (command (ptr Json))
+                        (allocator (ptr Allocator))
+                        (out (ptr Json))]
+                       (-> i64)
+                       -1)
+  (invoke-tool [(self (ptr FakeRunController))
+                (command (ptr Json))
+                (allocator (ptr Allocator))
+                (out (ptr Json))]
+               (-> i64)
+               -1))
 
 (defn service-command [(allocator (ptr Allocator))
                        (command-id (slice u8))] (-> Json)
@@ -68,6 +87,9 @@
                          (target (slice u8))
                          (body (slice u8))] (-> ServiceResponse)
   (http-service-call-as service method target body "test-operator" true true))
+
+(defn response-status [(response ServiceResponse)] (-> i64)
+  (load (field response status)))
 
 (deftest subagents-have-private-clean-slate-conversations
          (let [allocator (malloc-allocator)
@@ -572,4 +594,65 @@
              (assert (match (json-string-at (load (field cancelling body)) "status")
                        (Some [value] (str-eq value "cancelled"))
                        (None [] false))))
+           (event-journal-close! journal)))
+
+;; Routing and capability checks for the tool plane. This double has no
+;; registry, so a routed request must surface that as 501 rather than an empty
+;; catalog -- an external loop told "no tools" would proceed as if the harness
+;; had none.
+(deftest tool-plane-routes-are-capability-gated
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-tool-plane-routes.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field controller cancels) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (assert-eq (response-status (http-service-call service "GET" "/v1/tools" "")) 501)
+           (assert-eq (response-status (http-service-call service
+                                                          "POST"
+                                                          "/v1/tools/call"
+                                                          "{\"name\":\"echo\"}"))
+                      501)
+           (assert-eq (response-status (http-service-call service
+                                                          "POST"
+                                                          "/v1/tools/authorize"
+                                                          "{\"name\":\"echo\"}"))
+                      501)
+           ;; A named tool is required before the controller is consulted.
+           (assert-eq (response-status (http-service-call service "POST" "/v1/tools/call" "{}"))
+                      400)
+           (assert-eq (response-status (http-service-call service
+                                                          "POST"
+                                                          "/v1/tools/call"
+                                                          "not json"))
+                      400)
+           (assert-eq (response-status (http-service-call-as service
+                                                            "GET"
+                                                            "/v1/tools"
+                                                            ""
+                                                            "test-anonymous"
+                                                            false
+                                                            false))
+                      403)
+           (assert-eq (response-status (http-service-call-as service
+                                                            "POST"
+                                                            "/v1/tools/call"
+                                                            "{\"name\":\"echo\"}"
+                                                            "test-observer"
+                                                            true
+                                                            false))
+                      403)
            (event-journal-close! journal)))

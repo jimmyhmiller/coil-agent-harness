@@ -83,6 +83,13 @@
   (ToolDenied [])
   (ToolUnknown []))
 
+(defn tool-status-name [(status ToolStatus)] (-> (slice u8))
+  (match status
+    (ToolSucceeded [] "succeeded")
+    (ToolErrored [] "errored")
+    (ToolDenied [] "denied")
+    (ToolUnknown [] "unknown")))
+
 (defstruct ToolResult
   [(call-id (slice u8))
    (status ToolStatus)

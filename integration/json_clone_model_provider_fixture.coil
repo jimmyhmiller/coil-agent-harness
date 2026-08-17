@@ -85,7 +85,7 @@
     (store! (field request messages) messages)
     (store! (field request tools) registry)
     (store! (field request tool-choice) (ToolsAuto))
-    (store! (field request reasoning) (ReasoningNone))
+    (store! (field request reasoning) "")
     (store! (field request timeout-ms) 10000)
     (store! (field sink count) count)
     (store! (field emitter sink) (box allocator (dyn EventSink) sink))

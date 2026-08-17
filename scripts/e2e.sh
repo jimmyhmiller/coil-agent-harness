@@ -2,10 +2,13 @@
 set -eu
 
 live_codex=0
+live_agent_sdk=0
 if [ "${1:-}" = "--live-codex" ]; then
   live_codex=1
+elif [ "${1:-}" = "--live-agent-sdk" ]; then
+  live_agent_sdk=1
 elif [ "$#" -ne 0 ]; then
-  echo "usage: sh scripts/e2e.sh [--live-codex]" >&2
+  echo "usage: sh scripts/e2e.sh [--live-codex|--live-agent-sdk]" >&2
   exit 64
 fi
 
@@ -179,4 +182,19 @@ if [ "$live_codex" -eq 1 ]; then
 fi
 
 stop_server
+
+if [ -d agent-sdk/node_modules ]; then
+  echo "e2e: verifying the Claude Agent SDK bridge over the harness tool plane"
+  node agent-sdk/test/bridge-test.ts ./harness
+  if [ "$live_agent_sdk" -eq 1 ]; then
+    echo "e2e: exercising a real Claude Agent SDK turn instead of Codex"
+    npm --prefix agent-sdk run test:live
+  fi
+else
+  if [ "$live_agent_sdk" -eq 1 ]; then
+    fail "--live-agent-sdk requires npm install --prefix agent-sdk"
+  fi
+  echo "e2e: skipping the Agent SDK bridge (run npm install --prefix agent-sdk)"
+fi
+
 echo "e2e: passed"

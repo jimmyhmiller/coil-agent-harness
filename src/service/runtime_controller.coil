@@ -19,12 +19,14 @@
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
+(import "harness-json-schema" :use *)
 (import "harness-model" :use *)
 (import "harness-model-catalog" :use *)
 (import "harness-run-service" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
+(import "harness-tool-executor" :use *)
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 (import "tui-fixture-provider" :use *)
@@ -1066,6 +1068,130 @@
         (runtime-controller-unlock! controller)))
   0)
 
+;; A bridged call belongs to the caller's session, not to a harness run: the
+;; external loop owns its own lifecycle and never tells us when it ends, so the
+;; harness does not manufacture a run around it. The session ID is still the run
+;; ID on every journaled tool event, which is what makes those calls readable
+;; through the existing events endpoint.
+(defn runtime-tool-session-id [(command Json)] (-> (slice u8))
+  (let [value (command-string command "session_id")]
+    (if (> (slice-len [u8] value) 0) value "agent-sdk")))
+
+(defn runtime-tool-call-id [(command Json)] (-> (slice u8))
+  (let [value (command-string command "call_id")]
+    (if (> (slice-len [u8] value) 0) value (command-string command "name"))))
+
+;; The registry's own view, not a provider dialect. The caller needs what the
+;; harness knows about each tool -- schema, effect, idempotence -- because it is
+;; the loop deciding how to present and parallelize the call.
+(defn runtime-controller-tools-json [(controller (ptr RuntimeRunController))
+                                     (allocator (ptr Allocator))] (-> Json)
+  (let [registry (load (field controller registry))
+        definitions (field registry definitions)
+        (mut body) (json-object allocator)
+        (mut tools) (json-array allocator)
+        (mut i) 0
+        n (al-len [ToolDefinition] (load definitions))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [definition (al-get [ToolDefinition] (load definitions) (load i))
+                    spec (field definition spec)
+                    (mut entry) (json-object allocator)]
+                (json-put-string! (mut entry) "name" (load (field spec name)))
+                (json-put-string! (mut entry) "description" (load (field spec description)))
+                (json-object-put! (mut entry) "input_schema" (load (field spec input-schema)))
+                (json-put-string! (mut entry) "effect" (tool-effect-name (load (field spec effect))))
+                (json-put-bool! (mut entry) "idempotent" (load (field spec idempotent)))
+                (json-object-put! (mut entry)
+                                  "timeout_ms"
+                                  (json-integer allocator (load (field spec timeout-ms))))
+                (json-array-push! (mut tools) (load entry))
+                (store! i (+ (load i) 1)))))
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-object-put! (mut body) "tools" (load tools))
+    (load body)))
+
+;; Registration is the gate. A registered tool whose arguments satisfy its own
+;; schema is authorized and nothing else is; effect is reported for display, not
+;; consulted, because the harness has no effect policy to apply. A caller that
+;; wants one denies on the effect it reads here.
+(defn runtime-controller-authorize-tool [(controller (ptr RuntimeRunController))
+                                         (command Json)
+                                         (allocator (ptr Allocator))] (-> Json)
+  (let [name (command-string command "name")
+        (mut body) (json-object allocator)]
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-put-string! (mut body) "name" name)
+    (match (tool-find (load (load (field controller registry))) name)
+      (None []
+            (do
+              (json-put-bool! (mut body) "authorized" false)
+              (json-put-string! (mut body) "reason" "unknown tool")))
+      (Some [definition]
+            (let [selected definition
+                  validation
+                    (json-schema-validate allocator
+                                          (load (field (field selected spec) input-schema))
+                                          (json-get command "arguments"))]
+              (json-put-string! (mut body)
+                                "effect"
+                                (tool-effect-name (load (field (field selected spec) effect))))
+              (if (load (field validation ok))
+                  (do
+                    (json-put-bool! (mut body) "authorized" true)
+                    (json-put-string! (mut body) "reason" ""))
+                  (do
+                    (json-put-bool! (mut body) "authorized" false)
+                    (json-put-string! (mut body)
+                                      "reason"
+                                      (concat-or-empty allocator
+                                                       "tool arguments do not satisfy input schema: "
+                                                       (load (field validation message)))))))))
+    (load body)))
+
+(defn runtime-controller-invoke-tool [(controller (ptr RuntimeRunController))
+                                      (command Json)
+                                      (allocator (ptr Allocator))] (-> Json)
+  (let [call (alloc/stack ToolCall)
+        calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+        execution (alloc/stack ToolExecutionRequest)
+        session-id (runtime-tool-session-id command)]
+    (store! (field call id) (runtime-tool-call-id command))
+    (store! (field call name) (command-string command "name"))
+    (store! (field call arguments) (json-get command "arguments"))
+    (store! (field call raw-arguments)
+            (json-stringify allocator (load (field call arguments))))
+    (al-push! [ToolCall] calls (load call))
+    (store! (field execution run-id) session-id)
+    (store! (field execution parent-operation-id) "")
+    (store! (field execution provider) "agent-sdk")
+    (store! (field execution model) (command-string command "model"))
+    (store! (field execution registry) (load (field controller registry)))
+    (store! (field execution calls) calls)
+    (store! (field execution emitter) (load (field controller emitter)))
+    ;; Cancellation and the run clock belong to the loop that owns the task. The
+    ;; caller's HTTP timeout bounds the request; each tool still carries its own
+    ;; deadline from its spec.
+    (store! (field execution cancellation) (cast (ptr CancellationToken) 0))
+    (store! (field execution run-deadline-monotonic-ms) 0)
+    (store! (field execution max-parallel) 1)
+    (let [batch (execute-tools-parallel allocator execution)
+          result (al-get [ToolResult] (load (field batch results)) 0)
+          (mut body) (json-object allocator)]
+      (json-object-put! (mut body) "version" (json-integer allocator 1))
+      (json-put-string! (mut body) "status" (tool-status-name (load (field result status))))
+      (json-put-string! (mut body) "call_id" (load (field result call-id)))
+      (json-put-string! (mut body) "session_id" session-id)
+      (json-object-put! (mut body) "output" (load (field result output)))
+      (json-put-string! (mut body) "error" (load (field result error)))
+      (json-object-put! (mut body)
+                        "started_at_ms"
+                        (json-integer allocator (load (field result started-at-ms))))
+      (json-object-put! (mut body)
+                        "finished_at_ms"
+                        (json-integer allocator (load (field result finished-at-ms))))
+      (load body))))
+
 (impl RunController RuntimeRunController
   (prepare-durable-provider [(self (ptr RuntimeRunController))
                              (provider-name (slice u8))]
@@ -1083,4 +1209,30 @@
   (cancel-durable-run [(self (ptr RuntimeRunController))
                        (command (ptr Json))]
                       (-> RunCancellationResult)
-                      (runtime-controller-cancel! self (load command))))
+                      (runtime-controller-cancel! self (load command)))
+  (describe-tools [(self (ptr RuntimeRunController))
+                   (allocator (ptr Allocator))
+                   (out (ptr Json))]
+                  (-> i64)
+                  (do
+                    (store! out (runtime-controller-tools-json self allocator))
+                    0))
+  (authorize-tool-call [(self (ptr RuntimeRunController))
+                        (command (ptr Json))
+                        (allocator (ptr Allocator))
+                        (out (ptr Json))]
+                       (-> i64)
+                       (do
+                         (store! out
+                                 (runtime-controller-authorize-tool self
+                                                                    (load command)
+                                                                    allocator))
+                         0))
+  (invoke-tool [(self (ptr RuntimeRunController))
+                (command (ptr Json))
+                (allocator (ptr Allocator))
+                (out (ptr Json))]
+               (-> i64)
+               (do
+                 (store! out (runtime-controller-invoke-tool self (load command) allocator))
+                 0)))

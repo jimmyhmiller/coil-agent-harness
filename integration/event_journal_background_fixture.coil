@@ -62,7 +62,7 @@
                          (store! (field request messages) messages)
                          (store! (field request tools) registry)
                          (store! (field request tool-choice) (ToolsAuto))
-                         (store! (field request reasoning) (ReasoningNone))
+                         (store! (field request reasoning) "")
                          (store! (field request timeout-ms) 10000)
                          (event-emitter-init! emitter service-allocator (load journal) sequence)
                          (store! (field policy max-model-turns) 1)

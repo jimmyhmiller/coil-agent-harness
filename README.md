@@ -2,6 +2,11 @@
 
 # COIL Agent Harness
 
+The optional Claude Agent SDK bridge in `agent-sdk/` uses the official SDK for
+the agent loop while keeping tool discovery, authorization, execution, and
+journaling in the harness. See [the bridge guide](docs/agent-sdk-bridge.md) for
+setup, operation, and verification.
+
 This repository contains the first vertical slice of a headless, observable agent
 runtime written in COIL. The durable architectural rules live in [agent.md](agent.md).
 The current product milestone is the narrowly scoped distributed software-factory
