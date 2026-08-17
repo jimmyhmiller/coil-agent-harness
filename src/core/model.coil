@@ -160,17 +160,18 @@
 (defn provider-capabilities-for [(name (slice u8))] (-> ProviderCapabilities)
   (let [capabilities (alloc/stack ProviderCapabilities)
         codex (or (str-eq name "codex") (str-eq name "codex-app-server"))
-        claude (or (str-eq name "claude") (str-eq name "claude-anthropic"))]
+        claude (or (str-eq name "claude") (str-eq name "claude-anthropic"))
+        agent-sdk (str-eq name "agent-sdk")]
     (store! (field capabilities streaming) true)
     (store! (field capabilities harness-tools) true)
     (store! (field capabilities parallel-tools) true)
     (store! (field capabilities reasoning) true)
-    (store! (field capabilities subscription-auth) (or codex claude))
+    (store! (field capabilities subscription-auth) (or agent-sdk (or codex claude)))
     (store! (field capabilities cost-tier)
             (cond (or (str-eq name "deepseek-openai")
                       (str-eq name "deepseek-anthropic"))
                     1
-                  (or codex claude) 2
+                  (or agent-sdk (or codex claude)) 2
                   (or (str-eq name "openai")
                       (str-eq name "openai-responses"))
                     3

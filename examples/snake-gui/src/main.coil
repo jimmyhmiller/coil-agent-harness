@@ -1,7 +1,99 @@
-(module snake_game)
-(import "coil.io" :use *)
-(import "snake" :use [snake_window_run])
+(module snake.main)
+(import "coil.primitive" :as primitive)
+(import "snake.engine" :use *)
+
+; The playable game. This module owns the loop and the timing; the rules come
+; from snake.engine and the pixels/keys come from native/snake_window.c, which
+; is a pure presentation shim.
+
+(extern snake_window_open :cc c [i64 i64 i64] (-> i64))
+(extern snake_window_close :cc c [] (-> void))
+(extern snake_window_poll :cc c [] (-> i64))
+(extern snake_window_ticks :cc c [] (-> i64))
+(extern snake_window_delay :cc c [i64] (-> void))
+(extern snake_window_seed :cc c [] (-> i64))
+(extern snake_window_begin_frame :cc c [] (-> void))
+(extern snake_window_draw_cell :cc c [i64 i64 i64] (-> void))
+(extern snake_window_set_status :cc c [i64 i64] (-> void))
+(extern snake_window_end_frame :cc c [] (-> void))
+
+; Input codes, mirroring the INPUT_* defines in native/snake_window.c.
+(const INPUT-NONE 0)
+(const INPUT-QUIT 1)
+(const INPUT-UP 2)
+(const INPUT-DOWN 3)
+(const INPUT-LEFT 4)
+(const INPUT-RIGHT 5)
+(const INPUT-RESTART 6)
+
+; Cell kinds, mirroring the KIND_* defines in native/snake_window.c.
+(const KIND-FOOD 0)
+(const KIND-HEAD 1)
+(const KIND-BODY 2)
+
+(const CELL-PX 24)
+(const STEP-MS 120)
+
+;; Apply one input code. Returns false when the player asked to quit.
+(defn apply-input [(g (mut Game)) (code i64)] (-> bool)
+  (cond (= code INPUT-QUIT) false
+        (= code INPUT-UP) (do (game-steer! (mut g) 0 -1) true)
+        (= code INPUT-DOWN) (do (game-steer! (mut g) 0 1) true)
+        (= code INPUT-LEFT) (do (game-steer! (mut g) -1 0) true)
+        (= code INPUT-RIGHT) (do (game-steer! (mut g) 1 0) true)
+        (= code INPUT-RESTART)
+          (do
+            (if (game-over? (load g))
+                (game-reset! (mut g) (snake_window_seed))
+                0)
+            true)
+        :else true))
+
+;; Draw the board the engine currently describes.
+(defn render [(g Game)] (-> i64)
+  (snake_window_begin_frame)
+  (snake_window_draw_cell (game-food-x g) (game-food-y g) KIND-FOOD)
+  (for [i 0 (game-length g)]
+    (snake_window_draw_cell (game-segment-x g i)
+                            (game-segment-y g i)
+                            (if (= i 0) KIND-HEAD KIND-BODY)))
+  (snake_window_set_status (game-score g) (if (game-over? g) 1 0))
+  (snake_window_end_frame)
+  0)
+
+(defn game-loop [(g (mut Game))] (-> i64)
+  ; Every mutable cell is hoisted out of the loop: `(mut …)` is an alloca, and
+  ; allocating one per iteration would leak the stack.
+  (let [(mut running) true
+        (mut code) INPUT-NONE
+        (mut last-step) (snake_window_ticks)]
+    (loop (if (not (load running))
+              (break)
+              0)
+      (store! code (snake_window_poll))
+      (while (!= (load code) INPUT-NONE)
+        (store! running (apply-input (mut g) (load code)))
+        (store! code (if (load running) (snake_window_poll) INPUT-NONE)))
+      (if (and (load running) (>= (- (snake_window_ticks) (load last-step)) STEP-MS))
+          (do
+            (game-step! (mut g))
+            (store! last-step (snake_window_ticks))
+            0)
+          0)
+      (if (load running)
+          (do (render (load g)) (snake_window_delay 4) 0)
+          0))
+    0))
 
 (defn main [] (-> i64)
-  (snake_window_run)
-  0)
+  (let [(mut g) (primitive/zeroed Game)
+        opened (snake_window_open BOARD-COLS BOARD-ROWS CELL-PX)]
+    (if (!= opened 0)
+        (do
+          (println "snake: could not open a window (code {d})" opened)
+          1)
+        (do
+          (game-reset! (mut g) (snake_window_seed))
+          (game-loop (mut g))
+          (snake_window_close)
+          0))))

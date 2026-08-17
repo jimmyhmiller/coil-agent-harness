@@ -35,6 +35,7 @@
 (import "codex-app-server" :use *)
 (import "codex-direct" :use *)
 (import "claude-agent" :use *)
+(import "agent-sdk-provider" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
 (import "openai-responses" :use *)
@@ -85,7 +86,7 @@
 
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
-  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude> <model> <prompt>")
+  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude|agent-sdk> <model> <prompt>")
   (write-line 2 "       harness <login|logout> <codex|claude>")
   (write-line 2 "       harness tui [--plain] [journal-path]")
   (write-line 2 "       harness serve <port> <journal-path>")
@@ -476,7 +477,8 @@
             (Err [failure] "."))
         codex-strategy (default-codex-strategy allocator cwd)
         codex-context-value (box allocator CodexProvider (zeroed CodexProvider))
-        claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))]
+        claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))
+        agent-sdk-context-value (box allocator AgentSdkContext (agent-sdk-context allocator cwd))]
     (store! (field codex-context-value strategy) codex-strategy)
     (tool-register! registry (echo-definition process-allocator))
     (let [result
@@ -492,6 +494,8 @@
                         (do (write-line 2 "Codex authentication failed") 1))
                   (str-eq provider-name "claude")
                     (cli-run-provider allocator registry claude-context-value model prompt force-tool)
+                  (str-eq provider-name "agent-sdk")
+                    (cli-run-provider allocator registry agent-sdk-context-value model prompt force-tool)
                   :else (do (write-line 2 "unknown provider") 64))]
       (codex-strategy-close! (load codex-strategy))
       result)))

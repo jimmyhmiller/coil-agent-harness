@@ -31,6 +31,7 @@
 (import "provider-common" :use *)
 (import "tui-fixture-provider" :use *)
 (import "async-tool-provider" :use *)
+(import "agent-sdk-provider" :use *)
 
 (defstruct ActiveRuntimeRun
   [(run-id (slice u8))
@@ -65,6 +66,7 @@
 (defstruct DefaultRuntimeProviderFactory
   [(tui-fixture (ptr TuiFixtureProvider))
    (codex (ptr CodexProvider))
+   (agent-sdk (ptr AgentSdkContext))
    (codex-strategy (ptr (dyn CodexExecutionStrategy)))])
 
 (defn default-codex-direct? [(allocator (ptr Allocator))] (-> bool)
@@ -94,10 +96,12 @@
             (Ok [owned] (os/owned-string-slice owned))
             (Err [failure] "."))
         strategy (default-codex-strategy allocator cwd)
-        provider (box allocator CodexProvider (zeroed CodexProvider))]
+        provider (box allocator CodexProvider (zeroed CodexProvider))
+        sdk-provider (box allocator AgentSdkContext (agent-sdk-context allocator cwd))]
     (store! (field provider strategy) strategy)
     (store! (field factory codex-strategy) strategy)
     (store! (field factory codex) provider)
+    (store! (field factory agent-sdk) sdk-provider)
     0))
 
 (defn default-runtime-provider-factory-prepare! [(factory (ptr DefaultRuntimeProviderFactory))
@@ -150,6 +154,8 @@
                                     (Some (box allocator
                                                ClaudeAnthropicContext
                                                (claude-anthropic-context-default allocator)))
+                                  (str-eq provider-name "agent-sdk")
+                                    (Some (load (field self agent-sdk)))
                                   (str-eq provider-name "tui-fixture")
                                     (match (os/env-get allocator "HARNESS_TUI_TEST_PROVIDER")
                                       (Ok [found]

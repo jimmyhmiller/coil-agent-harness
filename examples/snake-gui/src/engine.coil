@@ -1,0 +1,253 @@
+(module snake.engine)
+(import "coil.primitive" :as primitive)
+
+; The authoritative Snake engine. Every rule of the game — movement, steering,
+; wraparound at the four board edges, self-collision, eating, scoring, and
+; restarting — lives here in Coil. The native layer (native/snake_window.c) is a
+; window/input/pixel shim and knows nothing about these rules, which is why the
+; tests in tests/engine_test.coil can exercise the whole game headlessly.
+
+;; Board width in cells.
+(const BOARD-COLS 30)
+;; Board height in cells.
+(const BOARD-ROWS 22)
+;; Upper bound on snake length: the snake can at most fill the board. The
+;; `body` array below must repeat this as a literal — array lengths cannot be
+;; const expressions.
+(const MAX-SEGMENTS (* BOARD-COLS BOARD-ROWS))
+
+;; One board square, in cell (not pixel) coordinates.
+(defstruct Cell [(x i64) (y i64)])
+
+;; The complete game state. `body` holds `length` live segments, head first.
+;; `dir-*` is the direction the last step used; `next-*` is the direction the
+;; upcoming step will use (steering is queued so two turns inside one tick
+;; cannot fold the snake back onto itself).
+(defstruct Game
+  [(body (array Cell 660))  ; 660 = MAX-SEGMENTS; array lengths must be literals
+   (length i64)
+   (food Cell)
+   (dir-x i64)
+   (dir-y i64)
+   (next-x i64)
+   (next-y i64)
+   (score i64)
+   (over bool)
+   (rng u64)])
+
+; ---------------------------------------------------------------------------
+; Wraparound
+; ---------------------------------------------------------------------------
+
+;; Fold `value` into `[0, limit)` so that leaving one edge of the board arrives
+;; at the opposite edge. This is the whole of the wraparound rule: crossing the
+;; left, right, top, or bottom edge relocates the head instead of ending the
+;; game.
+(defn wrap-index [(value i64) (limit i64)] (-> i64)
+  (let [r (% value limit)]
+    (if (< r 0) (+ r limit) r)))
+
+;; Wrap a board column onto `[0, BOARD-COLS)`.
+(defn wrap-col [(x i64)] (-> i64)
+  (wrap-index x BOARD-COLS))
+
+;; Wrap a board row onto `[0, BOARD-ROWS)`.
+(defn wrap-row [(y i64)] (-> i64)
+  (wrap-index y BOARD-ROWS))
+
+; ---------------------------------------------------------------------------
+; Reading state
+; ---------------------------------------------------------------------------
+
+;; X of segment `i` (0 is the head).
+(defn game-segment-x [(g Game) (i i64)] (-> i64)
+  (load (field (index (field g body) i) x)))
+
+;; Y of segment `i` (0 is the head).
+(defn game-segment-y [(g Game) (i i64)] (-> i64)
+  (load (field (index (field g body) i) y)))
+
+;; X of the snake head.
+(defn game-head-x [(g Game)] (-> i64)
+  (game-segment-x g 0))
+
+;; Y of the snake head.
+(defn game-head-y [(g Game)] (-> i64)
+  (game-segment-y g 0))
+
+;; Number of live snake segments.
+(defn game-length [(g Game)] (-> i64)
+  (load (field g length)))
+
+;; Food eaten so far.
+(defn game-score [(g Game)] (-> i64)
+  (load (field g score)))
+
+;; True once the snake has run into itself; wrapping never sets this.
+(defn game-over? [(g Game)] (-> bool)
+  (load (field g over)))
+
+;; X of the current food cell.
+(defn game-food-x [(g Game)] (-> i64)
+  (load (field (field g food) x)))
+
+;; Y of the current food cell.
+(defn game-food-y [(g Game)] (-> i64)
+  (load (field (field g food) y)))
+
+;; Direction the next step will move in, as a cell delta.
+(defn game-dir-x [(g Game)] (-> i64)
+  (load (field g next-x)))
+(defn game-dir-y [(g Game)] (-> i64)
+  (load (field g next-y)))
+
+;; True when any live segment sits on (x, y).
+(defn game-occupied? [(g Game) (x i64) (y i64)] (-> bool)
+  (let [(mut hit) false]
+    (for [i 0 (load (field g length))]
+      (if (and (= (game-segment-x g i) x) (= (game-segment-y g i) y))
+          (store! hit true)
+          0))
+    (load hit)))
+
+; ---------------------------------------------------------------------------
+; Mutating state
+; ---------------------------------------------------------------------------
+
+;; Move segment `i` to (cx, cy).
+(defn set-segment! [(g (mut Game)) (i i64) (cx i64) (cy i64)] (-> i64)
+  (store! (field (index (field g body) i) x) cx)
+  (store! (field (index (field g body) i) y) cy)
+  0)
+
+;; xorshift64* — a deterministic, dependency-free source of food positions, so a
+;; given seed always produces the same game.
+(defn next-random [(g (mut Game))] (-> i64)
+  (let [(mut s) (load (field g rng))]
+    (store! s (primitive/ixor (load s) (primitive/ishl (load s) 13)))
+    (store! s (primitive/ixor (load s) (primitive/ishr (load s) 7)))
+    (store! s (primitive/ixor (load s) (primitive/ishl (load s) 17)))
+    (store! (field g rng) (load s))
+    (primitive/cast i64 (primitive/ishr (load s) 1))))
+
+;; Put the food on a uniformly chosen free cell. A full board leaves the food
+;; where it is; there is nowhere else for it to go.
+(defn place-food! [(g (mut Game))] (-> i64)
+  (let [free (- (* BOARD-COLS BOARD-ROWS) (load (field g length)))]
+    (if (<= free 0)
+        0
+        (let [(mut pick) (% (next-random (mut g)) free)
+              (mut done) false]
+          (for [i 0 (* BOARD-COLS BOARD-ROWS)]
+            (let [x (% i BOARD-COLS)
+                  y (/ i BOARD-COLS)]
+              (if (or (load done) (game-occupied? (load g) x y))
+                  0
+                  (if (= (load pick) 0)
+                      (do
+                        (store! (field (field g food) x) x)
+                        (store! (field (field g food) y) y)
+                        (store! done true)
+                        0)
+                      (do (store! pick (- (load pick) 1)) 0)))))
+          0))))
+
+;; Place a straight snake of `len` segments with its head at (head-x, head-y),
+;; its tail trailing behind the given direction, and both the active and queued
+;; direction set to it. Used by `game-reset!` and by tests that need a specific
+;; starting position.
+(defn game-place-snake! [(g (mut Game))
+                         (head-x i64)
+                         (head-y i64)
+                         (dir-x i64)
+                         (dir-y i64)
+                         (len i64)] (-> i64)
+  (store! (field g length) len)
+  (store! (field g dir-x) dir-x)
+  (store! (field g dir-y) dir-y)
+  (store! (field g next-x) dir-x)
+  (store! (field g next-y) dir-y)
+  (for [i 0 len]
+    (set-segment! (mut g)
+                  i
+                  (wrap-col (- head-x (* dir-x i)))
+                  (wrap-row (- head-y (* dir-y i)))))
+  0)
+
+;; Pin the food to a specific cell. Deterministic setup for tests, and the way
+;; the engine keeps food off the snake after a restart.
+(defn game-set-food! [(g (mut Game)) (cx i64) (cy i64)] (-> i64)
+  (store! (field (field g food) x) (wrap-col cx))
+  (store! (field (field g food) y) (wrap-row cy))
+  0)
+
+;; Start (or restart) a game: a three-segment snake in the middle of the board
+;; heading right, score zero, not over, food somewhere free.
+(defn game-reset! [(g (mut Game)) (seed i64)] (-> i64)
+  (store! (field g rng) (primitive/ior (primitive/cast u64 seed) 1))
+  (store! (field g score) 0)
+  (store! (field g over) false)
+  (game-place-snake! (mut g) (/ BOARD-COLS 2) (/ BOARD-ROWS 2) 1 0 3)
+  (place-food! (mut g))
+  0)
+
+;; Queue a direction change. A reversal onto the neck is ignored, and a finished
+;; game does not steer.
+(defn game-steer! [(g (mut Game)) (dx i64) (dy i64)] (-> i64)
+  (if (or (load (field g over))
+          (and (= dx (- 0 (load (field g dir-x))))
+               (= dy (- 0 (load (field g dir-y))))))
+      0
+      (do
+        (store! (field g next-x) dx)
+        (store! (field g next-y) dy)
+        0)))
+
+;; Advance one tick.
+;;
+;; The head moves one cell in the queued direction and is wrapped onto the
+;; board, so crossing the left, right, top, or bottom edge continues on the
+;; opposite side rather than ending the game. Running into the snake's own body
+;; is still terminal. Landing on the food grows the snake, scores a point, and
+;; respawns the food.
+(defn game-step! [(g (mut Game))] (-> i64)
+  (if (load (field g over))
+      0
+      (do
+        (store! (field g dir-x) (load (field g next-x)))
+        (store! (field g dir-y) (load (field g next-y)))
+        ; Wrapping the new head is the whole edge rule: nothing checks the head
+        ; against the board bounds, it simply reappears on the opposite side.
+        (let [nx (wrap-col (+ (game-head-x (load g)) (load (field g dir-x))))
+              ny (wrap-row (+ (game-head-y (load g)) (load (field g dir-y))))
+              eats (and (= nx (game-food-x (load g))) (= ny (game-food-y (load g))))
+              ; When the snake is not growing, the tail cell is vacated by this
+              ; very step, so moving into it is legal.
+              checked (if eats (load (field g length)) (- (load (field g length)) 1))
+              (mut crash) false]
+          (for [i 0 checked]
+            (if (and (= (game-segment-x (load g) i) nx)
+                     (= (game-segment-y (load g) i) ny))
+                (store! crash true)
+                0))
+          (if (load crash)
+              (do (store! (field g over) true) 0)
+              (let [grown
+                      (if (and eats (< (load (field g length)) MAX-SEGMENTS))
+                          (+ (load (field g length)) 1)
+                          (load (field g length)))
+                    (mut i) (- grown 1)]
+                (while (> (load i) 0)
+                  (set-segment! (mut g)
+                                (load i)
+                                (game-segment-x (load g) (- (load i) 1))
+                                (game-segment-y (load g) (- (load i) 1)))
+                  (store! i (- (load i) 1)))
+                (store! (field g length) grown)
+                (set-segment! (mut g) 0 nx ny)
+                (if eats
+                    (do
+                      (store! (field g score) (+ (load (field g score)) 1))
+                      (place-food! (mut g))
+                      0)
+                    0)))))))

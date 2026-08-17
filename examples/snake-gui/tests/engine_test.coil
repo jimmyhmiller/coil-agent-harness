@@ -1,0 +1,228 @@
+(module snake.engine-test)
+(import "coil.primitive" :as primitive)
+(import "snake.engine" :use *)
+
+; Behavioral tests for the authoritative Coil engine. They drive the real rules
+; used by the game, with no window and no native game logic involved.
+
+(defn fresh [(g (mut Game))] (-> i64)
+  (game-reset! (mut g) 12345)
+  ; Park the food where nothing below steps on it, so growth never surprises a
+  ; length or score assertion.
+  (game-set-food! (mut g) 15 11)
+  0)
+
+;; A five-long snake curled into a hook and steered down, so the next step puts
+;; the head onto segment 3 — a real body cell, not the tail that this same step
+;; would vacate.
+(defn curled-onto-itself [(g (mut Game))] (-> i64)
+  (game-place-snake! (mut g) 5 5 1 0 5)
+  (set-segment! (mut g) 1 4 5)
+  (set-segment! (mut g) 2 4 6)
+  (set-segment! (mut g) 3 5 6)
+  (set-segment! (mut g) 4 6 6)
+  (game-steer! (mut g) 0 1)
+  0)
+
+; --------------------------------------------------------------------------
+; Wraparound: crossing an edge relocates the head and keeps the game alive.
+; --------------------------------------------------------------------------
+
+(deftest wrap-left
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           ; Head on the left column, moving left, body trailing to its right.
+           (game-place-snake! (mut g) 0 5 -1 0 3)
+           (assert-eq (game-head-x (load g)) 0)
+           (game-step! (mut g))
+           (assert-eq (game-head-x (load g)) 29)
+           (assert-eq (game-head-y (load g)) 5)
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-length (load g)) 3)
+           (assert-eq (game-score (load g)) 0)))
+
+(deftest wrap-right
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           ; Head on the right column, moving right, body trailing to its left.
+           (game-place-snake! (mut g) 29 5 1 0 3)
+           (assert-eq (game-head-x (load g)) 29)
+           (game-step! (mut g))
+           (assert-eq (game-head-x (load g)) 0)
+           (assert-eq (game-head-y (load g)) 5)
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-length (load g)) 3)))
+
+(deftest wrap-up
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           ; Head on the top row, moving up, body trailing below it.
+           (game-place-snake! (mut g) 7 0 0 -1 3)
+           (assert-eq (game-head-y (load g)) 0)
+           (game-step! (mut g))
+           (assert-eq (game-head-y (load g)) 21)
+           (assert-eq (game-head-x (load g)) 7)
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-length (load g)) 3)))
+
+(deftest wrap-down
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           ; Head on the bottom row, moving down, body trailing above it.
+           (game-place-snake! (mut g) 7 21 0 1 3)
+           (assert-eq (game-head-y (load g)) 21)
+           (game-step! (mut g))
+           (assert-eq (game-head-y (load g)) 0)
+           (assert-eq (game-head-x (load g)) 7)
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-length (load g)) 3)))
+
+; --------------------------------------------------------------------------
+; Wraparound details
+; --------------------------------------------------------------------------
+
+(deftest wrap-index-folds-both-ways
+         (assert-eq (wrap-index -1 30) 29)
+         (assert-eq (wrap-index 30 30) 0)
+         (assert-eq (wrap-index 0 30) 0)
+         (assert-eq (wrap-index 29 30) 29)
+         (assert-eq (wrap-index -1 22) 21)
+         (assert-eq (wrap-index 22 22) 0))
+
+(deftest wrap-keeps-the-body-following
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (game-place-snake! (mut g) 0 5 -1 0 3)
+           (game-step! (mut g))
+           ; The old head becomes the second segment; the tail follows on the next tick.
+           (assert-eq (game-segment-x (load g) 1) 0)
+           (assert-eq (game-segment-x (load g) 2) 1)
+           (game-step! (mut g))
+           (assert-eq (game-head-x (load g)) 28)
+           (assert-eq (game-segment-x (load g) 1) 29)
+           (assert-eq (game-segment-x (load g) 2) 0)
+           (assert (not (game-over? (load g))))))
+
+(deftest wrapping-lap-returns-to-the-start
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (game-place-snake! (mut g) 10 3 1 0 3)
+           ; A full lap across the board crosses the right edge and comes home.
+           (for [i 0 30] (game-step! (mut g)))
+           (assert-eq (game-head-x (load g)) 10)
+           (assert-eq (game-head-y (load g)) 3)
+           (assert (not (game-over? (load g))))))
+
+(deftest wrap-eats-food-on-the-far-edge
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (game-place-snake! (mut g) 29 8 1 0 3)
+           (game-set-food! (mut g) 0 8)
+           (game-step! (mut g))
+           (assert-eq (game-head-x (load g)) 0)
+           (assert-eq (game-score (load g)) 1)
+           (assert-eq (game-length (load g)) 4)
+           (assert (not (game-over? (load g))))))
+
+; --------------------------------------------------------------------------
+; Self-collision stays terminal
+; --------------------------------------------------------------------------
+
+(deftest self-collision-ends-the-game
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (curled-onto-itself (mut g))
+           (game-step! (mut g))
+           (assert (game-over? (load g)))
+           (assert-eq (game-score (load g)) 0)))
+
+(deftest self-collision-across-an-edge-ends-the-game
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           ; A body already straddling the left edge: wrapping lands on segment 3.
+           (game-place-snake! (mut g) 0 9 -1 0 5)
+           (set-segment! (mut g) 1 0 10)
+           (set-segment! (mut g) 2 1 10)
+           (set-segment! (mut g) 3 29 9)
+           (set-segment! (mut g) 4 28 9)
+           (game-step! (mut g))
+           (assert (game-over? (load g)))))
+
+(deftest a-finished-game-does-not-move
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (curled-onto-itself (mut g))
+           (game-step! (mut g))
+           (assert (game-over? (load g)))
+           (let [x (game-head-x (load g))
+                 y (game-head-y (load g))]
+             (game-step! (mut g))
+             (assert-eq (game-head-x (load g)) x)
+             (assert-eq (game-head-y (load g)) y))))
+
+(deftest following-the-tail-is-allowed
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           ; The tail cell is vacated by the same step that enters it.
+           (game-place-snake! (mut g) 5 5 1 0 4)
+           (set-segment! (mut g) 1 5 6)
+           (set-segment! (mut g) 2 6 6)
+           (set-segment! (mut g) 3 6 5)
+           (game-steer! (mut g) 1 0)
+           (game-step! (mut g))
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-head-x (load g)) 6)
+           (assert-eq (game-head-y (load g)) 5)))
+
+; --------------------------------------------------------------------------
+; The rest of the rules the wraparound change must not break
+; --------------------------------------------------------------------------
+
+(deftest reset-starts-a-fresh-game
+         (let [(mut g) (primitive/zeroed Game)]
+           (game-reset! (mut g) 99)
+           (assert-eq (game-length (load g)) 3)
+           (assert-eq (game-score (load g)) 0)
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-head-x (load g)) 15)
+           (assert-eq (game-head-y (load g)) 11)
+           ; Food never spawns underneath the snake.
+           (assert (not (game-occupied? (load g) (game-food-x (load g)) (game-food-y (load g)))))))
+
+(deftest restart-after-game-over
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (curled-onto-itself (mut g))
+           (game-step! (mut g))
+           (assert (game-over? (load g)))
+           (game-reset! (mut g) 7)
+           (assert (not (game-over? (load g))))
+           (assert-eq (game-length (load g)) 3)
+           (assert-eq (game-score (load g)) 0)
+           ; The restarted game moves again.
+           (game-step! (mut g))
+           (assert-eq (game-head-x (load g)) 16)
+           (assert (not (game-over? (load g))))))
+
+(deftest eating-grows-and-scores
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (game-place-snake! (mut g) 5 5 1 0 3)
+           (game-set-food! (mut g) 6 5)
+           (game-step! (mut g))
+           (assert-eq (game-score (load g)) 1)
+           (assert-eq (game-length (load g)) 4)
+           (assert (not (game-occupied? (load g) (game-food-x (load g)) (game-food-y (load g)))))))
+
+(deftest steering-cannot-reverse-onto-the-neck
+         (let [(mut g) (primitive/zeroed Game)]
+           (fresh (mut g))
+           (game-place-snake! (mut g) 5 5 1 0 3)
+           (game-steer! (mut g) -1 0)
+           (assert-eq (game-dir-x (load g)) 1)
+           (game-steer! (mut g) 0 1)
+           (assert-eq (game-dir-y (load g)) 1)
+           (game-step! (mut g))
+           (assert-eq (game-head-x (load g)) 5)
+           (assert-eq (game-head-y (load g)) 6)
+           (assert (not (game-over? (load g))))))

@@ -2,10 +2,10 @@
 
 # COIL Agent Harness
 
-The optional Claude Agent SDK bridge in `agent-sdk/` uses the official SDK for
-the agent loop while keeping tool discovery, authorization, execution, and
-journaling in the harness. See [the bridge guide](docs/agent-sdk-bridge.md) for
-setup, operation, and verification.
+The `agent-sdk` provider uses the official Claude Agent SDK for the agent loop
+while Coil retains tool discovery, validation, execution, and journaling. It is
+invoked like every other provider; no separate server or bridge command is needed.
+See [the provider guide](docs/agent-sdk-bridge.md).
 
 This repository contains the first vertical slice of a headless, observable agent
 runtime written in COIL. The durable architectural rules live in [agent.md](agent.md).
@@ -19,6 +19,7 @@ The current slice can:
 - call DeepSeek through its OpenAI-compatible and Anthropic-compatible APIs;
 - use Codex as an external agent through the Codex App Server JSONL protocol;
 - use Claude subscriptions through native Anthropic Messages and OAuth authentication;
+- run CLI, service, and factory work through the first-class `agent-sdk` provider;
 - advertise provider capabilities and durably resolve explicit `balanced`, `low-cost`,
   `quality`, `subscription`, and `external-agent` routing profiles;
 - assign every event a stable `agent_id` and execute delegated child agents as durable,
@@ -201,7 +202,6 @@ coil test --list
 coil test --jobs 4
 coil verify
 sh scripts/check_file_size.sh
-sh scripts/e2e.sh
 ```
 
 Launch the local interactive workbench with a durable journal:
@@ -311,12 +311,6 @@ The test suites are declared in `Coil.toml`. `coil verify` validates the manifes
 formatting, lint, every entry/test target graph, and all tests. The standalone
 size-check script enforces the repository's 4,000-line guard. Neither command spends
 model credits.
-
-The end-to-end script exercises the compiled binary over real sockets, including
-authentication, command replay, failure projection, journal recovery, and graceful
-shutdown. Its default mode makes no model calls. Run `sh scripts/e2e.sh --live-codex`
-to add two minimal live Codex App Server checks using the lower-cost
-`gpt-5.6-luna` model.
 
 ## Talking to Claude Code sessions
 

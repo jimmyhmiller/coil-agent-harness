@@ -1,0 +1,7 @@
+{
+  "name": "snake-wrap-feature",
+  "goal": "Add four-edge wraparound movement to the existing native Coil Snake example and prove it with focused tests.",
+  "context": ["context.md"],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "workers": ["01-implement-and-verify.md"]
+}

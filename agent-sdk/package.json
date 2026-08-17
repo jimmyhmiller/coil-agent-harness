@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/main.ts",
+    "provider": "node src/provider.ts",
     "test": "node test/bridge-test.ts",
     "test:live": "node test/live-test.ts",
     "typecheck": "tsc --noEmit"

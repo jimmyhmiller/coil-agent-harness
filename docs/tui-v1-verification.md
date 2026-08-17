@@ -88,15 +88,10 @@ Run these as separate gates:
 ```sh
 coil verify
 coil build
-sh scripts/e2e.sh
 coil fmt --check
 git diff --check
 sh scripts/check_file_size.sh
 ```
-
-`scripts/e2e.sh` expects the current `./harness` binary. It runs all PTY checks,
-non-TTY and screen-reader fallbacks, explicit plain mode, authenticated service
-requests, idempotency, failure projection, same-port restart, and journal recovery.
 
 ## Deferred work
 

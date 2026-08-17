@@ -153,17 +153,9 @@ I also did not:
 
 ### I called fixture tests end-to-end tests
 
-The default `scripts/e2e.sh` checks process startup, PTY mode restoration, synthetic
-renderer fixtures, local HTTP service behavior, and terminal profiles. It makes no
-model call. I described that suite as proof that the TUI worked end to end.
-
-The repository already distinguished its optional live mode:
-
-```sh
-sh scripts/e2e.sh --live-codex
-```
-
-I did not run that mode before claiming completion.
+I described process, PTY, renderer-fixture, local HTTP, and terminal-profile checks
+as proof that the TUI worked end to end even though they made no model call. I did
+not run a live model-backed workflow before claiming completion.
 
 ### I tested raw output bytes instead of terminal state
 
@@ -290,9 +282,7 @@ run in a form that can reproduce a terminal failure offline.
 
 ### The test names overstate their coverage
 
-`scripts/e2e.sh` sounds like a product-level test but defaults to no model calls. PTY
-fixtures test components. The optional `--live-codex` mode tests live CLI and HTTP
-runs, but it does not drive the TUI and inspect its screen.
+PTY fixtures test components, not a product-level model-backed workflow.
 
 ## Current unproven changes
 
@@ -425,9 +415,8 @@ Test names now mean:
 - existing focused PTY scripts: terminal lifecycle or component regressions;
 - Deterministic offline product coverage using the
   optimized production command and terminal-state oracle;
-- `scripts/e2e.sh --live-codex`: live CLI and HTTP provider checks plus
-  live PTY coverage, which drives the real interactive TUI through a
-  pseudo-terminal and types character-by-character.
+- live CLI and HTTP provider checks plus live PTY coverage drive the real
+  interactive TUI through a pseudo-terminal and type character-by-character.
 
 ## Claude crash investigation update
 

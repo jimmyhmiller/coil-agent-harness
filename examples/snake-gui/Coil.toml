@@ -5,7 +5,7 @@ source-roots = ["src", "tests"]
 
 [cc]
 sources = ["native/snake_window.c"]
-include-dirs = ["native"]
+include-dirs = ["native", "/opt/homebrew/include"]
 flags = ["-std=c11", "-Wall", "-Wextra"]
 
 [link]
