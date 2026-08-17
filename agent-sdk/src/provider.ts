@@ -96,6 +96,7 @@ async function main(): Promise<void> {
       tools: [],
       settingSources: [],
       mcpServers: { harness: { type: 'sdk', name: 'harness', instance: server } },
+      strictMcpConfig: true,
       canUseTool: async () => ({ behavior: 'allow', updatedInput: {} }),
     },
   })) {

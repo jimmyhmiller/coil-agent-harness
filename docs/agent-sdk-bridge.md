@@ -35,7 +35,8 @@ Coil starts `agent-sdk/src/provider.ts` as a private newline-delimited JSON stdi
 child. It sends the prompt, system instructions, model, working directory, and
 the harness registry's JSON Schemas. The SDK host exposes those schemas through
 an in-process MCP server. It has no Claude Code built-in tools and reads no user
-or project settings.
+or project settings. `strictMcpConfig` is enabled, so account-level or locally
+configured MCP connectors are excluded as well; `harness` is the only MCP server.
 
 When the model calls a tool, the host sends a `tool_call` message to Coil. Coil
 runs it through `execute-tools-parallel`, which performs the same lookup, schema
