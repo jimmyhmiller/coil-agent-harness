@@ -14,6 +14,8 @@
 
 (const FILE_TOOL_MAX_BYTES 1048576)
 (const FILE_TOOL_DIRECTORY_MODE 493)
+(const FILE_TOOL_DEFAULT_READ_LINES 120)
+(const FILE_TOOL_MAX_READ_LINES 500)
 
 (extern mkdir :cc c [(ptr i8) i32] (-> i32))
 (extern unlink :cc c [(ptr i8)] (-> i32))
@@ -21,6 +23,7 @@
 
 (defstruct ReadTextFileTool [(root (slice u8))])
 (defstruct WriteTextFileTool [(root (slice u8))])
+(defstruct EditTextFileTool [(root (slice u8))])
 (defstruct CreateDirectoryTool [(root (slice u8))])
 (defstruct DeleteFileTool [(root (slice u8))])
 (defstruct RemoveDirectoryTool [(root (slice u8))])
@@ -28,6 +31,63 @@
 (defsum BoundedReadResult
   (BoundedReadOk [(bytes (slice u8)) (truncated bool)])
   (BoundedReadFailed [(message (slice u8))]))
+
+(defstruct LineWindow
+  [(content (slice u8))
+   (total-lines i64)
+   (start-line i64)
+   (end-line i64)
+   (next-start-line i64)])
+
+(defn file-line-window [(bytes (slice u8))
+                        (requested-start i64)
+                        (requested-count i64)] (-> LineWindow)
+  (let [n (slice-len [u8] bytes)
+        start-line (if (> requested-start 0) requested-start 1)
+        count (if (> requested-count 0)
+                  (if (> requested-count FILE_TOOL_MAX_READ_LINES)
+                      FILE_TOOL_MAX_READ_LINES
+                      requested-count)
+                  FILE_TOOL_DEFAULT_READ_LINES)
+        wanted-end (- (+ start-line count) 1)
+        (mut current-line) 1
+        (mut start-byte) (if (= start-line 1) 0 -1)
+        (mut end-byte) n
+        (mut i) 0]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (when (= (slice-get [u8] bytes (load i)) (cast u8 10))
+                  (when (= (load current-line) wanted-end)
+                    (store! end-byte (+ (load i) 1))
+                    0)
+                  (store! current-line (+ (load current-line) 1))
+                  (when (and (< (load start-byte) 0)
+                             (= (load current-line) start-line))
+                    (store! start-byte (+ (load i) 1))
+                    0)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (let [total-lines
+            (if (= n 0)
+                0
+                (if (= (slice-get [u8] bytes (- n 1)) (cast u8 10))
+                    (- (load current-line) 1)
+                    (load current-line)))
+          actual-start (if (< (load start-byte) 0) n (load start-byte))
+          actual-end (if (< (load end-byte) actual-start) actual-start (load end-byte))
+          end-line (if (or (= total-lines 0) (> start-line total-lines))
+                       0
+                       (if (> wanted-end total-lines) total-lines wanted-end))
+          next-line (if (< end-line total-lines) (+ end-line 1) 0)
+          result (alloc/stack LineWindow)]
+      (store! (field result content)
+              (subslice [u8] bytes actual-start actual-end))
+      (store! (field result total-lines) total-lines)
+      (store! (field result start-line) start-line)
+      (store! (field result end-line) end-line)
+      (store! (field result next-start-line) next-line)
+      (load result))))
 
 (defn file-tool-path-safe? [(path (slice u8))] (-> bool)
   (and (> (slice-len [u8] path) 0)
@@ -133,10 +193,13 @@
                               (call (ptr ToolCall))
                               (context (ptr ToolExecutionContext))
                               (allocator (ptr Allocator))] (-> ToolResult)
-  (let [relative
-          (match (json-string-at (load (field call arguments)) "path")
+  (let [arguments (load (field call arguments))
+        relative
+          (match (json-string-at arguments "path")
             (Some [value] value)
-            (None [] ""))]
+            (None [] ""))
+        requested-start (json-number-i64 (json-get arguments "start_line"))
+        requested-count (json-number-i64 (json-get arguments "line_count"))]
     (if (cancellation-requested? (load (field context cancellation)))
         (file-tool-error call "read cancelled")
         (if (not (file-tool-path-safe? relative))
@@ -157,16 +220,38 @@
                              (if (file-tool-binary? bytes)
                                  (file-tool-error call
                                                   "file is not text (contains NUL bytes); read_text_file only handles text")
-                                 (let [(mut output) (json-object allocator)
+                                 (let [window
+                                         (file-line-window bytes
+                                                           requested-start
+                                                           requested-count)
+                                       (mut output) (json-object allocator)
                                        (mut result)
                                          (tool-result-empty (load (field call id))
                                                             (ToolSucceeded))]
-                                   (json-put-string! (mut output) "content" bytes)
-                                   (json-put-bool! (mut output) "truncated" truncated)
+                                   (json-put-string! (mut output)
+                                                     "content"
+                                                     (load (field window content)))
+                                   (json-put-bool! (mut output)
+                                                   "truncated"
+                                                   (or truncated
+                                                       (> (load (field window next-start-line)) 0)))
                                    (json-object-put! (mut output)
                                                      "bytes"
                                                      (json-integer allocator
-                                                                   (slice-len [u8] bytes)))
+                                                                   (slice-len [u8]
+                                                                     (load (field window content)))))
+                                   (json-object-put! (mut output) "total_lines"
+                                                     (json-integer allocator
+                                                       (load (field window total-lines))))
+                                   (json-object-put! (mut output) "start_line"
+                                                     (json-integer allocator
+                                                       (load (field window start-line))))
+                                   (json-object-put! (mut output) "end_line"
+                                                     (json-integer allocator
+                                                       (load (field window end-line))))
+                                   (json-object-put! (mut output) "next_start_line"
+                                                     (json-integer allocator
+                                                       (load (field window next-start-line))))
                                    (store! (field result output) (load output))
                                    (load result)))))))))
 
@@ -204,6 +289,72 @@
                                       (json-integer allocator written))
                     (store! (field result output) (load output))
                     (load result)))))))
+
+(defn execute-edit-text-file [(self (ptr EditTextFileTool))
+                              (call (ptr ToolCall))
+                              (context (ptr ToolExecutionContext))
+                              (allocator (ptr Allocator))] (-> ToolResult)
+  (let [arguments (load (field call arguments))
+        relative
+          (match (json-string-at arguments "path")
+            (Some [value] value)
+            (None [] ""))
+        old-text
+          (match (json-string-at arguments "old_text")
+            (Some [value] value)
+            (None [] ""))
+        new-text
+          (match (json-string-at arguments "new_text")
+            (Some [value] value)
+            (None [] ""))]
+    (cond (cancellation-requested? (load (field context cancellation)))
+            (file-tool-error call "edit cancelled")
+          (not (file-tool-path-safe? relative))
+            (file-tool-error call "path must be workspace-relative without parent traversal")
+          (= (slice-len [u8] old-text) 0)
+            (file-tool-error call "old_text must not be empty")
+          :else
+            (let [path (file-tool-path allocator (load (field self root)) relative)]
+              (match (bounded-read-file allocator path)
+                (BoundedReadFailed [message] (file-tool-error call message))
+                (BoundedReadOk [content truncated]
+                  (if truncated
+                      (file-tool-error call "file exceeds one MiB edit limit")
+                      (if (file-tool-binary? content)
+                          (file-tool-error call "file is not text")
+                          (match (str-find content old-text)
+                            (None [] (file-tool-error call "old_text was not found"))
+                            (Some [position]
+                              (let [after-position (+ position (slice-len [u8] old-text))
+                                    suffix (subslice [u8]
+                                                     content
+                                                     after-position
+                                                     (slice-len [u8] content))]
+                                (match (str-find suffix old-text)
+                                  (Some [again]
+                                    (file-tool-error call "old_text occurs more than once; provide more context"))
+                                  (None []
+                                    (let [prefix (subslice [u8] content 0 position)
+                                          updated
+                                            (concat-or-empty allocator
+                                                             prefix
+                                                             (concat-or-empty allocator new-text suffix))]
+                                      (if (> (slice-len [u8] updated) FILE_TOOL_MAX_BYTES)
+                                          (file-tool-error call "edited file exceeds one MiB limit")
+                                          (match (fs/write-file allocator path updated)
+                                            (Err [failure] (file-tool-error call "could not write edited file"))
+                                            (Ok [written]
+                                              (let [(mut output) (json-object allocator)
+                                                    (mut result)
+                                                      (tool-result-empty
+                                                        (load (field call id))
+                                                        (ToolSucceeded))]
+                                                (json-put-string! (mut output) "edited" relative)
+                                                (json-object-put! (mut output)
+                                                                  "bytes_written"
+                                                                  (json-integer allocator written))
+                                                (store! (field result output) (load output))
+                                                (load result)))))))))))))))))))
 
 (defn execute-create-directory [(self (ptr CreateDirectoryTool))
                                 (call (ptr ToolCall))
@@ -283,6 +434,14 @@
                 (-> ToolResult)
                 (execute-write-text-file self call context allocator)))
 
+(impl ToolImplementation EditTextFileTool
+  (execute-tool [(self (ptr EditTextFileTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-edit-text-file self call context allocator)))
+
 (impl ToolImplementation CreateDirectoryTool
   (execute-tool [(self (ptr CreateDirectoryTool))
                  (call (ptr ToolCall))
@@ -328,6 +487,32 @@
     (json-put-bool! (mut schema) "additionalProperties" false)
     (load schema)))
 
+(defn read-text-file-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut path) (json-object allocator)
+        (mut start-line) (json-object allocator)
+        (mut line-count) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-put-string! (mut path) "type" "string")
+    (json-put-string! (mut start-line) "type" "integer")
+    (json-object-put! (mut start-line) "minimum" (json-integer allocator 1))
+    (json-put-string! (mut line-count) "type" "integer")
+    (json-object-put! (mut line-count) "minimum" (json-integer allocator 1))
+    (json-object-put! (mut line-count) "maximum"
+                      (json-integer allocator FILE_TOOL_MAX_READ_LINES))
+    (json-object-put! (mut properties) "path" (load path))
+    (json-object-put! (mut properties) "start_line" (load start-line))
+    (json-object-put! (mut properties) "line_count" (load line-count))
+    (json-array-push! (mut required) (JsonString "path"))
+    (json-array-push! (mut required) (JsonString "start_line"))
+    (json-array-push! (mut required) (JsonString "line_count"))
+    (json-put-string! (mut schema) "type" "object")
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-put-bool! (mut schema) "additionalProperties" false)
+    (load schema)))
+
 (defn read-text-file-definition [(allocator (ptr Allocator))
                                  (root (slice u8))] (-> ToolDefinition)
   (let [definition (alloc/stack ToolDefinition)
@@ -335,9 +520,9 @@
     (store! (field implementation root) root)
     (store! (field (field definition spec) name) "read_text_file")
     (store! (field (field definition spec) description)
-            "Read at most one MiB from a workspace-relative text file.")
+            "Read a bounded line range from a workspace-relative text file. Defaults to 120 lines; use start_line and line_count to continue without rereading prior content.")
     (store! (field (field definition spec) input-schema)
-            (file-tool-schema allocator false))
+            (read-text-file-schema allocator))
     (store! (field (field definition spec) strict) true)
     (store! (field (field definition spec) effect) (ReadOnly))
     (store! (field (field definition spec) idempotent) true)
@@ -358,6 +543,45 @@
     (store! (field (field definition spec) strict) true)
     (store! (field (field definition spec) effect) (Destructive))
     (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 10000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn edit-text-file-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut path) (json-object allocator)
+        (mut old-text) (json-object allocator)
+        (mut new-text) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-put-string! (mut path) "type" "string")
+    (json-put-string! (mut old-text) "type" "string")
+    (json-put-string! (mut new-text) "type" "string")
+    (json-object-put! (mut properties) "path" (load path))
+    (json-object-put! (mut properties) "old_text" (load old-text))
+    (json-object-put! (mut properties) "new_text" (load new-text))
+    (json-array-push! (mut required) (JsonString "path"))
+    (json-array-push! (mut required) (JsonString "old_text"))
+    (json-array-push! (mut required) (JsonString "new_text"))
+    (json-put-string! (mut schema) "type" "object")
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-put-bool! (mut schema) "additionalProperties" false)
+    (load schema)))
+
+(defn edit-text-file-definition [(allocator (ptr Allocator))
+                                 (root (slice u8))] (-> ToolDefinition)
+  (let [definition (alloc/stack ToolDefinition)
+        implementation (box allocator EditTextFileTool (zeroed EditTextFileTool))]
+    (store! (field implementation root) root)
+    (store! (field (field definition spec) name) "edit_text_file")
+    (store! (field (field definition spec) description)
+            "Replace one exact, unique text block in an existing workspace-relative file. Prefer this over rewriting the whole file.")
+    (store! (field (field definition spec) input-schema)
+            (edit-text-file-schema allocator))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (Destructive))
+    (store! (field (field definition spec) idempotent) false)
     (store! (field (field definition spec) timeout-ms) 10000)
     (store! (field definition implementation) implementation)
     (load definition)))
@@ -422,6 +646,9 @@
         write-added
           (tool-register! (mut registry)
                           (write-text-file-definition allocator root))
+        edit-added
+          (tool-register! (mut registry)
+                          (edit-text-file-definition allocator root))
         directory-added
           (tool-register! (mut registry)
                           (create-directory-definition allocator root))
@@ -433,4 +660,5 @@
                           (remove-directory-definition allocator root))]
     (and read-added
          (and write-added
-              (and directory-added (and delete-added remove-added))))))
+              (and edit-added
+                   (and directory-added (and delete-added remove-added)))))))

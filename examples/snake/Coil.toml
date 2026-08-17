@@ -1,0 +1,8 @@
+[package]
+name = "snake"
+entry = "src/main.coil"
+source-roots = ["src", "tests"]
+
+[test]
+roots = ["tests"]
+suffixes = ["_test.coil"]

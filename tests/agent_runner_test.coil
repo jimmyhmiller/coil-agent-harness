@@ -23,6 +23,33 @@
 
 (defstruct SlowProvider [(delay-ms i64)])
 
+(defstruct FlakyProvider
+  [(calls (ptr i64))
+   (failures-before-success i64)
+   (status i64)])
+
+(impl ModelProvider FlakyProvider
+  (provider-name [(self (ptr FlakyProvider))] (-> (slice u8)) "flaky")
+  (provider-capabilities [(self (ptr FlakyProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "flaky"))
+  (execute-model [(self (ptr FlakyProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (let [call (+ (atomic-add (load (field self calls)) 1) 1)]
+                   (if (<= call (load (field self failures-before-success)))
+                       (model-failure "flaky"
+                                      (load (field self status))
+                                      "temporary provider failure")
+                       (let [(mut response) (response-empty allocator)]
+                         (store! (field response provider) "flaky")
+                         (store! (field response model) "fake-model")
+                         (store! (field response response-id) "recovered")
+                         (store! (field response output-text) "done")
+                         (ModelOk (load response)))))))
+
 (impl ModelProvider SlowProvider
   (provider-name [(self (ptr SlowProvider))] (-> (slice u8)) "slow")
   (provider-capabilities [(self (ptr SlowProvider))]
@@ -208,7 +235,7 @@
            (store! (field request tools) registry)
            (store! (field request tool-choice) (ToolsAuto))
            (store! (field request parallel-tool-calls) true)
-           (store! (field request reasoning) (ReasoningNone))
+           (store! (field request reasoning) "none")
            (store! (field request timeout-ms) 1000)
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
@@ -240,6 +267,68 @@
                                 (let [final response]
                                   (str-eq (load (field final output-text)) "done")))
                        (ModelErr [failure] false))))))
+
+(deftest retries-transient-provider-failure-without-consuming-model-turn
+         (let [allocator (malloc-allocator)
+               calls (box allocator i64 0)
+               provider (box allocator FlakyProvider (zeroed FlakyProvider))
+               request (box allocator ModelRequest (zeroed ModelRequest))
+               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+               events (box allocator i64 0)
+               sequence (box allocator i64 1)
+               sink (alloc/stack CountingEventSink)
+               emitter (box allocator EventEmitter (zeroed EventEmitter))
+               policy (alloc/stack AgentRunPolicy)]
+           (store! (field provider calls) calls)
+           (store! (field provider failures-before-success) 2)
+           (store! (field provider status) 503)
+           (store! (field request run-id) "retry-test")
+           (store! (field request operation-id) "model")
+           (store! (field request model) "fake-model")
+           (store! (field request messages) messages)
+           (store! (field request timeout-ms) 5000)
+           (store! (field sink count) events)
+           (store! emitter (event-emitter-new allocator sink sequence))
+           (store! (field policy max-model-turns) 1)
+           (store! (field policy max-parallel-tools) 1)
+           (let [result (run-agent allocator provider request emitter (load policy))]
+             (assert-eq (atomic-load calls) 3)
+             (assert (match result
+                       (ModelOk [response]
+                         (let [completed response]
+                           (str-eq (load (field completed output-text)) "done")))
+                       (ModelErr [failure] false))))))
+
+(deftest does-not-retry-nontransient-provider-failure
+         (let [allocator (malloc-allocator)
+               calls (box allocator i64 0)
+               provider (box allocator FlakyProvider (zeroed FlakyProvider))
+               request (box allocator ModelRequest (zeroed ModelRequest))
+               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+               events (box allocator i64 0)
+               sequence (box allocator i64 1)
+               sink (alloc/stack CountingEventSink)
+               emitter (box allocator EventEmitter (zeroed EventEmitter))
+               policy (alloc/stack AgentRunPolicy)]
+           (store! (field provider calls) calls)
+           (store! (field provider failures-before-success) 2)
+           (store! (field provider status) 400)
+           (store! (field request run-id) "no-retry-test")
+           (store! (field request operation-id) "model")
+           (store! (field request model) "fake-model")
+           (store! (field request messages) messages)
+           (store! (field request timeout-ms) 5000)
+           (store! (field sink count) events)
+           (store! emitter (event-emitter-new allocator sink sequence))
+           (store! (field policy max-model-turns) 1)
+           (store! (field policy max-parallel-tools) 1)
+           (let [result (run-agent allocator provider request emitter (load policy))]
+             (assert-eq (atomic-load calls) 1)
+             (assert (match result
+                       (ModelOk [response] false)
+                       (ModelErr [failure]
+                         (let [failed failure]
+                           (= (load (field failed status-code)) 400))))))))
 
 (deftest background-run-cancellation-wins-over-a-late-model-response
          (let [allocator (malloc-allocator)

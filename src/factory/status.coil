@@ -1,0 +1,94 @@
+(module harness-factory-status)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.atomic" :use *)
+(import "coil.match" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defstruct FactoryWorkerStatus
+  [(reported i64)
+   (ready i64)])
+
+(defstruct FactoryStatusTool
+  [(status (ptr FactoryWorkerStatus))])
+
+(defn factory-worker-status-reset! [(status (ptr FactoryWorkerStatus))] (-> i64)
+  (atomic-store (field status reported) 0)
+  (atomic-store (field status ready) 0)
+  0)
+
+(defn factory-worker-status-reported? [(status (ptr FactoryWorkerStatus))] (-> bool)
+  (!= (atomic-load (field status reported)) 0))
+
+(defn factory-worker-status-ready? [(status (ptr FactoryWorkerStatus))] (-> bool)
+  (!= (atomic-load (field status ready)) 0))
+
+(defn factory-status-error [(call (ptr ToolCall)) (message (slice u8))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
+    (store! (field result error) message)
+    (load result)))
+
+(defn execute-factory-status [(self (ptr FactoryStatusTool))
+                              (call (ptr ToolCall))
+                              (allocator (ptr Allocator))] (-> ToolResult)
+  (match (json-bool-value (json-get (load (field call arguments)) "ready"))
+    (None [] (factory-status-error call "ready must be true or false"))
+    (Some [ready]
+          (let [(mut output) (json-object allocator)
+                (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))
+                status (load (field self status))]
+            (atomic-store (field status ready) (if ready 1 0))
+            (atomic-store (field status reported) 1)
+            (json-put-bool! (mut output) "recorded" true)
+            (json-put-bool! (mut output) "ready" ready)
+            (store! (field result output) (load output))
+            (load result)))))
+
+(impl ToolImplementation FactoryStatusTool
+  (execute-tool [(self (ptr FactoryStatusTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-factory-status self call allocator)))
+
+(defn factory-status-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut ready) (json-object allocator)
+        (mut summary) (json-object allocator)
+        (mut evidence) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-put-string! (mut ready) "type" "boolean")
+    (json-put-string! (mut summary) "type" "string")
+    (json-put-string! (mut evidence) "type" "string")
+    (json-object-put! (mut properties) "ready" (load ready))
+    (json-object-put! (mut properties) "summary" (load summary))
+    (json-object-put! (mut properties) "evidence" (load evidence))
+    (json-array-push! (mut required) (JsonString "ready"))
+    (json-array-push! (mut required) (JsonString "summary"))
+    (json-array-push! (mut required) (JsonString "evidence"))
+    (json-put-string! (mut schema) "type" "object")
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-put-bool! (mut schema) "additionalProperties" false)
+    (load schema)))
+
+(defn register-factory-status-tool! [(registry (mut ToolRegistry))
+                                     (allocator (ptr Allocator))
+                                     (status (ptr FactoryWorkerStatus))] (-> bool)
+  (let [definition (alloc/stack ToolDefinition)
+        implementation (box allocator FactoryStatusTool (zeroed FactoryStatusTool))]
+    (store! (field implementation status) status)
+    (store! (field (field definition spec) name) "report_worker_status")
+    (store! (field (field definition spec) description)
+            "Report whether this worker has completed and validated its Markdown assignment. Use ready=false when it is not ready; include a concise summary and optional evidence.")
+    (store! (field (field definition spec) input-schema) (factory-status-schema allocator))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 0)
+    (store! (field definition implementation) implementation)
+    (tool-register! (mut registry) (load definition))))

@@ -90,16 +90,14 @@
                       (deepseek-chat-messages allocator request))
     (json-put-string! (mut thinking)
                       "type"
-                      (match-else (load (field request reasoning))
-                                  (ReasoningNone [] "disabled")
-                                  (_ "enabled")))
+                      (if (str-eq (load (field request reasoning)) "none")
+                          "disabled"
+                          "enabled"))
     (json-object-put! (mut body) "thinking" (load thinking))
-    (when (not (match-else (load (field request reasoning))
-                           (ReasoningNone [] true)
-                           (_ false)))
+    (when (not (str-eq (load (field request reasoning)) "none"))
       (json-put-string! (mut body)
                         "reasoning_effort"
-                        (reasoning-effort-name (load (field request reasoning))))
+                        (load (field request reasoning)))
       0)
     (when (> (load (field request max-output-tokens)) 0)
       (json-object-put! (mut body)
@@ -137,6 +135,7 @@
             (json-number-i64 (json-get (json-get wire "completion_tokens_details") "reasoning_tokens")))
     (store! (field usage cached-input-tokens)
             (json-number-i64 (json-get wire "prompt_cache_hit_tokens")))
+    (store! (field usage cache-write-tokens) 0)
     (load usage)))
 
 (defn deepseek-openai-parse-response [(allocator (ptr Allocator)) (root Json)] (-> ModelResponse)

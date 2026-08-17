@@ -1,0 +1,83 @@
+(module harness-factory-definition-test)
+
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "harness-factory-definition" :use *)
+
+(deftest loads-folder-backed-markdown-factory
+         (let [allocator (malloc-allocator)]
+           (match (load-factory-definition allocator "factories/snake")
+             (FactoryInvalid [message] (assert false))
+             (FactoryLoaded [definition]
+                            (let [loaded definition]
+                              (assert-eq (load (field loaded name)) "coil-snake")
+                              (assert (> (al-len [(slice u8)] (load (field loaded common-context))) 0))
+                              (assert-eq (al-len [(slice u8)] (load (field loaded tool-groups))) 2)
+                              (assert-eq (al-len [FactoryWorker] (load (field loaded workers))) 3)
+                              (let [first (al-get [FactoryWorker] (load (field loaded workers)) 0)]
+                                (assert-eq (load (field first file)) "02-engine-and-tests.md")
+                                (assert (> (slice-len [u8] (load (field first instructions))) 0))))))))
+
+(deftest loads-two-worker-factory-without-changing-three-worker-baseline
+         (let [allocator (malloc-allocator)]
+           (match (load-factory-definition allocator "factories/snake-two-worker")
+             (FactoryInvalid [message] (assert false))
+             (FactoryLoaded [definition]
+                            (let [loaded definition]
+                              (assert-eq (load (field loaded name)) "coil-snake-two-worker")
+                              (assert-eq (al-len [FactoryWorker] (load (field loaded workers))) 2)
+                              (let [first (al-get [FactoryWorker] (load (field loaded workers)) 0)
+                                    second (al-get [FactoryWorker] (load (field loaded workers)) 1)]
+                                (assert-eq (load (field first file)) "01-implementor.md")
+                                (assert-eq (load (field second file)) "02-verifier.md")))))))
+
+(deftest loads-flow-and-worker-lifecycle-commands
+         (let [allocator (malloc-allocator)]
+           (match (load-factory-definition allocator "tests/fixtures/factory-hooks")
+             (FactoryInvalid [message] (assert false))
+             (FactoryLoaded [definition]
+                            (let [loaded definition
+                                  worker
+                                    (al-get [FactoryWorker]
+                                            (load (field loaded workers))
+                                            0)]
+                              (assert-eq (al-len [(slice u8)]
+                                                 (load (field loaded before-commands)))
+                                         1)
+                              (assert-eq (al-len [(slice u8)]
+                                                 (load (field loaded after-commands)))
+                                         1)
+                              (assert-eq (al-len [(slice u8)]
+                                                 (load (field loaded before-each-commands)))
+                                         1)
+                              (assert-eq (al-len [(slice u8)]
+                                                 (load (field loaded after-each-commands)))
+                                         1)
+                              (assert-eq (al-get [(slice u8)]
+                                                 (load (field worker before-commands))
+                                                 0)
+                                         "true")
+                              (assert-eq (al-get [(slice u8)]
+                                                 (load (field worker after-commands))
+                                                 0)
+                                         "true")
+                              (assert-eq (load (field worker provider)) "async-tool")
+                              (assert-eq (load (field worker model)) "fixture-step-model")
+                              (assert-eq (load (field worker reasoning))
+                                         "provider-future-level"))))))
+
+(deftest filename-workers-inherit-run-settings
+         (let [allocator (malloc-allocator)]
+           (match (load-factory-definition allocator "factories/architecture-3")
+             (FactoryInvalid [message] (assert false))
+             (FactoryLoaded [definition]
+                            (let [loaded definition
+                                  worker
+                                    (al-get [FactoryWorker]
+                                            (load (field loaded workers))
+                                            0)]
+                              (assert-eq (load (field worker provider)) "")
+                              (assert-eq (load (field worker model)) "")
+                              (assert-eq (load (field worker reasoning)) ""))))))

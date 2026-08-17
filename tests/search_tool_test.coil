@@ -1,0 +1,42 @@
+(module harness-search-tool-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-search-tool" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(deftest search-text-returns-focused-line-numbered-matches
+  (let [allocator (malloc-allocator)
+        tool (alloc/stack SearchTextTool)
+        call (alloc/stack ToolCall)
+        context (alloc/stack ToolExecutionContext)
+        (mut arguments) (json-object allocator)]
+    (store! (field tool root) ".")
+    (json-put-string! (mut arguments) "query" "module harness-search-tool")
+    (json-put-string! (mut arguments) "path" "src/tools/search.coil")
+    (store! (field call id) "search-1")
+    (store! (field call name) "search_text")
+    (store! (field call arguments) (load arguments))
+    (store! (field context cancellation) (cast (ptr CancellationToken) 0))
+    (store! (field context run-deadline-monotonic-ms) 0)
+    (store! (field context tool-deadline-monotonic-ms) 0)
+    (let [result (execute-search-text tool call context allocator)
+          output (load (field result output))
+          ;; Serialization happens after execute-search-text has freed its RunResult.
+          ;; This catches returning a borrowed slice into the subprocess capture.
+          serialized (json-stringify allocator output)]
+      (assert (match-else (load (field result status))
+                          (ToolSucceeded [] true)
+                          (_ false)))
+      (assert (match (str-find serialized "1:(module harness-search-tool)")
+                (Some [position] true)
+                (None [] false)))
+      (assert (match (json-string-at output "matches")
+                (Some [matches]
+                  (match (str-find matches "1:(module harness-search-tool)")
+                    (Some [position] true)
+                    (None [] false)))
+                (None [] false))))))

@@ -117,7 +117,7 @@
     (let [(mut reasoning) (json-object allocator)]
       (json-put-string! (mut reasoning)
                         "effort"
-                        (reasoning-effort-name (load (field request reasoning))))
+                        (load (field request reasoning)))
       (json-object-put! (mut body) "reasoning" (load reasoning)))
     (when (and include-output-limit
                (> (load (field request max-output-tokens)) 0))
@@ -144,6 +144,8 @@
             (json-number-i64 (json-get (json-get wire "output_tokens_details") "reasoning_tokens")))
     (store! (field usage cached-input-tokens)
             (json-number-i64 (json-get (json-get wire "input_tokens_details") "cached_tokens")))
+    (store! (field usage cache-write-tokens)
+            (json-number-i64 (json-get (json-get wire "input_tokens_details") "cache_write_tokens")))
     (load usage)))
 
 (defn openai-parse-response [(allocator (ptr Allocator)) (root Json)] (-> ModelResponse)

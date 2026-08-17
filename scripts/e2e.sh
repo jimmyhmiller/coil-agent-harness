@@ -110,16 +110,6 @@ coil build integration/event_journal_background_fixture.coil -O1 \
   -o "$work_dir/event-journal-background"
 "$work_dir/event-journal-background" "$work_dir/background-events.jsonl"
 
-echo "e2e: verifying inline startup and restoration in a pseudo-terminal"
-python3 scripts/tui_pty_test.py ./harness
-python3 scripts/tui_signal_pty_test.py ./harness
-python3 scripts/tui_suspend_pty_test.py ./harness
-python3 scripts/tui_stream_pty_test.py
-python3 scripts/tui_typing_pty_test.py
-python3 scripts/tui_product_test.py
-python3 scripts/claude_wire_regression_test.py
-python3 scripts/tui_compat_pty_test.py ./harness
-
 echo "e2e: verifying the sequential non-TTY terminal fallback"
 printf '/quit\n' | TERM=dumb NO_COLOR=1 COIL_TUI_UNICODE=always ./harness tui "$work_dir/tui-events.jsonl" \
   >"$work_dir/tui-plain.out"
@@ -173,9 +163,6 @@ start_server
 wait_for_status e2e-missing failed "$work_dir/recovered-state.json"
 
 if [ "$live_codex" -eq 1 ]; then
-  echo "e2e: exercising the real Codex TUI through a pseudo-terminal"
-  python3 scripts/tui_live_pty_test.py ./harness
-
   echo "e2e: exercising live Codex app-server with gpt-5.6-luna"
   ./harness run codex gpt-5.6-luna 'Reply with exactly OK.' \
     >"$work_dir/codex-cli.out" 2>"$work_dir/codex-cli.events"

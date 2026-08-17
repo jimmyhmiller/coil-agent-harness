@@ -16,14 +16,6 @@
   [(role MessageRole)
    (content (slice u8))])
 
-(defsum ReasoningEffort
-  (ReasoningNone [])
-  (ReasoningLow [])
-  (ReasoningMedium [])
-  (ReasoningHigh [])
-  (ReasoningXHigh [])
-  (ReasoningMax []))
-
 (defsum ModelToolChoice
   (ToolsAuto [])
   (ToolsNone [])
@@ -54,7 +46,9 @@
    (tools (ptr ToolRegistry))
    (tool-choice ModelToolChoice)
    (parallel-tool-calls bool)
-   (reasoning ReasoningEffort)
+   ;; Opaque provider-facing value. Catalogues may suggest values, but the
+   ;; runtime never constrains them.
+   (reasoning (slice u8))
    (max-output-tokens i64)
    (timeout-ms i64)
    (deadline-monotonic-ms i64)
@@ -69,7 +63,8 @@
   [(input-tokens i64)
    (output-tokens i64)
    (reasoning-tokens i64)
-   (cached-input-tokens i64)])
+   (cached-input-tokens i64)
+   (cache-write-tokens i64)])
 
 (defstruct ModelResponse
   [(provider (slice u8))
@@ -190,15 +185,6 @@
                   (emitter (ptr EventEmitter))
                   (allocator (ptr Allocator))]
                  (-> ModelResult)))
-
-(defn reasoning-effort-name [(effort ReasoningEffort)] (-> (slice u8))
-  (match effort
-    (ReasoningNone [] "none")
-    (ReasoningLow [] "low")
-    (ReasoningMedium [] "medium")
-    (ReasoningHigh [] "high")
-    (ReasoningXHigh [] "xhigh")
-    (ReasoningMax [] "max")))
 
 (defn message-role-name [(role MessageRole)] (-> (slice u8))
   (match role

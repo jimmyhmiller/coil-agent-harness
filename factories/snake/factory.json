@@ -1,0 +1,18 @@
+{
+  "name": "coil-snake",
+  "goal": "Build a genuinely playable real-time native GUI Snake game powered by Coil. It must open as a native graphical application, move continuously on a timer without requiring Enter, accept immediate WASD and arrow-key input, support food, growth, score, wrap across all four board edges, self-collision game over, and restart. Crossing a board edge must never end the game. It must build and test successfully and include accurate launch instructions. Browsers, web views, HTML, and turn-by-turn or terminal interfaces do not satisfy this job. Choose an appropriate native implementation based on what is available in the environment.",
+  "context": [
+    "invariants.md"
+  ],
+  "tools": {
+    "groups": [
+      "filesystem",
+      "bash"
+    ]
+  },
+  "workers": [
+    "02-engine-and-tests.md",
+    "04-integrator.md",
+    "03-verifier.md"
+  ]
+}

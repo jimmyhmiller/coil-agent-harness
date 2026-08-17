@@ -67,9 +67,7 @@
                      (break)
                      (let [choice (model-catalog-at (mut catalog) (load i))]
                        (when (not (load (field choice effort)))
-                         (assert (match-else (load (field choice default-effort))
-                                             (ReasoningNone [] true)
-                                             (_ false)))
+                         (assert (str-eq (load (field choice default-effort)) "none"))
                          (store! checked (+ (load checked) 1))
                          0)
                        (store! i (+ (load i) 1)))))
@@ -83,20 +81,16 @@
                      (let [choice (alloc/stack EffortChoice)]
                        (store! choice (effort-choice-at (load i)))
                        (assert-eq (effort-index (load (field choice effort))) (load i))
-                       (assert (str-eq (reasoning-effort-name (load (field choice effort)))
+                       (assert (str-eq (load (field choice effort))
                                        (load (field choice label))))
                        (store! i (+ (load i) 1)))))))
 
-;; An absent or unrecognised effort has to land somewhere safe: a command from a
-;; client that never picked one must behave exactly as it did before the field
-;; existed.
-(deftest an-unknown-effort-name-falls-back-to-medium
-         (assert (match-else (effort-from-name "") (ReasoningMedium [] true) (_ false)))
-         (assert (match-else (effort-from-name "enormous")
-                             (ReasoningMedium [] true)
-                             (_ false)))
-         (assert (match-else (effort-from-name "xhigh") (ReasoningXHigh [] true) (_ false)))
-         (assert (match-else (effort-from-name "max") (ReasoningMax [] true) (_ false))))
+;; Absence retains the old default, while provider-specific and future values
+;; pass through without a runtime allowlist.
+(deftest effort-values-are-opaque
+         (assert-eq (effort-from-name "") "medium")
+         (assert-eq (effort-from-name "enormous") "enormous")
+         (assert-eq (effort-from-name "xhigh") "xhigh"))
 
 ;; The picker's default for each model must be a level the picker can show.
 (deftest default-efforts-are-selectable-levels
@@ -112,7 +106,7 @@
                                shown (alloc/stack EffortChoice)]
                            (assert (and (>= at 0) (< at EFFORT_CHOICE_COUNT)))
                            (store! shown (effort-choice-at at))
-                           (assert (str-eq (reasoning-effort-name (load (field shown effort)))
-                                           (reasoning-effort-name (load (field choice default-effort))))))
+                           (assert (str-eq (load (field shown effort))
+                                           (load (field choice default-effort)))))
                          0)
                        (store! i (+ (load i) 1)))))))

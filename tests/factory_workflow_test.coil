@@ -1,0 +1,108 @@
+(module harness-factory-workflow-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-factory-workflow" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(deftest workflow-tools-expose-live-topology-and-history
+         (let [allocator (malloc-allocator)
+               state
+                 (box allocator
+                      FactoryWorkflowState
+                      (factory-workflow-state-new allocator "factories/architecture-3"))
+               tool (alloc/stack FactoryWorkflowTopologyTool)
+               call (alloc/stack ToolCall)
+               (mut arguments) (json-object allocator)]
+           (factory-workflow-prepare-stage! state "02-implement.md" 1)
+           (factory-workflow-record-completed! state)
+           (store! (field tool state) state)
+           (store! (field call id) "topology-1")
+           (store! (field call name) "inspect_workflow")
+           (store! (field call arguments) (load arguments))
+           (let [result (execute-factory-workflow-topology tool call allocator)]
+             (assert (match-else (load (field result status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert (str-eq (match (json-string-at (load (field result output))
+                                                    "current_worker")
+                               (Some [value] value)
+                               (None [] ""))
+                             "02-implement.md"))
+             (assert (= (match (json-array-items (json-get (load (field result output)) "steps"))
+                          (Some [items] (al-len [Json] (load items)))
+                          (None [] 0))
+                        3))
+             (assert (= (match (json-array-items (json-get (load (field result output)) "completed"))
+                          (Some [items] (al-len [Json] (load items)))
+                          (None [] 0))
+                        1)))))
+
+(deftest workflow-transition-selects-named-worker-and-rejects-unknown-worker
+         (let [allocator (malloc-allocator)
+               state
+                 (box allocator
+                      FactoryWorkflowState
+                      (factory-workflow-state-new allocator "factories/architecture-3"))
+               tool (alloc/stack FactoryWorkflowTransitionTool)
+               call (alloc/stack ToolCall)
+               (mut arguments) (json-object allocator)]
+           (store! (field tool state) state)
+           (store! (field call id) "transition-1")
+           (store! (field call name) "set_workflow_state")
+           (json-put-string! (mut arguments) "action" "goto")
+           (json-put-string! (mut arguments) "next_worker" "03-verify.md")
+           (store! (field call arguments) (load arguments))
+           (let [result (execute-factory-workflow-transition tool call allocator)]
+             (assert (match-else (load (field result status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert (= (load (field state decision)) 2))
+             (assert (str-eq (load (field state target)) "03-verify.md")))
+           (json-put-string! (mut arguments) "next_worker" "missing.md")
+           (store! (field call arguments) (load arguments))
+           (let [result (execute-factory-workflow-transition tool call allocator)]
+             (assert (match-else (load (field result status))
+                                 (ToolErrored [] true)
+                                 (_ false))))))
+
+(deftest workflow-transition-can-complete-and-resets-for-each-stage
+         (let [allocator (malloc-allocator)
+               state
+                 (box allocator
+                      FactoryWorkflowState
+                      (factory-workflow-state-new allocator "factories/architecture-3"))
+               tool (alloc/stack FactoryWorkflowTransitionTool)
+               call (alloc/stack ToolCall)
+               (mut arguments) (json-object allocator)]
+           (store! (field tool state) state)
+           (store! (field call id) "transition-2")
+           (store! (field call name) "set_workflow_state")
+           (json-put-string! (mut arguments) "action" "complete")
+           (json-put-string! (mut arguments) "next_worker" "")
+           (store! (field call arguments) (load arguments))
+           (execute-factory-workflow-transition tool call allocator)
+           (assert (= (load (field state decision)) 1))
+           (factory-workflow-prepare-stage! state "01-architect.md" 0)
+           (assert (= (load (field state decision)) 0))
+           (assert (= (slice-len [u8] (load (field state target))) 0))))
+
+(deftest workflow-tools-are-always-registerable
+         (let [allocator (malloc-allocator)
+               state
+                 (box allocator
+                      FactoryWorkflowState
+                      (factory-workflow-state-new allocator "factories/architecture-3"))
+               (mut registry) (tool-registry-new allocator)]
+           (assert (register-factory-workflow-tools! (mut registry) allocator state))
+           (assert (match-else (tool-find (load registry) "inspect_workflow")
+                               (Some [tool] true)
+                               (_ false)))
+           (assert (match-else (tool-find (load registry) "set_workflow_state")
+                               (Some [tool] true)
+                               (_ false)))))

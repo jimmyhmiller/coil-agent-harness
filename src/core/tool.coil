@@ -9,6 +9,7 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-json" :use *)
+(import "harness-json-schema" :use *)
 
 ;; Effect classification is descriptive metadata for presentation and retry policy.
 ;; It is deliberately independent of provider tool formats. The harness does not
@@ -124,7 +125,7 @@
                 (if (str-eq (load (field (field existing spec) name)) name)
                     (do (store! unique false) (break))
                     (store! i (+ (load i) 1))))))
-    (if (load unique)
+    (if (and (load unique) (tool-spec-valid? (load (field definition spec))))
         (do (al-push! [ToolDefinition] (mut (field registry definitions)) definition) true)
         false)))
 
@@ -192,4 +193,6 @@
                                       (match-else (json-string-at (load (field spec input-schema)) "type")
                                                   (Some [kind] (str-eq kind "object"))
                                                   (_ false)))
-                          (_ false))))))
+                          (_ false))
+              (or (not (load (field spec strict)))
+                  (json-schema-strict-compatible? (load (field spec input-schema))))))))

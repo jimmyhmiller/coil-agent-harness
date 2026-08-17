@@ -33,7 +33,6 @@ lint.txt
 *.bin
 *.a
 *.pyc
-__pycache__/
 *.wav
 *.pt
 **/captures/
@@ -49,6 +48,13 @@ dist/
 /harness.o
 /.harness-tui*.jsonl
 /.coil-harness/
+/.factory-artifacts/
+/.factory-runs/
+/.factory-workspaces/
+**/.factory/
+**/.coil/
+/examples/**/build/
+/examples/snake/snake
 /test
 /.coil/
 /.build/
@@ -56,4 +62,3 @@ dist/
 *.dSYM/
 .DS_Store
 .claude/settings.local.json
-__pycache__/

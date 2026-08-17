@@ -18,6 +18,9 @@
   [(max-model-turns i64)
    (max-parallel-tools i64)])
 
+(const MODEL_REQUEST_MAX_ATTEMPTS 3)
+(const MODEL_REQUEST_RETRY_BASE_MS 250)
+
 (const RUN_LIFECYCLE_QUEUED 0)
 (const RUN_LIFECYCLE_RUNNING 1)
 (const RUN_LIFECYCLE_CANCEL_RESERVED 2)
@@ -148,6 +151,65 @@
 (defn request-cancelled? [(request (ptr ModelRequest))] (-> bool)
   (cancellation-requested? (load (field request cancellation))))
 
+(defn runner-retry-event [(allocator (ptr Allocator))
+                          (emitter (ptr EventEmitter))
+                          (request (ptr ModelRequest))
+                          (attempt i64)
+                          (delay-ms i64)
+                          (failure ModelFailure)] (-> i64)
+  (let [(mut payload) (json-object allocator)]
+    (json-object-put! (mut payload) "next_attempt" (json-integer allocator (+ attempt 1)))
+    (json-object-put! (mut payload) "delay_ms" (json-integer allocator delay-ms))
+    (json-object-put! (mut payload)
+                      "status_code"
+                      (json-integer allocator (load (field failure status-code))))
+    (json-object-put! (mut payload)
+                      "failure"
+                      (JsonString (load (field failure message))))
+    (runner-event emitter request (ModelRequestRetryScheduled) (load payload))))
+
+;; Retry only failures explicitly classified by the provider as transient. The
+;; same request and operation id are reused, so this neither loses continuation
+;; state nor becomes an additional logical model turn.
+(defn execute-model-with-retry [(allocator (ptr Allocator))
+                                (provider (dyn ModelProvider))
+                                (request (ptr ModelRequest))
+                                (emitter (ptr EventEmitter))] (-> ModelResult)
+  (let [(mut attempt) 0
+        (mut done) false
+        (mut result) (runner-stop-failure (ProtocolFailure) "model request did not run")]
+    (loop (if (load done)
+              (break)
+              (do
+                (store! attempt (+ (load attempt) 1))
+                (let [turn-scratch (alloc/stack scratch/ScratchArena)]
+                  (scratch/scratch-init turn-scratch (malloc-allocator))
+                  (let [turn-result
+                          (execute-model provider
+                                         request
+                                         emitter
+                                         (scratch/scratch-allocator turn-scratch))]
+                    (store! result (model-result-clone-into allocator turn-result)))
+                  (scratch/scratch-close! turn-scratch))
+                (match (load result)
+                  (ModelOk [response] (store! done true))
+                  (ModelErr [failure]
+                    (let [failure-value failure]
+                      (if (and (load (field failure-value retryable))
+                               (< (load attempt) MODEL_REQUEST_MAX_ATTEMPTS)
+                               (not (request-cancelled? request))
+                               (not (request-deadline-expired? request)))
+                          (let [delay-ms (* MODEL_REQUEST_RETRY_BASE_MS (load attempt))]
+                            (runner-retry-event allocator
+                                                emitter
+                                                request
+                                                (load attempt)
+                                                delay-ms
+                                                failure-value)
+                            (sleep-ms delay-ms))
+                          (store! done true))))))))
+    (load result)))
+
 ;; Run the model/tool loop until the model produces no function calls, a provider
 ;; fails, or an explicitly configured positive turn limit is reached. Zero means
 ;; unlimited, which is the normal policy: an internal loop counter must not turn
@@ -208,18 +270,8 @@
                                 (runner-model-operation-id allocator
                                                            root-operation-id
                                                            (load turn)))
-                        (let [turn-scratch (alloc/stack scratch/ScratchArena)]
-                          ;; Provider parsing and protocol state live for one model
-                          ;; turn. Only the cloned ModelResult below survives in the
-                          ;; run-owned allocation domain.
-                          (scratch/scratch-init turn-scratch (malloc-allocator))
-                          (let [turn-result
-                                  (execute-model provider
-                                                 current
-                                                 emitter
-                                                 (scratch/scratch-allocator turn-scratch))
-                                model-result (model-result-clone-into allocator turn-result)]
-                            (scratch/scratch-close! turn-scratch)
+                        (let [model-result
+                                (execute-model-with-retry allocator provider current emitter)]
                             (if (request-cancelled? current)
                                 (do
                                   (store! final
@@ -315,7 +367,7 @@
                                                                ; Required/forced selection is an initial-turn constraint.
                                                                ; Continuing with it would force an endless tool loop after
                                                                ; the requested result has already been supplied.
-                                                               (store! (field current tool-choice) (ToolsAuto)))))))))))))))))))
+                                                               (store! (field current tool-choice) (ToolsAuto))))))))))))))))))
     (when (not (load finished))
       (runner-terminal-event emitter
                              request

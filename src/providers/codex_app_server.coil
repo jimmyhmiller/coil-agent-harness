@@ -266,7 +266,7 @@
     (json-object-put! (mut params) "input" (load input))
     (json-put-string! (mut params)
                       "effort"
-                      (reasoning-effort-name (load (field request reasoning))))
+                      (load (field request reasoning)))
     (codex-rpc-request allocator 3 "turn/start" (load params))))
 
 (defn codex-child-send [(allocator (ptr Allocator))

@@ -3,6 +3,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.io" :as io)
+(import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
 (import "coil.process" :as process)
@@ -20,7 +21,12 @@
 (import "harness-system" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-filesystem-tools" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-coordinator" :use *)
+(import "harness-factory-scaffold" :use *)
+(import "harness-factory-workspace" :use *)
 (import "harness-bash-tool" :use *)
+(import "harness-search-tool" :use *)
 (import "harness-orchestration-tools" :use *)
 (import "harness-run-service" :use *)
 (import "harness-runtime-controller" :use *)
@@ -58,12 +64,35 @@
     (store! (index newline 0) (cast u8 10))
     (write-slice fd (slice-new [u8] (index newline 0) 1))))
 
+;; Tool groups are a deliberately small runtime configuration seam. An absent
+;; variable preserves the interactive harness defaults; factories can expose a
+;; narrower registry without requiring a different binary.
+(defn tool-group-enabled? [(allocator (ptr Allocator))
+                           (name (slice u8))] (-> bool)
+  (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
+    (Err [failure] true)
+    (Ok [found]
+        (match found
+          (None [] true)
+          (Some [configured]
+                (let [(mut value) configured
+                      enabled
+                        (match (str-find (os/owned-string-slice (load value)) name)
+                          (Some [position] true)
+                          (None [] false))]
+                  (os/owned-string-free allocator value)
+                  enabled))))))
+
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
   (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude> <model> <prompt>")
   (write-line 2 "       harness <login|logout> <codex|claude>")
   (write-line 2 "       harness tui [--plain] [journal-path]")
   (write-line 2 "       harness serve <port> <journal-path>")
+  (write-line 2 "       harness factory run <factory-folder> [workspace] [model] [provider] [context-file ...]")
+  (write-line 2
+              "       harness factory issue <factory-folder> --workspace <path> --issue <file> [--model <model>] [--provider <provider>]")
+  (write-line 2 "       harness factory new <factory-folder> [step ...]")
   (write-line 2 "       harness peers [--all] [--realm <name>]")
   (write-line 2 "       harness send [--realm <name>] <peer> <message>")
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
@@ -76,6 +105,218 @@
   (write-line 2 "        other name is a private namespace using the same protocol with no")
   (write-line 2 "        contact in either direction. HARNESS_BUS_REALM sets the default.")
   64)
+
+(defn cli-factory-run-owned [(factory-directory (slice u8))
+                             (requested-workspace (slice u8))
+                             (model (slice u8))
+                             (provider-name (slice u8))
+                             (runtime-contexts (ArrayList (slice u8)))
+                             (allocator (ptr Allocator))] (-> i64)
+  (match (load-factory-definition allocator factory-directory)
+    (FactoryInvalid [message] (do (write-line 2 message) 65))
+    (FactoryLoaded [definition-value]
+                   (let [(mut definition) definition-value
+                         (mut runtime-sections) (al-new [(slice u8)] allocator)
+                         (mut context-index) 0
+                         context-count (al-len [(slice u8)] runtime-contexts)
+                         (mut contexts-ok) true]
+                     (loop (if (>= (load context-index) context-count)
+                               (break)
+                               (do
+                                 (match (fs/read-file allocator
+                                                      (al-get [(slice u8)]
+                                                              runtime-contexts
+                                                              (load context-index)))
+                                   (Ok [contents]
+                                       (al-push! [(slice u8)] (mut runtime-sections) contents))
+                                   (Err [failure]
+                                        (do (store! contexts-ok false) (break))))
+                                 (store! context-index (+ (load context-index) 1)))))
+                     (if (not (load contexts-ok))
+                         (do (write-line 2 "factory runtime context must name readable files") 66)
+                         (let [selected-workspace
+                                 (if (> (slice-len [u8] requested-workspace) 0)
+                                     requested-workspace
+                                     (let [root ".factory-workspaces"
+                                           (mut name) (sb-new allocator)]
+                                       (directory-create-all allocator root 448)
+                                       (sb-push-str! (mut name) (load (field definition name)))
+                                       (sb-push-str! (mut name) "-")
+                                       (sb-push-str! (mut name)
+                                                     (json-stringify allocator
+                                                                     (json-integer allocator (now-ms))))
+                                       (let [created (path-join allocator root (sb-finish! (mut name)))]
+                                         (directory-create-all allocator created 448)
+                                         created)))
+                               workspace
+                                 (if (starts-with selected-workspace "/")
+                                     selected-workspace
+                                     (match (os/current-dir allocator)
+                                       (Ok [owned]
+                                           (path-join allocator (os/owned-string-slice owned) selected-workspace))
+                                       (Err [failure] selected-workspace)))
+                               source-directory
+                                 (if (starts-with factory-directory "/")
+                                     factory-directory
+                                     (match (os/current-dir allocator)
+                                       (Ok [owned]
+                                           (path-join allocator
+                                                      (os/owned-string-slice owned)
+                                                      factory-directory))
+                                       (Err [failure] factory-directory)))
+                               runs-root (path-join allocator ".factory-runs" (load (field definition name)))
+                               (mut run-name) (sb-new allocator)]
+                           (directory-create-all allocator workspace 448)
+                           (directory-create-all allocator runs-root 448)
+                           (sb-push-str! (mut run-name)
+                                         (json-stringify allocator (json-integer allocator (now-ms))))
+                           (sb-push-str! (mut run-name) ".jsonl")
+                           (let [journal-path (path-join allocator runs-root (sb-finish! (mut run-name)))
+                                 (mut journal) (cast (ptr EventJournal) 0)]
+                             (write-line 1 (concat-or-empty allocator "factory workspace: " workspace))
+                             (write-line 1 (concat-or-empty allocator "factory journal: " journal-path))
+                             (match (snapshot-factory-definition allocator
+                                                                 source-directory
+                                                                 workspace)
+                               (FactorySnapshotFailed [message]
+                                                      (do (write-line 2 message) 74))
+                               (FactorySnapshotCreated [snapshot]
+                                                       (do
+                                                         (write-line 1
+                                                                     (concat-or-empty allocator
+                                                                                      "factory definition: "
+                                                                                      snapshot))
+                                                         (match (load-factory-definition allocator snapshot)
+                                                           (FactoryInvalid [message] (do (write-line 2 message) 65))
+                                                           (FactoryLoaded [snapshot-definition]
+                                                                          (let [active-definition snapshot-definition]
+                                                                            (match (event-journal-open allocator
+                                                                                                       journal-path
+                                                                                                       true)
+                                                                              (JournalOpenFailed [message]
+                                                                                                 (do
+                                                                                                   (write-line 2
+                                                                                                               message)
+                                                                                                   74))
+                                                                              (JournalOpened [opened]
+                                                                                             (let [sequence
+                                                                                                     (box allocator
+                                                                                                          i64
+                                                                                                          1)
+                                                                                                   emitter
+                                                                                                     (box allocator
+                                                                                                          EventEmitter
+                                                                                                          (zeroed EventEmitter))]
+                                                                                               (store! journal
+                                                                                                       (box allocator
+                                                                                                            EventJournal
+                                                                                                            opened))
+                                                                                               (event-emitter-init! emitter
+                                                                                                                    allocator
+                                                                                                                    (load journal)
+                                                                                                                    sequence)
+                                                                                               (let [code
+                                                                                                       (run-factory-definition allocator
+                                                                                                                               active-definition
+                                                                                                                               (load runtime-sections)
+                                                                                                                               workspace
+                                                                                                                               provider-name
+                                                                                                                               model
+                                                                                                                               emitter)]
+                                                                                                 (event-journal-close! journal)
+                                                                                                 code)))))))))))))))))
+
+(defn cli-factory-run [(factory-directory (slice u8))
+                       (workspace (slice u8))
+                       (model (slice u8))
+                       (provider-name (slice u8))
+                       (context-start i64)
+                       (count i64)
+                       (argv (ptr (ptr i8)))] (-> i64)
+  (let [owner (malloc-allocator)
+        process-region (alloc/stack region/Region)
+        (mut result) 70]
+    (region/region-init process-region owner)
+    (let [process-allocator (region/region-allocator process-region)
+          (mut runtime-contexts) (al-new [(slice u8)] process-allocator)
+          (mut context-index) context-start
+          factory-domain (allocation-domain-open process-allocator)]
+      (loop (if (>= (load context-index) count)
+                (break)
+                (do
+                  (al-push! [(slice u8)]
+                            (mut runtime-contexts)
+                            (cstr->str (load (index argv (load context-index)))))
+                  (store! context-index (+ (load context-index) 1)))))
+      (when (allocation-domain-valid? factory-domain)
+        (store! result
+                (cli-factory-run-owned factory-directory
+                                       workspace
+                                       model
+                                       provider-name
+                                       (load runtime-contexts)
+                                       (allocation-domain-allocator factory-domain)))
+        0)
+      (allocation-domain-close! process-allocator factory-domain)
+      (region/region-close! process-region)
+      (load result))))
+
+(defn cli-factory-issue [(factory-directory (slice u8))
+                         (workspace (slice u8))
+                         (issue (slice u8))
+                         (model (slice u8))
+                         (provider-name (slice u8))] (-> i64)
+  (let [owner (malloc-allocator)
+        process-region (alloc/stack region/Region)
+        (mut result) 70]
+    (region/region-init process-region owner)
+    (let [process-allocator (region/region-allocator process-region)
+          (mut runtime-contexts) (al-new [(slice u8)] process-allocator)
+          factory-domain (allocation-domain-open process-allocator)]
+      (al-push! [(slice u8)] (mut runtime-contexts) issue)
+      (when (allocation-domain-valid? factory-domain)
+        (store! result
+                (cli-factory-run-owned factory-directory
+                                       workspace
+                                       model
+                                       provider-name
+                                       (load runtime-contexts)
+                                       (allocation-domain-allocator factory-domain)))
+        0)
+      (allocation-domain-close! process-allocator factory-domain)
+      (region/region-close! process-region)
+      (load result))))
+
+(defn cli-factory-new [(directory (slice u8))
+                       (step-start i64)
+                       (count i64)
+                       (argv (ptr (ptr i8)))] (-> i64)
+  (let [owner (malloc-allocator)
+        process-region (alloc/stack region/Region)]
+    (region/region-init process-region owner)
+    (let [allocator (region/region-allocator process-region)
+          (mut steps) (al-new [(slice u8)] allocator)
+          (mut at) step-start]
+      (loop (if (>= (load at) count)
+                (break)
+                (do
+                  (al-push! [(slice u8)]
+                            (mut steps)
+                            (cstr->str (load (index argv (load at)))))
+                  (store! at (+ (load at) 1)))))
+      (when (= (al-len [(slice u8)] (load steps)) 0)
+        (al-push! [(slice u8)] (mut steps) "worker")
+        0)
+      (let [result
+              (match (scaffold-factory-with-steps allocator directory (load steps))
+                (FactoryScaffolded [created]
+                                   (do
+                                     (write-line 1 (concat-or-empty allocator "created factory: " created))
+                                     0))
+                (FactoryScaffoldFailed [message]
+                                       (do (write-line 2 message) 73)))]
+        (region/region-close! process-region)
+        result))))
 
 (defstruct CliEventSink [(allocator (ptr Allocator))])
 
@@ -146,6 +387,9 @@
   (let [request (alloc/stack ModelRequest)
         messages (box allocator (ArrayList Message) (al-new [Message] allocator))
         message (alloc/stack Message)]
+    ;; Keep future ModelRequest fields safe by default; explicit stores below
+    ;; document the CLI contract and override this complete initialization.
+    (store! request (zeroed ModelRequest))
     (store! (field message role) (UserRole))
     (store! (field message content) prompt)
     (al-push! [Message] messages (load message))
@@ -154,6 +398,8 @@
     (store! (field request model) model)
     (store! (field request instructions)
             "Be concise. Use tools when they are required by the request.")
+    (store! (field request cache-key) "")
+    (store! (field request prompt-cache-key) "")
     (store! (field request messages) messages)
     (store! (field request tools) registry)
     (store! (field request tool-choice)
@@ -162,13 +408,15 @@
     ; DeepSeek thinking mode rejects forced tool selection. The CLI's deterministic
     ; tool smoke test therefore disables reasoning; normal runs retain it.
     (store! (field request reasoning)
-            (if force-tool (ReasoningNone) (ReasoningMedium)))
+            (if force-tool "none" "medium"))
     (store! (field request max-output-tokens) 2048)
     (store! (field request timeout-ms) 120000)
     (store! (field request deadline-monotonic-ms) 0)
     (store! (field request cancellation) (cast (ptr CancellationToken) 0))
+    (store! (field request run-lifecycle) (cast (ptr i64) 0))
     (store! (field (field request continuation) present) false)
     (store! (field (field request continuation) previous-response-id) "")
+    (store! (field (field request continuation) provider-session-id) "")
     (store! (field (field request continuation) previous-output) (JsonNull))
     (store! (field (field request continuation) tool-results)
             (cast (ptr (ArrayList ToolResult)) 0))
@@ -226,22 +474,27 @@
           (match cwd-result
             (Ok [owned] (os/owned-string-slice owned))
             (Err [failure] "."))
-        codex-context-value (box allocator CodexAppServerContext (codex-context cwd))
+        codex-strategy (default-codex-strategy allocator cwd)
+        codex-context-value (box allocator CodexProvider (zeroed CodexProvider))
         claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))]
+    (store! (field codex-context-value strategy) codex-strategy)
     (tool-register! registry (echo-definition process-allocator))
-    (cond (str-eq provider-name "openai") (cli-run-provider allocator registry openai-context model prompt force-tool)
-          (str-eq provider-name "deepseek-openai")
-            (cli-run-provider allocator registry deepseek-openai-context model prompt force-tool)
-          (str-eq provider-name "deepseek-anthropic")
-            (cli-run-provider allocator registry deepseek-anthropic-context model prompt force-tool)
-          (str-eq provider-name "codex")
-            (cli-run-provider allocator registry codex-context-value model prompt force-tool)
-          (str-eq provider-name "claude")
-            (cli-run-provider allocator registry claude-context-value model prompt force-tool)
-          :else
-            (do
-              (write-line 2 "unknown provider")
-              64))))
+    (let [result
+            (cond (str-eq provider-name "openai")
+                    (cli-run-provider allocator registry openai-context model prompt force-tool)
+                  (str-eq provider-name "deepseek-openai")
+                    (cli-run-provider allocator registry deepseek-openai-context model prompt force-tool)
+                  (str-eq provider-name "deepseek-anthropic")
+                    (cli-run-provider allocator registry deepseek-anthropic-context model prompt force-tool)
+                  (str-eq provider-name "codex")
+                    (if (= (codex-strategy-prepare! (load codex-strategy) allocator) 0)
+                        (cli-run-provider allocator registry codex-context-value model prompt force-tool)
+                        (do (write-line 2 "Codex authentication failed") 1))
+                  (str-eq provider-name "claude")
+                    (cli-run-provider allocator registry claude-context-value model prompt force-tool)
+                  :else (do (write-line 2 "unknown provider") 64))]
+      (codex-strategy-close! (load codex-strategy))
+      result)))
 
 (defn cli-run [(provider-name (slice u8))
                (model (slice u8))
@@ -366,14 +619,21 @@
                          (box process-allocator
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
-                 (register-filesystem-tools! registry process-allocator ".")
-                 (register-bash-tool! registry process-allocator ".")
+                 (when (tool-group-enabled? allocator "filesystem")
+                   (register-filesystem-tools! registry process-allocator ".")
+                   (register-search-text-tool! registry process-allocator ".")
+                   0)
+                 (when (tool-group-enabled? allocator "bash")
+                   (register-bash-tool! registry process-allocator ".")
+                   0)
                  (store! (field service allocator) allocator)
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
                  (store! (field service controller) controller)
-                 (register-orchestration-tools! registry process-allocator service)
+                 (when (tool-group-enabled? allocator "orchestration")
+                   (register-orchestration-tools! registry process-allocator service)
+                   0)
                  (when (< (service-recover-runs! service) 0)
                    (write-line 2 "could not recover durable runs")
                    (runtime-controller-join-all! controller)
@@ -536,14 +796,21 @@
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
                  (tool-register! registry (echo-definition process-allocator))
-                 (register-filesystem-tools! registry process-allocator ".")
-                 (register-bash-tool! registry process-allocator ".")
+                 (when (tool-group-enabled? allocator "filesystem")
+                   (register-filesystem-tools! registry process-allocator ".")
+                   (register-search-text-tool! registry process-allocator ".")
+                   0)
+                 (when (tool-group-enabled? allocator "bash")
+                   (register-bash-tool! registry process-allocator ".")
+                   0)
                  (store! (field service allocator) allocator)
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
                  (store! (field service controller) controller)
-                 (register-orchestration-tools! registry process-allocator service)
+                 (when (tool-group-enabled? allocator "orchestration")
+                   (register-orchestration-tools! registry process-allocator service)
+                   0)
                  (match (http-listener-open allocator port)
                    (ListenerOpenFailed [message]
                                        (do
@@ -630,7 +897,30 @@
 ;; `--realm` is the only option carrying a value, so it is the only one whose
 ;; following token has to be skipped when counting positionals.
 (defn cli-option-takes-value? [(name (slice u8))] (-> bool)
-  (str-eq name "--realm"))
+  (or (str-eq name "--realm")
+      (or (str-eq name "--workspace")
+          (or (str-eq name "--issue")
+              (or (str-eq name "--model") (str-eq name "--provider"))))))
+
+(defn cli-factory-issue-arguments-valid? [(count i64)
+                                          (argv (ptr (ptr i8)))] (-> bool)
+  (let [(mut valid) true
+        (mut i) 4]
+    (loop (if (or (>= (load i) count) (not (load valid)))
+              (break)
+              (let [argument (cstr->str (load (index argv (load i))))]
+                (if (and (or (str-eq argument "--workspace")
+                             (or (str-eq argument "--issue")
+                                 (or (str-eq argument "--model")
+                                     (str-eq argument "--provider"))))
+                         (< (+ (load i) 1) count)
+                         (not (starts-with (cstr->str (load (index argv (+ (load i) 1))))
+                                           "--")))
+                    (store! i (+ (load i) 2))
+                    (store! valid false)))))
+    (and (load valid)
+         (and (> (slice-len [u8] (cli-option count argv "--workspace")) 0)
+              (> (slice-len [u8] (cli-option count argv "--issue")) 0)))))
 
 (defn cli-flag? [(count i64) (argv (ptr (ptr i8))) (name (slice u8))] (-> bool)
   (let [(mut found) false
@@ -798,43 +1088,79 @@
                           (str-eq provider "claude") (cli-claude-auth login)
                           :else (cli-usage)))
                   (cli-usage))
-              (if (str-eq command "tui")
-                  (cond (= count 2) (cli-tui-default false)
-                        (= count 3)
-                          (let [argument (cstr->str (load (index argv 2)))]
-                            (if (str-eq argument "--plain")
-                                (cli-tui-default true)
-                                (cli-tui argument false)))
-                        (= count 4)
-                          (if (str-eq (cstr->str (load (index argv 2))) "--plain")
-                              (cli-tui (cstr->str (load (index argv 3))) true)
+              (if (str-eq command "factory")
+                  (cond (and (>= count 4)
+                             (str-eq (cstr->str (load (index argv 2))) "new"))
+                          (cli-factory-new (cstr->str (load (index argv 3)))
+                                           4
+                                           count
+                                           argv)
+                        (and (>= count 4)
+                             (str-eq (cstr->str (load (index argv 2))) "issue"))
+                          (if (cli-factory-issue-arguments-valid? count argv)
+                              (cli-factory-issue (cstr->str (load (index argv 3)))
+                                                 (cli-option count argv "--workspace")
+                                                 (cli-option count argv "--issue")
+                                                 (let [selected (cli-option count argv "--model")]
+                                                   (if (> (slice-len [u8] selected) 0)
+                                                       selected
+                                                       "gpt-5.6-luna"))
+                                                 (let [selected (cli-option count argv "--provider")]
+                                                   (if (> (slice-len [u8] selected) 0)
+                                                       selected
+                                                       "codex")))
                               (cli-usage))
+                        (and (>= count 4)
+                             (str-eq (cstr->str (load (index argv 2))) "run"))
+                          (cli-factory-run (cstr->str (load (index argv 3)))
+                                           (if (>= count 5) (cstr->str (load (index argv 4))) "")
+                                           (if (>= count 6)
+                                               (cstr->str (load (index argv 5)))
+                                               "gpt-5.6-luna")
+                                           (if (>= count 7)
+                                               (cstr->str (load (index argv 6)))
+                                               "codex")
+                                           7
+                                           count
+                                           argv)
                         :else (cli-usage))
-                  (if (str-eq command "peers")
-                      (if (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
-                          (cli-usage)
-                          (cli-peers (cli-option count argv "--realm")
-                                     (cli-flag? count argv "--all")))
-                      (if (str-eq command "send")
-                          (let [target (cli-positional count argv 0)
-                                message (cli-positional count argv 1)]
-                            (if (or (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
-                                    (or (= (slice-len [u8] target) 0)
-                                        (= (slice-len [u8] message) 0)))
-                                (cli-usage)
-                                (cli-peer-send (cli-option count argv "--realm")
-                                               target
-                                               message)))
-                          (if (str-eq command "serve")
-                              (if (= count 4)
-                                  (cli-serve (cstr->str (load (index argv 2)))
-                                             (cstr->str (load (index argv 3))))
+                  (if (str-eq command "tui")
+                      (cond (= count 2) (cli-tui-default false)
+                            (= count 3)
+                              (let [argument (cstr->str (load (index argv 2)))]
+                                (if (str-eq argument "--plain")
+                                    (cli-tui-default true)
+                                    (cli-tui argument false)))
+                            (= count 4)
+                              (if (str-eq (cstr->str (load (index argv 2))) "--plain")
+                                  (cli-tui (cstr->str (load (index argv 3))) true)
                                   (cli-usage))
-                              (if (< count 5)
-                                  (cli-usage)
-                                  (let [provider (cstr->str (load (index argv 2)))
-                                        model (cstr->str (load (index argv 3)))
-                                        prompt (cstr->str (load (index argv 4)))]
-                                    (cond (str-eq command "run") (cli-run provider model prompt false)
-                                          (str-eq command "tool") (cli-run provider model prompt true)
-                                          :else (cli-usage)))))))))))))
+                            :else (cli-usage))
+                      (if (str-eq command "peers")
+                          (if (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
+                              (cli-usage)
+                              (cli-peers (cli-option count argv "--realm")
+                                         (cli-flag? count argv "--all")))
+                          (if (str-eq command "send")
+                              (let [target (cli-positional count argv 0)
+                                    message (cli-positional count argv 1)]
+                                (if (or (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
+                                        (or (= (slice-len [u8] target) 0)
+                                            (= (slice-len [u8] message) 0)))
+                                    (cli-usage)
+                                    (cli-peer-send (cli-option count argv "--realm")
+                                                   target
+                                                   message)))
+                              (if (str-eq command "serve")
+                                  (if (= count 4)
+                                      (cli-serve (cstr->str (load (index argv 2)))
+                                                 (cstr->str (load (index argv 3))))
+                                      (cli-usage))
+                                  (if (< count 5)
+                                      (cli-usage)
+                                      (let [provider (cstr->str (load (index argv 2)))
+                                            model (cstr->str (load (index argv 3)))
+                                            prompt (cstr->str (load (index argv 4)))]
+                                        (cond (str-eq command "run") (cli-run provider model prompt false)
+                                              (str-eq command "tool") (cli-run provider model prompt true)
+                                              :else (cli-usage))))))))))))))

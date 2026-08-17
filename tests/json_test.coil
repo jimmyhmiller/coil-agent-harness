@@ -5,6 +5,7 @@
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-json-schema" :use *)
+(import "harness-tool" :use *)
 
 (deftest parses-and-serializes-owned-json
          (let [allocator (malloc-allocator)
@@ -69,3 +70,31 @@
            (assert (not (load (field string-invalid ok))))
            (assert (load (field union-valid ok)))
            (assert (not (load (field union-invalid ok))))))
+
+(deftest strict-tool-schemas-require-every-property-recursively
+         (let [allocator (malloc-allocator)
+               strict-result
+                 (json-parse allocator
+                             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false}")
+               optional-result
+                 (json-parse allocator
+                             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[\"command\"],\"additionalProperties\":false}")
+               nested-optional-result
+                 (json-parse allocator
+                             "{\"type\":\"object\",\"properties\":{\"config\":{\"type\":\"object\",\"properties\":{\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[],\"additionalProperties\":false}},\"required\":[\"config\"],\"additionalProperties\":false}")]
+           (assert (json-schema-strict-compatible? (load (field strict-result value))))
+           (assert (not (json-schema-strict-compatible? (load (field optional-result value)))))
+           (assert (not (json-schema-strict-compatible? (load (field nested-optional-result value)))))))
+
+(deftest tool-spec-refuses-optional-properties-only-when-marked-strict
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[\"command\"],\"additionalProperties\":false}")
+               spec (alloc/stack ToolSpec)]
+           (store! (field spec name) "optional-tool")
+           (store! (field spec input-schema) (load (field parsed value)))
+           (store! (field spec strict) true)
+           (assert (not (tool-spec-valid? (load spec))))
+           (store! (field spec strict) false)
+           (assert (tool-spec-valid? (load spec)))))

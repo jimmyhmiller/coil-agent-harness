@@ -1,0 +1,572 @@
+(module harness-oauth)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.selectors" :as selectors)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coil.subprocess" :as subprocess)
+(import "coil.time" :as time)
+(import "harness-directory" :use *)
+(import "harness-http-listener" :use *)
+(import "harness-json" :use *)
+
+(const OAUTH-U32 4294967295)
+(const OAUTH-O-RDONLY 0)
+(extern close :cc c [i32] (-> i32))
+
+(defn oauth-m32 [(value i64)] (-> i64)
+  (primitive/iand value OAUTH-U32))
+
+(defn oauth-rotr32 [(value i64) (amount i64)] (-> i64)
+  (oauth-m32 (primitive/ior (primitive/ishr (oauth-m32 value) amount)
+                            (primitive/ishl value (- 32 amount)))))
+
+(defn oauth-sha256-k [(index i64)] (-> i64)
+  (cond (= index 0) 1116352408
+        (= index 1) 1899447441
+        (= index 2) 3049323471
+        (= index 3) 3921009573
+        (= index 4) 961987163
+        (= index 5) 1508970993
+        (= index 6) 2453635748
+        (= index 7) 2870763221
+        (= index 8) 3624381080
+        (= index 9) 310598401
+        (= index 10) 607225278
+        (= index 11) 1426881987
+        (= index 12) 1925078388
+        (= index 13) 2162078206
+        (= index 14) 2614888103
+        (= index 15) 3248222580
+        (= index 16) 3835390401
+        (= index 17) 4022224774
+        (= index 18) 264347078
+        (= index 19) 604807628
+        (= index 20) 770255983
+        (= index 21) 1249150122
+        (= index 22) 1555081692
+        (= index 23) 1996064986
+        (= index 24) 2554220882
+        (= index 25) 2821834349
+        (= index 26) 2952996808
+        (= index 27) 3210313671
+        (= index 28) 3336571891
+        (= index 29) 3584528711
+        (= index 30) 113926993
+        (= index 31) 338241895
+        (= index 32) 666307205
+        (= index 33) 773529912
+        (= index 34) 1294757372
+        (= index 35) 1396182291
+        (= index 36) 1695183700
+        (= index 37) 1986661051
+        (= index 38) 2177026350
+        (= index 39) 2456956037
+        (= index 40) 2730485921
+        (= index 41) 2820302411
+        (= index 42) 3259730800
+        (= index 43) 3345764771
+        (= index 44) 3516065817
+        (= index 45) 3600352804
+        (= index 46) 4094571909
+        (= index 47) 275423344
+        (= index 48) 430227734
+        (= index 49) 506948616
+        (= index 50) 659060556
+        (= index 51) 883997877
+        (= index 52) 958139571
+        (= index 53) 1322822218
+        (= index 54) 1537002063
+        (= index 55) 1747873779
+        (= index 56) 1955562222
+        (= index 57) 2024104815
+        (= index 58) 2227730452
+        (= index 59) 2361852424
+        (= index 60) 2428436474
+        (= index 61) 2756734187
+        (= index 62) 3204031479
+        :else 3329325298))
+
+(defn oauth-padded-byte [(message (slice u8)) (total i64) (index i64)] (-> i64)
+  (let [length (slice-len [u8] message)]
+    (cond (< index length) (cast i64 (slice-get [u8] message index))
+          (= index length) 128
+          (< index (- total 8)) 0
+          :else
+            (primitive/iand (primitive/ishr (* length 8) (* 8 (- (- total 1) index)))
+                            255))))
+
+(defn oauth-sha256-word [(message (slice u8)) (total i64) (index i64)] (-> i64)
+  (primitive/ior (primitive/ishl (oauth-padded-byte message total index) 24)
+                 (primitive/ior (primitive/ishl (oauth-padded-byte message total (+ index 1)) 16)
+                                (primitive/ior (primitive/ishl (oauth-padded-byte message total (+ index 2)) 8)
+                                               (oauth-padded-byte message total (+ index 3))))))
+
+(defn oauth-sha256 [(message (slice u8)) (output (ptr u8))] (-> i64)
+  (let [length (slice-len [u8] message)
+        total (* (/ (+ length 72) 64) 64)
+        words (alloc/stack (array i64 64))
+        hash (alloc/stack (array i64 8))
+        (mut block) 0]
+    (store! (index hash 0) 1779033703)
+    (store! (index hash 1) 3144134277)
+    (store! (index hash 2) 1013904242)
+    (store! (index hash 3) 2773480762)
+    (store! (index hash 4) 1359893119)
+    (store! (index hash 5) 2600822924)
+    (store! (index hash 6) 528734635)
+    (store! (index hash 7) 1541459225)
+    (loop (if (>= (load block) total)
+              (break)
+              (do
+                (let [(mut index) 0]
+                  (loop (if (>= (load index) 16)
+                            (break)
+                            (do
+                              (store! (index words (load index))
+                                      (oauth-sha256-word message
+                                                         total
+                                                         (+ (load block) (* (load index) 4))))
+                              (store! index (+ (load index) 1)))))
+                  (loop (if (>= (load index) 64)
+                            (break)
+                            (let [x (load (index words (- (load index) 15)))
+                                  y (load (index words (- (load index) 2)))
+                                  s0
+                                    (primitive/ixor (oauth-rotr32 x 7)
+                                                    (primitive/ixor (oauth-rotr32 x 18)
+                                                                    (primitive/ishr x 3)))
+                                  s1
+                                    (primitive/ixor (oauth-rotr32 y 17)
+                                                    (primitive/ixor (oauth-rotr32 y 19)
+                                                                    (primitive/ishr y 10)))]
+                              (store! (index words (load index))
+                                      (oauth-m32 (+ (+ (+ (load (index words (- (load index) 16))) s0)
+                                                       (load (index words (- (load index) 7))))
+                                                    s1)))
+                              (store! index (+ (load index) 1))))))
+                (let [(mut a) (load (index hash 0))
+                      (mut b) (load (index hash 1))
+                      (mut c) (load (index hash 2))
+                      (mut d) (load (index hash 3))
+                      (mut e) (load (index hash 4))
+                      (mut f) (load (index hash 5))
+                      (mut g) (load (index hash 6))
+                      (mut h) (load (index hash 7))
+                      (mut round) 0]
+                  (loop (if (>= (load round) 64)
+                            (break)
+                            (let [s1
+                                    (primitive/ixor (oauth-rotr32 (load e) 6)
+                                                    (primitive/ixor (oauth-rotr32 (load e) 11)
+                                                                    (oauth-rotr32 (load e) 25)))
+                                  choice
+                                    (primitive/ixor (primitive/iand (load e) (load f))
+                                                    (primitive/iand (primitive/inot (load e)) (load g)))
+                                  t1
+                                    (oauth-m32 (+ (+ (+ (+ (load h) s1) choice)
+                                                     (oauth-sha256-k (load round)))
+                                                  (load (index words (load round)))))
+                                  s0
+                                    (primitive/ixor (oauth-rotr32 (load a) 2)
+                                                    (primitive/ixor (oauth-rotr32 (load a) 13)
+                                                                    (oauth-rotr32 (load a) 22)))
+                                  majority
+                                    (primitive/ixor (primitive/iand (load a) (load b))
+                                                    (primitive/ixor (primitive/iand (load a) (load c))
+                                                                    (primitive/iand (load b) (load c))))
+                                  t2 (oauth-m32 (+ s0 majority))]
+                              (store! h (load g))
+                              (store! g (load f))
+                              (store! f (load e))
+                              (store! e (oauth-m32 (+ (load d) t1)))
+                              (store! d (load c))
+                              (store! c (load b))
+                              (store! b (load a))
+                              (store! a (oauth-m32 (+ t1 t2)))
+                              (store! round (+ (load round) 1)))))
+                  (store! (index hash 0) (oauth-m32 (+ (load (index hash 0)) (load a))))
+                  (store! (index hash 1) (oauth-m32 (+ (load (index hash 1)) (load b))))
+                  (store! (index hash 2) (oauth-m32 (+ (load (index hash 2)) (load c))))
+                  (store! (index hash 3) (oauth-m32 (+ (load (index hash 3)) (load d))))
+                  (store! (index hash 4) (oauth-m32 (+ (load (index hash 4)) (load e))))
+                  (store! (index hash 5) (oauth-m32 (+ (load (index hash 5)) (load f))))
+                  (store! (index hash 6) (oauth-m32 (+ (load (index hash 6)) (load g))))
+                  (store! (index hash 7) (oauth-m32 (+ (load (index hash 7)) (load h)))))
+                (store! block (+ (load block) 64)))))
+    (let [(mut index) 0]
+      (loop (if (>= (load index) 32)
+                (break)
+                (do
+                  (store! (index output (load index))
+                          (cast u8
+                                (primitive/iand (primitive/ishr (load (index hash (/ (load index) 4)))
+                                                                (* 8 (- 3 (% (load index) 4))))
+                                                255)))
+                  (store! index (+ (load index) 1))))))
+    0))
+
+(defn oauth-base64-char [(value i64) (url-safe bool)] (-> u8)
+  (cond (< value 26) (cast u8 (+ value 65))
+        (< value 52) (cast u8 (+ value 71))
+        (< value 62) (cast u8 (- value 4))
+        (= value 62) (cast u8 (if url-safe 45 43))
+        :else (cast u8 (if url-safe 95 47))))
+
+(defn oauth-base64-encode [(allocator (ptr Allocator))
+                           (value (slice u8))
+                           (url-safe bool)
+                           (padding bool)] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut index) 0
+        length (slice-len [u8] value)]
+    (loop (if (>= (load index) length)
+              (break)
+              (let [remaining (- length (load index))
+                    a (cast i64 (slice-get [u8] value (load index)))
+                    b (if (> remaining 1) (cast i64 (slice-get [u8] value (+ (load index) 1))) 0)
+                    c (if (> remaining 2) (cast i64 (slice-get [u8] value (+ (load index) 2))) 0)]
+                (sb-push-byte! (mut output) (oauth-base64-char (/ a 4) url-safe))
+                (sb-push-byte! (mut output)
+                               (oauth-base64-char (primitive/ior (primitive/iand (* a 16) 63) (/ b 16)) url-safe))
+                (when (or (> remaining 1) padding)
+                  (sb-push-byte! (mut output)
+                                 (if (> remaining 1)
+                                     (oauth-base64-char (primitive/ior (primitive/iand (* b 4) 63) (/ c 64)) url-safe)
+                                     (cast u8 61)))
+                  0)
+                (when (or (> remaining 2) padding)
+                  (sb-push-byte! (mut output)
+                                 (if (> remaining 2)
+                                     (oauth-base64-char (primitive/iand c 63) url-safe)
+                                     (cast u8 61)))
+                  0)
+                (store! index (+ (load index) 3)))))
+    (sb-finish! (mut output))))
+
+(defn oauth-pkce-challenge [(allocator (ptr Allocator))
+                            (verifier (slice u8))] (-> (slice u8))
+  (let [digest (alloc/stack (array u8 32))]
+    (oauth-sha256 verifier (cast (ptr u8) digest))
+    (oauth-base64-encode allocator (slice-new [u8] (index digest 0) 32) true false)))
+
+(defn oauth-random-token [(allocator (ptr Allocator)) (byte-count i64)] (-> (slice u8))
+  (let [bytes (alloc/stack (array u8 64))]
+    (if (or (> byte-count 64)
+            (match (fs/file-open (str->cstr allocator "/dev/urandom") OAUTH-O-RDONLY 0)
+              (Err [failure] true)
+              (Ok [opened]
+                  (let [file (alloc/stack fs/File)
+                        reader (alloc/stack io/Reader)]
+                    (store! file opened)
+                    (let [result
+                            (io/read-exact (fs/file-reader reader file)
+                                           (cast (ptr i8) bytes)
+                                           byte-count)]
+                      (fs/file-close file)
+                      (match result (Err [failure] true) (Ok [_] false)))))))
+        ""
+        (oauth-base64-encode allocator
+                             (slice-new [u8] (index bytes 0) byte-count)
+                             true
+                             false))))
+
+(defn oauth-unreserved? [(byte i64)] (-> bool)
+  (or (or (and (>= byte 65) (<= byte 90))
+          (and (>= byte 97) (<= byte 122)))
+      (or (and (>= byte 48) (<= byte 57))
+          (or (= byte 45) (or (= byte 46) (or (= byte 95) (= byte 126)))))))
+
+(defn oauth-hex-upper [(value i64)] (-> u8)
+  (cast u8 (if (< value 10) (+ 48 value) (+ 55 value))))
+
+(defn oauth-url-encode [(allocator (ptr Allocator)) (value (slice u8))] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut index) 0
+        length (slice-len [u8] value)]
+    (loop (if (>= (load index) length)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] value (load index)))]
+                (if (oauth-unreserved? byte)
+                    (sb-push-byte! (mut output) (cast u8 byte))
+                    (do
+                      (sb-push-byte! (mut output) (cast u8 37))
+                      (sb-push-byte! (mut output) (oauth-hex-upper (/ byte 16)))
+                      (sb-push-byte! (mut output) (oauth-hex-upper (% byte 16)))))
+                (store! index (+ (load index) 1)))))
+    (sb-finish! (mut output))))
+
+(defn oauth-hex-value [(byte i64)] (-> i64)
+  (cond (and (>= byte 48) (<= byte 57)) (- byte 48)
+        (and (>= byte 65) (<= byte 70)) (+ (- byte 65) 10)
+        (and (>= byte 97) (<= byte 102)) (+ (- byte 97) 10)
+        :else -1))
+
+(defn oauth-url-decode [(allocator (ptr Allocator)) (value (slice u8))] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut index) 0
+        length (slice-len [u8] value)]
+    (loop (if (>= (load index) length)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] value (load index)))]
+                (cond (and (= byte 37) (< (+ (load index) 2) length))
+                        (let [high (oauth-hex-value (cast i64 (slice-get [u8] value (+ (load index) 1))))
+                              low (oauth-hex-value (cast i64 (slice-get [u8] value (+ (load index) 2))))]
+                          (if (and (>= high 0) (>= low 0))
+                              (do
+                                (sb-push-byte! (mut output) (cast u8 (+ (* high 16) low)))
+                                (store! index (+ (load index) 3)))
+                              (do
+                                (sb-push-byte! (mut output) (cast u8 byte))
+                                (store! index (+ (load index) 1)))))
+                      (= byte 43)
+                        (do
+                          (sb-push-byte! (mut output) (cast u8 32))
+                          (store! index (+ (load index) 1)))
+                      :else
+                        (do
+                          (sb-push-byte! (mut output) (cast u8 byte))
+                          (store! index (+ (load index) 1)))))))
+    (sb-finish! (mut output))))
+
+(defn oauth-query-value [(allocator (ptr Allocator))
+                         (target (slice u8))
+                         (wanted (slice u8))] (-> (slice u8))
+  (let [length (slice-len [u8] target)
+        (mut index) 0
+        (mut result) ""]
+    (loop (if (or (>= (load index) length)
+                  (= (cast i64 (slice-get [u8] target (load index))) 63))
+              (break)
+              (store! index (+ (load index) 1))))
+    (when (< (load index) length) (store! index (+ (load index) 1)) 0)
+    (loop (if (or (>= (load index) length) (> (slice-len [u8] (load result)) 0))
+              (break)
+              (let [start (load index)
+                    (mut equals) -1]
+                (loop (if (or (>= (load index) length)
+                              (= (cast i64 (slice-get [u8] target (load index))) 38))
+                          (break)
+                          (do
+                            (when (and (< (load equals) 0)
+                                       (= (cast i64 (slice-get [u8] target (load index))) 61))
+                              (store! equals (load index))
+                              0)
+                            (store! index (+ (load index) 1)))))
+                (when (and (> (load equals) start)
+                           (str-eq (substr target start (load equals)) wanted))
+                  (store! result
+                          (oauth-url-decode allocator
+                                            (substr target (+ (load equals) 1) (load index))))
+                  0)
+                (when (< (load index) length) (store! index (+ (load index) 1)) 0))))
+    (load result)))
+
+(defn oauth-target-path [(target (slice u8))] (-> (slice u8))
+  (match (str-find target "?")
+    (Some [position] (substr target 0 position))
+    (None [] target)))
+
+(defn oauth-secure-eq [(left (slice u8)) (right (slice u8))] (-> bool)
+  (let [left-length (slice-len [u8] left)
+        right-length (slice-len [u8] right)
+        count (if (> left-length right-length) left-length right-length)
+        (mut difference) (primitive/ixor left-length right-length)
+        (mut index) 0]
+    (loop (if (>= (load index) count)
+              (break)
+              (let [a
+                      (if (< (load index) left-length)
+                          (cast i64 (slice-get [u8] left (load index)))
+                          0)
+                    b
+                      (if (< (load index) right-length)
+                          (cast i64 (slice-get [u8] right (load index)))
+                          0)]
+                (store! difference (primitive/ior (load difference) (primitive/ixor a b)))
+                (store! index (+ (load index) 1)))))
+    (= (load difference) 0)))
+
+(defn oauth-base64-value [(byte i64)] (-> i64)
+  (cond (and (>= byte 65) (<= byte 90)) (- byte 65)
+        (and (>= byte 97) (<= byte 122)) (+ (- byte 97) 26)
+        (and (>= byte 48) (<= byte 57)) (+ (- byte 48) 52)
+        (or (= byte 43) (= byte 45)) 62
+        (or (= byte 47) (= byte 95)) 63
+        :else -1))
+
+(defn oauth-base64-decode [(allocator (ptr Allocator))
+                           (value (slice u8))] (-> (slice u8))
+  (let [(mut output) (sb-new allocator)
+        (mut accumulator) 0
+        (mut bits) 0
+        (mut index) 0
+        length (slice-len [u8] value)
+        (mut valid) true]
+    (loop (if (or (>= (load index) length) (not (load valid)))
+              (break)
+              (let [byte (cast i64 (slice-get [u8] value (load index)))]
+                (if (= byte 61)
+                    (store! index length)
+                    (let [decoded (oauth-base64-value byte)]
+                      (if (< decoded 0)
+                          (store! valid false)
+                          (do
+                            (store! accumulator
+                                    (primitive/ior (primitive/ishl (load accumulator) 6) decoded))
+                            (store! bits (+ (load bits) 6))
+                            (when (>= (load bits) 8)
+                              (store! bits (- (load bits) 8))
+                              (sb-push-byte! (mut output)
+                                             (cast u8
+                                                   (primitive/iand (primitive/ishr (load accumulator) (load bits))
+                                                                   255)))
+                              0)
+                            (store! index (+ (load index) 1)))))))))
+    (if (load valid) (sb-finish! (mut output)) "")))
+
+(defn oauth-jwt-claims [(allocator (ptr Allocator)) (token (slice u8))] (-> Json)
+  (let [length (slice-len [u8] token)
+        (mut first) -1
+        (mut second) -1
+        (mut index) 0]
+    (loop (if (>= (load index) length)
+              (break)
+              (do
+                (when (= (cast i64 (slice-get [u8] token (load index))) 46)
+                  (if (< (load first) 0)
+                      (store! first (load index))
+                      (do (store! second (load index)) (break)))
+                  0)
+                (store! index (+ (load index) 1)))))
+    (if (or (< (load first) 0) (< (load second) 0))
+        (JsonNull)
+        (let [decoded
+                (oauth-base64-decode allocator
+                                     (substr token (+ (load first) 1) (load second)))
+              parsed (json-parse allocator decoded)]
+          (if (load (field parsed ok)) (load (field parsed value)) (JsonNull))))))
+
+(defn oauth-write-line [(fd i64) (value (slice u8))] (-> i64)
+  (let [writer (alloc/stack io/Writer)
+        output (io/fd-writer writer fd)]
+    (match (io/print-str output value)
+      (Err [failure] -1)
+      (Ok [written]
+          (match (io/print-str output "\n")
+            (Err [failure] -1)
+            (Ok [newline] (+ written newline)))))))
+
+(defn oauth-open-browser-with [(allocator (ptr Allocator))
+                               (command (slice u8))
+                               (url (slice u8))] (-> i64)
+  (let [child (alloc/stack subprocess/Child)
+        args (alloc/stack (array (slice u8) 1))]
+    (store! (index args 0) url)
+    (match (subprocess/spawn allocator
+                             child
+                             command
+                             (slice-new [(slice u8)] (index args 0) 1)
+                             (subprocess/inherit-stdio)
+                             (subprocess/inherit-stdio)
+                             (subprocess/inherit-stdio))
+      (Err [failure] -1)
+      (Ok [spawned]
+          (do
+            (subprocess/child-wait child)
+            (subprocess/child-close child)
+            0)))))
+
+(defn oauth-open-browser [(allocator (ptr Allocator)) (url (slice u8))] (-> i64)
+  (let [opened (oauth-open-browser-with allocator "open" url)]
+    (if (= opened 0) 0 (oauth-open-browser-with allocator "xdg-open" url))))
+
+(defn oauth-manual-code [(allocator (ptr Allocator))
+                         (expected-state (slice u8))] (-> (slice u8))
+  (oauth-write-line 2 "Paste the final redirect URL or authorization code:")
+  (let [reader (alloc/stack io/Reader)]
+    (match (io/read-line-alloc allocator (io/fd-reader reader 0) 1048576)
+      (Err [failure] "")
+      (Ok [owned]
+          (let [value (io/owned-bytes-slice owned)
+                code (oauth-query-value allocator value "code")
+                state (oauth-query-value allocator value "state")]
+            (cond (> (slice-len [u8] code) 0)
+                    (if (or (= (slice-len [u8] state) 0) (oauth-secure-eq state expected-state)) code "")
+                  :else
+                    (match (str-find value "#")
+                      (Some [position]
+                            (if (oauth-secure-eq (substr value (+ position 1) (slice-len [u8] value))
+                                                 expected-state)
+                                (substr value 0 position)
+                                ""))
+                      (None [] value))))))))
+
+(defn oauth-await-code [(allocator (ptr Allocator))
+                        (port i64)
+                        (path (slice u8))
+                        (expected-state (slice u8))
+                        (authorize-url (slice u8))] (-> (slice u8))
+  (oauth-write-line 2 "Open this URL to authenticate:")
+  (oauth-write-line 2 authorize-url)
+  (match (http-listener-open allocator port)
+    (ListenerOpenFailed [message]
+                        (oauth-manual-code allocator expected-state))
+    (ListenerOpened [opened]
+                    (let [(mut listener) opened
+                          (mut code) ""
+                          (mut ready) false]
+                      (oauth-open-browser allocator authorize-url)
+                      (match (time/duration-seconds 180)
+                        (Err [failure] 0)
+                        (Ok [duration]
+                            (match (selectors/wait-fd-for (cast i32 (load (field listener fd)))
+                                                          (selectors/interest-readable)
+                                                          duration)
+                              (Err [failure] 0)
+                              (Ok [available]
+                                  (let [ready-events available]
+                                    (store! ready
+                                            (or (load (field ready-events readable))
+                                                (load (field ready-events hangup)))))))))
+                      (when (load ready)
+                        (let [client-fd (http-listener-accept (mut listener))]
+                          (when (>= client-fd 0)
+                            (match (read-accepted-http allocator client-fd)
+                              (HttpRequestRejected [status]
+                                                   (write-http-response allocator
+                                                                        client-fd
+                                                                        400
+                                                                        "{\"error\":\"invalid callback\"}"))
+                              (HttpRequestAccepted [request]
+                                                   (let [accepted request
+                                                         target (load (field accepted target))
+                                                         returned-state (oauth-query-value allocator target "state")
+                                                         returned-code (oauth-query-value allocator target "code")]
+                                                     (if (and (str-eq (oauth-target-path target) path)
+                                                              (oauth-secure-eq returned-state expected-state)
+                                                              (> (slice-len [u8] returned-code) 0))
+                                                         (do
+                                                           (store! code returned-code)
+                                                           (write-http-response allocator
+                                                                                client-fd
+                                                                                200
+                                                                                "{\"status\":\"authentication complete; return to the terminal\"}"))
+                                                         (write-http-response allocator
+                                                                              client-fd
+                                                                              400
+                                                                              "{\"error\":\"invalid OAuth callback\"}")))))
+                            (close (cast i32 client-fd))
+                            0))
+                        0)
+                      (http-listener-close! (mut listener))
+                      (if (> (slice-len [u8] (load code)) 0)
+                          (load code)
+                          (oauth-manual-code allocator expected-state))))))

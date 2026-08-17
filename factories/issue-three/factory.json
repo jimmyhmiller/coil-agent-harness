@@ -1,0 +1,7 @@
+{
+  "name": "issue-three",
+  "goal": "Describe the outcome this factory should produce.",
+  "context": ["context.md"],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "workers": ["01-validate.md", "02-implement.md", "03-verify.md"]
+}

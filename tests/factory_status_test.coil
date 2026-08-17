@@ -1,0 +1,43 @@
+(module harness-factory-status-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "harness-factory-status" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(deftest worker-status-records-ready-and-not-ready-reports
+         (let [allocator (malloc-allocator)
+               status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+               tool (alloc/stack FactoryStatusTool)
+               call (alloc/stack ToolCall)
+               (mut arguments) (json-object allocator)]
+           (store! (field tool status) status)
+           (json-put-bool! (mut arguments) "ready" true)
+           (json-put-string! (mut arguments) "summary" "validated")
+           (store! (field call id) "status-1")
+           (store! (field call name) "report_worker_status")
+           (store! (field call arguments) (load arguments))
+           (let [result (execute-factory-status tool call allocator)]
+             (assert (match-else (load (field result status))
+                                 (ToolSucceeded [] true)
+                                 (_ false)))
+             (assert (factory-worker-status-reported? status))
+             (assert (factory-worker-status-ready? status)))
+           (factory-worker-status-reset! status)
+           (assert (not (factory-worker-status-reported? status)))
+           (json-put-bool! (mut arguments) "ready" false)
+           (store! (field call arguments) (load arguments))
+           (execute-factory-status tool call allocator)
+           (assert (factory-worker-status-reported? status))
+           (assert (not (factory-worker-status-ready? status)))))
+
+(deftest worker-status-tool-is-always-registerable
+         (let [allocator (malloc-allocator)
+               status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+               (mut registry) (tool-registry-new allocator)]
+           (assert (register-factory-status-tool! (mut registry) allocator status))
+           (assert (match-else (tool-find (load registry) "report_worker_status")
+                               (Some [tool] true)
+                               (_ false)))))

@@ -1,0 +1,7 @@
+(module snake_game)
+(import "coil.io" :use *)
+(import "snake" :use [snake_window_run])
+
+(defn main [] (-> i64)
+  (snake_window_run)
+  0)

@@ -23,7 +23,7 @@
 ;; some providers, so this is a real capability flag rather than a display hint.
 ;;
 ;; `default-effort` is meaningful only when `effort` is true; every row that
-;; cannot take one carries `ReasoningNone`, so the pair is never contradictory
+;; cannot take one carries `none`, so the pair is never contradictory
 ;; even though the picker would ignore the field either way.
 (defstruct ModelChoice
   [(provider (slice u8))
@@ -31,7 +31,7 @@
    (label (slice u8))
    (summary (slice u8))
    (effort bool)
-   (default-effort ReasoningEffort)])
+   (default-effort (slice u8))])
 
 (defstruct ModelCatalog [(choices (ArrayList ModelChoice))])
 
@@ -40,7 +40,7 @@
                     (label (slice u8))
                     (summary (slice u8))
                     (effort bool)
-                    (default-effort ReasoningEffort)] (-> ModelChoice)
+                    (default-effort (slice u8))] (-> ModelChoice)
   (let [choice (alloc/stack ModelChoice)]
     (store! (field choice provider) provider)
     (store! (field choice model) model)
@@ -75,7 +75,7 @@
                                       "auto"
                                       "route by profile"
                                       false
-                                      (ReasoningNone)))
+                                      "none"))
     ;; Claude. Effort is `low`..`max` on the 5-series; Haiku 4.5 rejects the
     ;; parameter outright, which is why it carries effort=false rather than a
     ;; low default.
@@ -85,35 +85,35 @@
                                       "Claude Opus 5"
                                       "agentic coding and long-horizon work"
                                       true
-                                      (ReasoningHigh)))
+                                      "high"))
     (model-catalog-add! (mut catalog)
                         (model-choice "claude"
                                       "claude-fable-5"
                                       "Claude Fable 5"
                                       "most capable; thinking always on"
                                       true
-                                      (ReasoningHigh)))
+                                      "high"))
     (model-catalog-add! (mut catalog)
                         (model-choice "claude"
                                       "claude-sonnet-5"
                                       "Claude Sonnet 5"
                                       "near-Opus quality at Sonnet cost"
                                       true
-                                      (ReasoningHigh)))
+                                      "high"))
     (model-catalog-add! (mut catalog)
                         (model-choice "claude"
                                       "claude-opus-4-8"
                                       "Claude Opus 4.8"
                                       "previous Opus"
                                       true
-                                      (ReasoningHigh)))
+                                      "high"))
     (model-catalog-add! (mut catalog)
                         (model-choice "claude"
                                       "claude-haiku-4-5"
                                       "Claude Haiku 4.5"
                                       "fastest; no effort setting"
                                       false
-                                      (ReasoningNone)))
+                                      "none"))
     ;; The GPT models are offered only through Codex, over the local ChatGPT
     ;; subscription. The direct OpenAI provider is deliberately absent from the
     ;; menu: it needs OPENAI_API_KEY, and offering a row that fails at request
@@ -126,21 +126,21 @@
                                       "Codex · sol"
                                       "largest"
                                       true
-                                      (ReasoningHigh)))
+                                      "high"))
     (model-catalog-add! (mut catalog)
                         (model-choice "codex"
                                       "gpt-5.6-terra"
                                       "Codex · terra"
                                       "balanced"
                                       true
-                                      (ReasoningMedium)))
+                                      "medium"))
     (model-catalog-add! (mut catalog)
                         (model-choice "codex"
                                       "gpt-5.6-luna"
                                       "Codex · luna"
                                       "fastest"
                                       true
-                                      (ReasoningLow)))
+                                      "low"))
     ;; DeepSeek. v4-pro is a reasoning model; v4-flash is not, so offering it an
     ;; effort level would be a control that does nothing.
     (model-catalog-add! (mut catalog)
@@ -149,14 +149,14 @@
                                       "DeepSeek v4 pro"
                                       "reasoning · needs DEEPSEEK_API_KEY"
                                       true
-                                      (ReasoningMedium)))
+                                      "medium"))
     (model-catalog-add! (mut catalog)
                         (model-choice "deepseek-openai"
                                       "deepseek-v4-flash"
                                       "DeepSeek v4 flash"
                                       "non-reasoning · needs DEEPSEEK_API_KEY"
                                       false
-                                      (ReasoningNone)))
+                                      "none"))
     (load catalog)))
 
 ;; Index of the entry matching a provider/model pair, or -1 when the current
@@ -183,11 +183,11 @@
 ;; ---------------------------------------------------------------------------
 
 (defstruct EffortChoice
-  [(effort ReasoningEffort)
+  [(effort (slice u8))
    (label (slice u8))
    (summary (slice u8))])
 
-(defn effort-choice [(effort ReasoningEffort)
+(defn effort-choice [(effort (slice u8))
                      (label (slice u8))
                      (summary (slice u8))] (-> EffortChoice)
   (let [choice (alloc/stack EffortChoice)]
@@ -203,26 +203,19 @@
 ;; some models and degrades tool calling on others, and a menu row is too easy a
 ;; way to reach it by accident.
 (defn effort-choice-at [(at i64)] (-> EffortChoice)
-  (cond (= at 0) (effort-choice (ReasoningLow) "low" "short, scoped, latency-sensitive")
-        (= at 1) (effort-choice (ReasoningMedium) "medium" "cost-sensitive balance")
-        (= at 2) (effort-choice (ReasoningHigh) "high" "default for most work")
-        (= at 3) (effort-choice (ReasoningXHigh) "xhigh" "coding and agentic work")
-        :else (effort-choice (ReasoningMax) "max" "correctness over cost")))
+  (cond (= at 0) (effort-choice "low" "low" "short, scoped, latency-sensitive")
+        (= at 1) (effort-choice "medium" "medium" "cost-sensitive balance")
+        (= at 2) (effort-choice "high" "high" "default for most work")
+        (= at 3) (effort-choice "xhigh" "xhigh" "coding and agentic work")
+        :else (effort-choice "max" "max" "correctness over cost")))
 
-(defn effort-index [(effort ReasoningEffort)] (-> i64)
-  (match effort
-    (ReasoningLow [] 0)
-    (ReasoningMedium [] 1)
-    (ReasoningHigh [] 2)
-    (ReasoningXHigh [] 3)
-    (ReasoningMax [] 4)
-    (ReasoningNone [] 2)))
+(defn effort-index [(effort (slice u8))] (-> i64)
+  (cond (str-eq effort "low") 0
+        (str-eq effort "medium") 1
+        (str-eq effort "high") 2
+        (str-eq effort "xhigh") 3
+        (str-eq effort "max") 4
+        :else -1))
 
-(defn effort-from-name [(name (slice u8))] (-> ReasoningEffort)
-  (cond (str-eq name "low") (ReasoningLow)
-        (str-eq name "medium") (ReasoningMedium)
-        (str-eq name "high") (ReasoningHigh)
-        (str-eq name "xhigh") (ReasoningXHigh)
-        (str-eq name "max") (ReasoningMax)
-        (str-eq name "none") (ReasoningNone)
-        :else (ReasoningMedium)))
+(defn effort-from-name [(name (slice u8))] (-> (slice u8))
+  (if (= (slice-len [u8] name) 0) "medium" name))

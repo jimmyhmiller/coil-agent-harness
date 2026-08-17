@@ -1,0 +1,7 @@
+{
+  "name": "issues",
+  "goal": "Resolve the supplied issue in the selected existing workspace and leave the workspace validated and ready for review.",
+  "context": ["context.md"],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "workers": ["01-implement.md", "02-verify.md"]
+}

@@ -4,6 +4,9 @@
 
 This repository contains the first vertical slice of a headless, observable agent
 runtime written in COIL. The durable architectural rules live in [agent.md](agent.md).
+The current product milestone is the narrowly scoped distributed software-factory
+MVP described in [docs/software-factory-mvp.md](docs/software-factory-mvp.md). The TUI
+is a client and development workbench, not the product boundary.
 
 The current slice can:
 
@@ -42,6 +45,121 @@ The version 1 service routes are `POST /v1/runs`,
 `GET /v1/runs/{run_id}/events?after={sequence}`. Mutation bodies carry a
 stable `command_id`; replaying the same command does not repeat its effect.
 
+Runs with `"execution_target":"worker"` remain durably queued for an
+out-of-process worker instead of launching inside the server. Worker control is part
+of the native harness protocol; this repository no longer ships a separate script
+client.
+
+The repository also includes a working Markdown-defined software factory. Its
+manifest contains a goal and reusable worker-role files, not a list of expected output
+files. The harness itself loads the folder, creates the workspace, and runs each agent.
+Every worker reports whether it considers its Markdown assignment complete and validated:
+
+```sh
+./harness factory run factories/snake
+```
+
+Scaffold a new generic Markdown-defined factory with one worker:
+
+```sh
+./harness factory new factories/my-factory
+```
+
+Provide ordered step names to create a multi-worker factory:
+
+```sh
+./harness factory new factories/my-factory architect implement verify
+```
+
+This creates `factory.json`, `context.md`, and `01-worker.md`. Edit those files to
+describe the goal, shared context, tools, and worker behavior. The command refuses to
+overwrite an existing path.
+
+At run start, `context.md` is copied to the implementation workspace root. The rest of
+the factory definition is copied under the hidden `.factory/definitions/` directory,
+and its manifest points back to the root context. Workers receive the private hidden
+snapshot's path and may edit any part of it. Before each phase, the coordinator reloads
+`factory.json`, root `context.md`, worker ordering, worker Markdown, and tool groups.
+This lets one phase revise what later phases receive without changing the reusable
+source factory.
+
+`factory.json` may also define shell commands around the whole flow and around each
+worker invocation. A worker can remain a filename string, or use an object when it
+needs its own commands:
+
+```json
+{
+  "commands": {
+    "before": ["git status --short"],
+    "after": ["git add -A && git commit -m 'factory result'"],
+    "before_each": ["git status --short"],
+    "after_each": ["git status --short"]
+  },
+  "workers": [
+    {
+      "file": "01-implement.md",
+      "provider": "codex",
+      "model": "gpt-5.6-luna",
+      "reasoning": "medium",
+      "before": ["printf 'starting implementation\\n'"],
+      "after": ["coil check"]
+    },
+    "02-verify.md"
+  ]
+}
+```
+
+`provider`, `model`, and `reasoning` are independently optional on every worker.
+An omitted value inherits the run-level selection (`reasoning` currently defaults to
+`medium`). Reasoning is an opaque provider-facing string: the factory runtime passes it
+through unchanged and does not maintain an allowlist of provider-specific values.
+
+Commands run in the implementation workspace in this order: flow `before`, global
+`before_each`, worker `before`, the worker, worker `after`, global `after_each`, and
+finally flow `after`. The per-worker sequence repeats for every invocation, including
+workflow jumps. Commands in each list run in order and stop at the first nonzero exit
+or timeout; that failure fails the run, and success-only later hooks do not run. Every
+command emits `factory.command.started` followed by `factory.command.completed` or
+`factory.command.failed`. Bash output uses the normal bounded-output and artifact
+spooling behavior, so large command results are retained without flooding the journal.
+
+With no workspace argument, the runner creates a fresh directory under
+`.factory-workspaces/` and prints its path. Pass a workspace only when the factory is
+intentionally modifying an existing codebase:
+
+```sh
+./harness factory run factories/snake /path/to/existing/codebase gpt-5.6-luna codex
+```
+
+Any additional arguments are readable context files appended to every worker's
+Markdown prompt. This is the generic mechanism for supplying an issue, specification,
+or other run-specific material.
+
+For the common case of applying one issue to an existing codebase, use the named issue
+form. It defaults to `gpt-5.6-luna` through the `codex` provider:
+
+```sh
+./harness factory issue factories/issues \
+  --workspace /path/to/existing/codebase \
+  --issue /path/to/issue.md
+```
+
+Use `--model` or `--provider` to override those defaults. The issue file is supplied as
+run-specific context; the issue command does not add a separate issue model or hard-code
+an issue tracker into the coordinator.
+
+Factory workers have no arbitrary turn budget. Product-specific Markdown invariants
+and cleanup workers enforce repository shape and release requirements without
+hard-coding those policies into the generic coordinator. Factory, stage, worker-status,
+model, and tool events are written to the printed Coil journal.
+
+Every factory worker also receives generic workflow-control tools. `inspect_workflow`
+reloads the private definition and returns its ordered worker files, the current worker
+and index, and the completed execution history. Traversal continues to the following
+worker by default. A worker can call `set_workflow_state` with `continue`, `complete`,
+or `goto`; `goto` names any worker file in the live definition and may move forward or
+backward. Each invocation still gets a new run identity even when a workflow loops back.
+
 A create command can pin `provider` and `model`, or set both to `auto` and provide a
 `routing_profile`. Optional `requires_harness_tools` and `requires_subscription`
 constraints are checked against provider metadata. The resolved command persists a
@@ -68,8 +186,9 @@ string values remain explicit per-child overrides.
 
 ## Build and verify
 
-Requirements are COIL with its bundled HTTP dependency and Python 3 for subscription
-OAuth. The Codex CLI is needed only when using the optional App Server strategy.
+Requirements are COIL with its bundled HTTP dependency. Subscription OAuth, PKCE,
+credential storage, and token refresh are implemented natively in the harness. The
+Codex CLI is needed only when using the optional App Server strategy.
 
 ```sh
 coil build
@@ -106,14 +225,8 @@ provider continuation. Each structured `model.request.completed` payload records
 
 Inspecting and monitoring do not require attaching to the process that owns a run.
 The journal observer can project current state, print a filtered action trace, or
-follow a live run. Every command accepts `--run-id`, `--agent-id`, `--operation-id`,
-`--parent-operation-id`, and `--event`, so the same tool can point at any action:
-
-```sh
-python3 scripts/run_observer.py inspect events.jsonl
-python3 scripts/run_observer.py events events.jsonl --run-id run-123
-python3 scripts/run_observer.py watch events.jsonl --run-id run-123 --until-terminal
-```
+follow a live run. Filtering by run, agent, operation, parent operation, and event is
+being moved into the native harness command surface.
 
 `inspect` reports wall-clock elapsed time and open model/tool operations. `watch`
 tails new journal events and refreshes that projection every five seconds without
@@ -243,12 +356,8 @@ for the design and [known gaps](docs/bus-known-gaps.md) for what remains.
 
 The wire format is reverse-engineered and is not a public API; it can change
 without notice. The notes and a reference client live in
-`docs/claude-code-cross-session-protocol/`. Regenerate the conformance vectors
-after touching either side:
-
-```sh
-python3 scripts/generate_cc_conformance.py   # requires node
-```
+`docs/claude-code-cross-session-protocol/`. Checked-in conformance vectors are
+exercised directly by the Coil test suite.
 
 ## Opt-in live provider tests
 
@@ -299,11 +408,10 @@ Provider credentials are read only inside provider adapters:
   a cross-process lock. `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_AUTH_TOKEN` remain
   environment overrides; never pass credentials as CLI arguments.
 
-Claude login requires Python 3, opens the authorization page in your browser, and
-falls back to accepting the final redirect URL in the terminal. Run
-`./harness logout claude` to remove the stored credentials. Installed or relocated
-builds can set `HARNESS_CLAUDE_OAUTH_HELPER` to the absolute path of
-`scripts/claude_oauth.py`.
+Both subscription login commands implement OAuth PKCE in Coil, open the authorization
+page, validate the loopback callback state, and fall back to accepting the final
+redirect URL or authorization code in the terminal. Credential replacement is
+create-at-`0600`, fsynced, and atomically renamed while holding the provider lock.
 
 Credentials are used to construct request headers and are never included in emitted
 events. Do not pass a credential as a CLI argument.
@@ -312,9 +420,8 @@ Codex execution is strategy-based. The default is the fast OpenCode-style direct
 strategy against ChatGPT's private Codex Responses endpoint. That endpoint is not a
 documented third-party OpenAI API and may change without notice. Set
 `HARNESS_CODEX_STRATEGY=app-server` to use the supported App Server compatibility path.
-Direct credentials refresh automatically under a cross-process lock; relocate the
-broker with `HARNESS_CODEX_CREDENTIAL_HELPER`. For isolated testing, credentials may
-instead be supplied through `HARNESS_CODEX_ACCESS_TOKEN` and
+Direct credentials refresh automatically under a cross-process lock. For isolated
+testing, credentials may instead be supplied through `HARNESS_CODEX_ACCESS_TOKEN` and
 `HARNESS_CODEX_ACCOUNT_ID`; never put them in command arguments.
 
 The harness has no permission or approval layer. Registration is the only gate: a tool

@@ -1,0 +1,255 @@
+(module harness-factory-workflow)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.atomic" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+;; Routing is run state, not factory metadata. Worker files describe the available
+;; topology; these fields record the current traversal through that live topology.
+(defstruct FactoryWorkflowState
+  [(allocator (ptr Allocator))
+   (lock (ptr i64))
+   (definition-directory (slice u8))
+   (current-worker (slice u8))
+   (current-stage i64)
+   (history (ArrayList (slice u8)))
+   (decision i64)  ;; 0 = continue, 1 = complete, 2 = goto
+   (target (slice u8))])
+
+(defn factory-workflow-state-new [(allocator (ptr Allocator))
+                                  (definition-directory (slice u8))] (-> FactoryWorkflowState)
+  (let [(mut state) (zeroed FactoryWorkflowState)]
+    (store! (field state allocator) allocator)
+    (store! (field state lock) (box allocator i64 0))
+    (store! (field state definition-directory) definition-directory)
+    (store! (field state history) (al-new [(slice u8)] allocator))
+    (store! (field state current-worker) "")
+    (store! (field state current-stage) 0)
+    (store! (field state decision) 0)
+    (store! (field state target) "")
+    (load state)))
+
+(defn factory-workflow-lock! [(state (ptr FactoryWorkflowState))] (-> i64)
+  (loop (if (= (atomic-cas (load (field state lock)) 0 1) 0) (break) 0))
+  0)
+
+(defn factory-workflow-unlock! [(state (ptr FactoryWorkflowState))] (-> i64)
+  (atomic-store (load (field state lock)) 0))
+
+(defn factory-workflow-prepare-stage! [(state (ptr FactoryWorkflowState))
+                                       (worker (slice u8))
+                                       (stage i64)] (-> i64)
+  (factory-workflow-lock! state)
+  (store! (field state current-worker) worker)
+  (store! (field state current-stage) stage)
+  (store! (field state decision) 0)
+  (store! (field state target) "")
+  (factory-workflow-unlock! state))
+
+(defn factory-workflow-record-completed! [(state (ptr FactoryWorkflowState))] (-> i64)
+  (factory-workflow-lock! state)
+  (al-push! [(slice u8)] (mut (field state history)) (load (field state current-worker)))
+  (factory-workflow-unlock! state))
+
+(defn factory-workflow-error [(call (ptr ToolCall)) (message (slice u8))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
+    (store! (field result error) message)
+    (load result)))
+
+(defstruct FactoryWorkflowTopologyTool [(state (ptr FactoryWorkflowState))])
+(defstruct FactoryWorkflowTransitionTool [(state (ptr FactoryWorkflowState))])
+
+(defn execute-factory-workflow-topology [(self (ptr FactoryWorkflowTopologyTool))
+                                         (call (ptr ToolCall))
+                                         (allocator (ptr Allocator))] (-> ToolResult)
+  (let [state (load (field self state))]
+    (match (load-factory-definition allocator (load (field state definition-directory)))
+      (FactoryInvalid [message] (factory-workflow-error call message))
+      (FactoryLoaded [definition-value]
+                     (let [definition definition-value
+                           workers (load (field definition workers))
+                           (mut output) (json-object allocator)
+                           (mut steps) (json-array allocator)
+                           (mut completed) (json-array allocator)
+                           (mut i) 0]
+                       (loop (if (>= (load i) (al-len [FactoryWorker] workers))
+                                 (break)
+                                 (let [worker (al-get [FactoryWorker] workers (load i))
+                                       (mut step) (json-object allocator)]
+                                   (json-object-put! (mut step) "index" (json-integer allocator (load i)))
+                                   (json-put-string! (mut step) "worker" (load (field worker file)))
+                                   (json-array-push! (mut steps) (load step))
+                                   (store! i (+ (load i) 1)))))
+                       (factory-workflow-lock! state)
+                       (store! i 0)
+                       (loop (if (>= (load i) (al-len [(slice u8)] (load (field state history))))
+                                 (break)
+                                 (do
+                                   (json-array-push! (mut completed)
+                                                     (JsonString (al-get [(slice u8)]
+                                                                         (load (field state history))
+                                                                         (load i))))
+                                   (store! i (+ (load i) 1)))))
+                       (json-put-string! (mut output) "factory" (load (field definition name)))
+                       (json-put-string! (mut output) "current_worker" (load (field state current-worker)))
+                       (json-object-put! (mut output)
+                                         "current_index"
+                                         (json-integer allocator (load (field state current-stage))))
+                       (json-object-put! (mut output) "steps" (load steps))
+                       (json-object-put! (mut output) "completed" (load completed))
+                       (factory-workflow-unlock! state)
+                       (let [(mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+                         (store! (field result output) (load output))
+                         (load result)))))))
+
+(defn factory-workflow-worker-index [(allocator (ptr Allocator))
+                                     (directory (slice u8))
+                                     (target (slice u8))] (-> i64)
+  (match (load-factory-definition allocator directory)
+    (FactoryInvalid [message] -1)
+    (FactoryLoaded [definition-value]
+                   (let [definition definition-value
+                         workers (load (field definition workers))
+                         (mut i) 0
+                         (mut found) -1]
+                     (loop (if (or (>= (load i) (al-len [FactoryWorker] workers)) (>= (load found) 0))
+                               (break)
+                               (let [worker (al-get [FactoryWorker] workers (load i))]
+                                 (when (str-eq (load (field worker file)) target)
+                                   (store! found (load i))
+                                   0)
+                                 (store! i (+ (load i) 1)))))
+                     (load found)))))
+
+(defn execute-factory-workflow-transition [(self (ptr FactoryWorkflowTransitionTool))
+                                           (call (ptr ToolCall))
+                                           (allocator (ptr Allocator))] (-> ToolResult)
+  (let [state (load (field self state))
+        arguments (load (field call arguments))
+        action
+          (match (json-string-at arguments "action")
+            (Some [value] value)
+            (None [] ""))
+        target
+          (match (json-string-at arguments "next_worker")
+            (Some [value] value)
+            (None [] ""))]
+    (cond (not (or (str-eq action "continue")
+                   (or (str-eq action "complete") (str-eq action "goto"))))
+            (factory-workflow-error call "action must be continue, complete, or goto")
+          (and (str-eq action "goto") (= (slice-len [u8] target) 0))
+            (factory-workflow-error call "goto requires next_worker")
+          (and (str-eq action "goto")
+               (< (factory-workflow-worker-index allocator
+                                                 (load (field state definition-directory))
+                                                 target)
+                  0))
+            (factory-workflow-error call "next_worker is not in the live workflow")
+          :else
+            (let [(mut output) (json-object allocator)
+                  (mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+              (factory-workflow-lock! state)
+              (store! (field state decision)
+                      (cond (str-eq action "complete") 1
+                            (str-eq action "goto") 2
+                            :else 0))
+              (store! (field state target)
+                      (if (str-eq action "goto")
+                          (json-copy-string (load (field state allocator)) target)
+                          ""))
+              (factory-workflow-unlock! state)
+              (json-put-string! (mut output) "action" action)
+              (when (str-eq action "goto")
+                (json-put-string! (mut output) "next_worker" target)
+                0)
+              (store! (field result output) (load output))
+              (load result)))))
+
+(impl ToolImplementation FactoryWorkflowTopologyTool
+  (execute-tool [(self (ptr FactoryWorkflowTopologyTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-factory-workflow-topology self call allocator)))
+
+(impl ToolImplementation FactoryWorkflowTransitionTool
+  (execute-tool [(self (ptr FactoryWorkflowTransitionTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (execute-factory-workflow-transition self call allocator)))
+
+(defn factory-workflow-empty-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut schema) (json-object allocator)
+        (mut properties) (json-object allocator)]
+    (json-put-string! (mut schema) "type" "object")
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-put-bool! (mut schema) "additionalProperties" false)
+    (load schema)))
+
+(defn factory-workflow-transition-schema [(allocator (ptr Allocator))] (-> Json)
+  (let [(mut action) (json-object allocator)
+        (mut action-enum) (json-array allocator)
+        (mut target) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-put-string! (mut action) "type" "string")
+    (json-array-push! (mut action-enum) (JsonString "continue"))
+    (json-array-push! (mut action-enum) (JsonString "complete"))
+    (json-array-push! (mut action-enum) (JsonString "goto"))
+    (json-object-put! (mut action) "enum" (load action-enum))
+    (json-put-string! (mut target) "type" "string")
+    (json-object-put! (mut properties) "action" (load action))
+    (json-object-put! (mut properties) "next_worker" (load target))
+    (json-array-push! (mut required) (JsonString "action"))
+    (json-array-push! (mut required) (JsonString "next_worker"))
+    (json-put-string! (mut schema) "type" "object")
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-put-bool! (mut schema) "additionalProperties" false)
+    (load schema)))
+
+(defn register-factory-workflow-tools! [(registry (mut ToolRegistry))
+                                        (allocator (ptr Allocator))
+                                        (state (ptr FactoryWorkflowState))] (-> bool)
+  (let [topology-definition (alloc/stack ToolDefinition)
+        transition-definition (alloc/stack ToolDefinition)
+        topology (box allocator FactoryWorkflowTopologyTool (zeroed FactoryWorkflowTopologyTool))
+        transition
+          (box allocator
+               FactoryWorkflowTransitionTool
+               (zeroed FactoryWorkflowTransitionTool))]
+    (store! (field topology state) state)
+    (store! (field transition state) state)
+    (store! (field (field topology-definition spec) name) "inspect_workflow")
+    (store! (field (field topology-definition spec) description)
+            "Inspect the live Markdown-defined workflow: ordered workers, current worker and index, and completed execution history.")
+    (store! (field (field topology-definition spec) input-schema)
+            (factory-workflow-empty-schema allocator))
+    (store! (field (field topology-definition spec) strict) true)
+    (store! (field (field topology-definition spec) effect) (ReadOnly))
+    (store! (field (field topology-definition spec) idempotent) true)
+    (store! (field (field topology-definition spec) timeout-ms) 0)
+    (store! (field topology-definition implementation) topology)
+    (store! (field (field transition-definition spec) name) "set_workflow_state")
+    (store! (field (field transition-definition spec) description)
+            "Choose workflow routing after this worker succeeds: continue in order, complete the workflow now, or go to any named worker in the live workflow. next_worker is required by the schema and is ignored unless action is goto.")
+    (store! (field (field transition-definition spec) input-schema)
+            (factory-workflow-transition-schema allocator))
+    (store! (field (field transition-definition spec) strict) true)
+    (store! (field (field transition-definition spec) effect) (Reversible))
+    (store! (field (field transition-definition spec) idempotent) true)
+    (store! (field (field transition-definition spec) timeout-ms) 0)
+    (store! (field transition-definition implementation) transition)
+    (and (tool-register! (mut registry) (load topology-definition))
+         (tool-register! (mut registry) (load transition-definition)))))

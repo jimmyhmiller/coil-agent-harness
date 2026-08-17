@@ -66,7 +66,7 @@ sender does not. Self-consistency cannot detect this; only a differential test
 against the reference can.
 
 Hence `tests/bus_cc_conformance_test.coil` is generated, not authored:
-`scripts/generate_cc_conformance.py` runs the reference client and emits the
+The checked-in conformance corpus was captured from the reference client and records the
 expected strings mechanically. Its 30 vectors were confirmed to fail under three
 deliberate mutations (clamp at 63, truncated ellipsis, reordered attributes)
 before being trusted. The suite also anchors on a frame captured verbatim from a

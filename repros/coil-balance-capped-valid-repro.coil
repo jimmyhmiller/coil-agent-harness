@@ -1,0 +1,34 @@
+(module balance-capped-valid-repro)
+
+(defn reproduce [(condition bool)] (-> i64)
+  (let [outer 1]
+    (if condition
+        0
+  (let [
+      value (+ outer 1)]
+    value))
+    (+ outer 1)
+    (+ outer 2)
+    (+ outer 3)
+    (+ outer 4)
+    (+ outer 5)
+    (+ outer 6)
+    (+ outer 7)
+    (+ outer 8)
+    (+ outer 9)
+    (+ outer 10)
+    (+ outer 11)
+    (+ outer 12)
+    (+ outer 13)
+    (+ outer 14)
+    (+ outer 15)
+    (+ outer 16)
+    (+ outer 17)
+    (+ outer 18)
+    (+ outer 19)
+    (+ outer 20)
+    (+ outer 21)
+    (+ outer 22)
+    (+ outer 23)
+    (+ outer 24)
+    (+ outer 25))

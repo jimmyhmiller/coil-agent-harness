@@ -1,0 +1,22 @@
+{
+  "name": "factory-hooks-test",
+  "goal": "Exercise configurable lifecycle commands.",
+  "context": ["context.md"],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "commands": {
+    "before": ["true"],
+    "after": ["true"],
+    "before_each": ["true"],
+    "after_each": ["true"]
+  },
+  "workers": [
+    {
+      "file": "01-worker.md",
+      "provider": "async-tool",
+      "model": "fixture-step-model",
+      "reasoning": "provider-future-level",
+      "before": ["true"],
+      "after": ["true"]
+    }
+  ]
+}

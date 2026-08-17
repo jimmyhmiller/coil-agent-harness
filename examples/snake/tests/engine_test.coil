@@ -1,0 +1,26 @@
+(module snake-engine-test)
+
+(import "coil.assert" :use *)
+(import "snake" :use *)
+
+(deftest movement-is-deterministic
+         (assert-eq (next-x 5 (cast u8 97)) 4)
+         (assert-eq (next-x 5 (cast u8 100)) 6)
+         (assert-eq (next-y 4 (cast u8 119)) 3)
+         (assert-eq (next-y 4 (cast u8 115)) 5))
+
+(deftest walls-are-terminal
+         (assert (wall-hit? 0 4))
+         (assert (wall-hit? 11 4))
+         (assert (wall-hit? 5 0))
+         (assert (not (wall-hit? 5 4))))
+
+(deftest body-collision-finds-occupied-cells
+         (let [(mut xs) (zeroed (array i64 96))
+               (mut ys) (zeroed (array i64 96))]
+           (store! (index xs 0) 5)
+           (store! (index ys 0) 4)
+           (store! (index xs 1) 4)
+           (store! (index ys 1) 4)
+           (assert (body-has? xs ys 2 4 4))
+           (assert (not (body-has? xs ys 2 8 4)))))

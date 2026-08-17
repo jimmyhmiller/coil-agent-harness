@@ -1,0 +1,576 @@
+(module harness-factory-coordinator)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-agent-runner" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-event" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-status" :use *)
+(import "harness-factory-workflow" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-runtime-controller" :use *)
+(import "harness-search-tool" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defn factory-stage-payload [(allocator (ptr Allocator))
+                             (worker (ref FactoryWorker))
+                             (provider (slice u8))
+                             (model (slice u8))
+                             (reasoning (slice u8))
+                             (reported bool)
+                             (ready bool)] (-> Json)
+  (let [(mut payload) (json-object allocator)]
+    (json-put-string! (mut payload) "worker" (load (field worker file)))
+    (json-put-string! (mut payload) "provider" provider)
+    (json-put-string! (mut payload) "model" model)
+    (json-put-string! (mut payload) "reasoning" reasoning)
+    (json-put-bool! (mut payload) "reported" reported)
+    (json-put-bool! (mut payload) "ready" ready)
+    (load payload)))
+
+(defn factory-worker-setting [(worker-value (slice u8))
+                              (run-value (slice u8))] (-> (slice u8))
+  (if (> (slice-len [u8] worker-value) 0) worker-value run-value))
+
+(defn factory-run-id [(allocator (ptr Allocator))
+                      (name (slice u8))] (-> (slice u8))
+  (let [(mut value) (sb-new allocator)]
+    (sb-push-str! (mut value) "factory-")
+    (sb-push-str! (mut value) name)
+    (sb-push-str! (mut value) "-")
+    (sb-push-str! (mut value)
+                  (json-stringify allocator (json-integer allocator (now-ms))))
+    (sb-finish! (mut value))))
+
+(defn factory-command-id [(allocator (ptr Allocator))
+                          (phase (slice u8))
+                          (invocation i64)
+                          (index i64)] (-> (slice u8))
+  (let [(mut value) (sb-new allocator)]
+    (sb-push-str! (mut value) "factory-command-")
+    (sb-push-str! (mut value) phase)
+    (sb-push-str! (mut value) "-")
+    (sb-push-str! (mut value) (json-stringify allocator (json-integer allocator invocation)))
+    (sb-push-str! (mut value) "-")
+    (sb-push-str! (mut value) (json-stringify allocator (json-integer allocator index)))
+    (sb-finish! (mut value))))
+
+(defn factory-command-payload [(allocator (ptr Allocator))
+                               (phase (slice u8))
+                               (command (slice u8))
+                               (index i64)
+                               (output Json)] (-> Json)
+  (let [(mut payload) (json-object allocator)]
+    (json-put-string! (mut payload) "phase" phase)
+    (json-put-string! (mut payload) "command" command)
+    (json-object-put! (mut payload) "index" (json-integer allocator index))
+    (when (not (match-else output (JsonNull [] true) (_ false)))
+      (json-object-put! (mut payload) "result" output)
+      0)
+    (load payload)))
+
+(defn run-factory-commands [(allocator (ptr Allocator))
+                            (commands (ArrayList (slice u8)))
+                            (phase (slice u8))
+                            (invocation i64)
+                            (factory-id (slice u8))
+                            (worker (slice u8))
+                            (workspace (slice u8))
+                            (provider-name (slice u8))
+                            (model (slice u8))
+                            (emitter (ptr EventEmitter))] (-> i64)
+  (let [tool (alloc/stack BashTool)
+        context (alloc/stack ToolExecutionContext)
+        (mut i) 0
+        n (al-len [(slice u8)] commands)
+        (mut result) 0]
+    (store! (field tool cwd) workspace)
+    (store! (field context run-id) factory-id)
+    (store! (field context cancellation) (cast (ptr CancellationToken) 0))
+    (store! (field context run-deadline-monotonic-ms) 0)
+    (store! (field context tool-deadline-monotonic-ms) 0)
+    (loop (if (or (>= (load i) n) (!= (load result) 0))
+              (break)
+              (let [command (al-get [(slice u8)] commands (load i))
+                    call-id (factory-command-id allocator phase invocation (load i))
+                    call (alloc/stack ToolCall)
+                    (mut arguments) (json-object allocator)]
+                (json-put-string! (mut arguments) "command" command)
+                (store! (field call id) call-id)
+                (store! (field call name) "bash")
+                (store! (field call arguments) (load arguments))
+                (store! (field call raw-arguments) "")
+                (emit-event emitter
+                            (now-ms)
+                            (FactoryCommandStarted)
+                            factory-id
+                            worker
+                            call-id
+                            provider-name
+                            model
+                            (factory-command-payload allocator phase command (load i) (JsonNull)))
+                (let [outcome (execute-bash tool call context allocator)
+                      output (load (field outcome output))
+                      success
+                        (and (match-else (load (field outcome status))
+                                         (ToolSucceeded [] true)
+                                         (_ false))
+                             (= (json-number-i64 (json-get output "exit_code")) 0))]
+                  (emit-event emitter
+                              (now-ms)
+                              (if success (FactoryCommandCompleted) (FactoryCommandFailed))
+                              factory-id
+                              worker
+                              call-id
+                              provider-name
+                              model
+                              (factory-command-payload allocator phase command (load i) output))
+                  (if success
+                      (store! i (+ (load i) 1))
+                      (store! result 1))))))
+    (load result)))
+
+(defn factory-append-sections! [(buffer (mut StrBuf))
+                                (sections (ArrayList (slice u8)))] (-> i64)
+  (let [(mut i) 0
+        n (al-len [(slice u8)] sections)]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (sb-push-str! (mut buffer) "\n\n")
+                (sb-push-str! (mut buffer) (al-get [(slice u8)] sections (load i)))
+                (store! i (+ (load i) 1))))))
+  0)
+
+(defn factory-stage-prompt [(allocator (ptr Allocator))
+                            (definition (ref FactoryDefinition))
+                            (worker (ref FactoryWorker))
+                            (workspace (slice u8))] (-> (slice u8))
+  (let [(mut prompt) (sb-new allocator)]
+    (factory-append-sections! (mut prompt) (load (field definition common-context)))
+    (sb-push-str! (mut prompt) "\n\n# Product goal\n\n")
+    (sb-push-str! (mut prompt) (load (field definition goal)))
+    (sb-push-str! (mut prompt) "\n\n# Current worker assignment\n\n")
+    (sb-push-str! (mut prompt) (load (field worker instructions)))
+    (sb-push-str! (mut prompt) "\n\n# Execution context\n\nFactory: ")
+    (sb-push-str! (mut prompt) (load (field definition name)))
+    (sb-push-str! (mut prompt) "\nWorkspace: ")
+    (sb-push-str! (mut prompt) workspace)
+    (sb-push-str! (mut prompt) "\nMutable factory definition: ")
+    (sb-push-str! (mut prompt) (load (field definition directory)))
+    (when (starts-with (load (field definition directory)) workspace)
+      (let [workspace-length (slice-len [u8] workspace)
+            definition-length (slice-len [u8] (load (field definition directory)))]
+        (when (> definition-length workspace-length)
+          (sb-push-str! (mut prompt) "\nWorkspace-relative factory definition: ")
+          (sb-push-str! (mut prompt)
+                        (substr (load (field definition directory))
+                                (+ workspace-length 1)
+                                definition-length))
+          0))
+      0)
+    (sb-push-str! (mut prompt)
+                  "\nExecute the Markdown assignment in this workspace using the available tools and supplied context. The factory definition above is this run's private copy; you may update its context, goal, tool groups, worker list, or later worker Markdown when that helps subsequent phases. The coordinator reloads it before the next phase. Use inspect_workflow when you need the live ordered topology, current position, or completed history. The workflow continues in order by default; use set_workflow_state to complete early or route to a named worker. Decide what validation the assignment requires and perform it. Before finishing, call report_worker_status with ready=true only if you believe the assignment is complete and validated; otherwise report ready=false and explain what remains.")
+    (sb-finish! (mut prompt))))
+
+(defn factory-request [(allocator (ptr Allocator))
+                       (registry (ptr ToolRegistry))
+                       (run-id (slice u8))
+                       (model (slice u8))
+                       (reasoning (slice u8))
+                       (prompt (slice u8))] (-> ModelRequest)
+  (let [request (alloc/stack ModelRequest)
+        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+        message (alloc/stack Message)]
+    (store! (field message role) (UserRole))
+    (store! (field message content) prompt)
+    (al-push! [Message] messages (load message))
+    (store! (field request run-id) run-id)
+    (store! (field request operation-id) "model-1")
+    (store! (field request model) model)
+    (store! (field request instructions)
+            "Complete the assigned work with the available tools and report your worker status before finishing.")
+    (store! (field request cache-key) "")
+    (store! (field request prompt-cache-key) run-id)
+    (store! (field request messages) messages)
+    (store! (field request tools) registry)
+    (store! (field request tool-choice) (ToolsAuto))
+    (store! (field request parallel-tool-calls) true)
+    (store! (field request reasoning) reasoning)
+    (store! (field request max-output-tokens) 0)
+    (store! (field request timeout-ms) 120000)
+    (store! (field request deadline-monotonic-ms) 0)
+    (store! (field request cancellation) (cast (ptr CancellationToken) 0))
+    (store! (field request run-lifecycle) (cast (ptr i64) 0))
+    (store! (field (field request continuation) present) false)
+    (store! (field (field request continuation) previous-response-id) "")
+    (store! (field (field request continuation) provider-session-id) "")
+    (store! (field (field request continuation) previous-output) (JsonNull))
+    (store! (field (field request continuation) tool-results)
+            (cast (ptr (ArrayList ToolResult)) 0))
+    (load request)))
+
+(defn factory-tool-group-enabled? [(definition (ref FactoryDefinition))
+                                   (name (slice u8))] (-> bool)
+  (let [(mut i) 0
+        groups (load (field definition tool-groups))
+        n (al-len [(slice u8)] groups)
+        (mut enabled) false]
+    (loop (if (or (>= (load i) n) (load enabled))
+              (break)
+              (do
+                (when (str-eq (al-get [(slice u8)] groups (load i)) name)
+                  (store! enabled true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load enabled)))
+
+(defn factory-register-configured-tools! [(registry (mut ToolRegistry))
+                                          (allocator (ptr Allocator))
+                                          (workspace (slice u8))
+                                          (definition (ref FactoryDefinition))] (-> i64)
+  (when (factory-tool-group-enabled? definition "filesystem")
+    (register-filesystem-tools! (mut registry) allocator workspace)
+    (register-search-text-tool! (mut registry) allocator workspace)
+    0)
+  (when (factory-tool-group-enabled? definition "bash")
+    (register-bash-tool! (mut registry) allocator workspace)
+    0)
+  0)
+
+(defn factory-stage-run-id [(allocator (ptr Allocator))
+                            (name (slice u8))
+                            (stage i64)] (-> (slice u8))
+  (let [(mut value) (sb-new allocator)]
+    (sb-push-str! (mut value) name)
+    (sb-push-str! (mut value) "-worker-")
+    (sb-push-str! (mut value)
+                  (json-stringify allocator (json-integer allocator (+ stage 1))))
+    (sb-finish! (mut value))))
+
+(defn run-factory-stage [(allocator (ptr Allocator))
+                         (provider (dyn ModelProvider))
+                         (definition (ref FactoryDefinition))
+                         (worker (ref FactoryWorker))
+                         (worker-status (ptr FactoryWorkerStatus))
+                         (workflow-state (ptr FactoryWorkflowState))
+                         (stage i64)
+                         (invocation i64)
+                         (factory-id (slice u8))
+                         (workspace (slice u8))
+                         (provider-name (slice u8))
+                         (model (slice u8))
+                         (reasoning (slice u8))
+                         (emitter (ptr EventEmitter))] (-> i64)
+  (let [run-id (factory-stage-run-id allocator (load (field definition name)) invocation)
+        domain (allocation-domain-open allocator)
+        (mut result) 0]
+    (factory-worker-status-reset! worker-status)
+    (factory-workflow-prepare-stage! workflow-state (load (field worker file)) stage)
+    (emit-event emitter
+                (now-ms)
+                (FactoryStageStarted)
+                factory-id
+                (load (field worker file))
+                run-id
+                provider-name
+                model
+                (factory-stage-payload allocator worker provider-name model reasoning false false))
+    (if (not (allocation-domain-valid? domain))
+        (store! result 70)
+        (let [run-allocator (allocation-domain-allocator domain)
+              registry (box run-allocator ToolRegistry (tool-registry-new run-allocator))
+              prompt (factory-stage-prompt run-allocator definition worker workspace)
+              request (alloc/stack ModelRequest)
+              policy (alloc/stack AgentRunPolicy)]
+          (factory-register-configured-tools! registry run-allocator workspace definition)
+          (register-factory-status-tool! registry run-allocator worker-status)
+          (register-factory-workflow-tools! registry run-allocator workflow-state)
+          (store! request (factory-request run-allocator registry run-id model reasoning prompt))
+          (store! (field policy max-model-turns) 0)
+          (store! (field policy max-parallel-tools) 8)
+          (match (run-agent run-allocator provider request emitter (load policy))
+            (ModelErr [failure] (store! result 70))
+            (ModelOk [response]
+                     (let [reported (factory-worker-status-reported? worker-status)
+                           ready (factory-worker-status-ready? worker-status)]
+                       (if (and reported ready)
+                           (do
+                             (factory-workflow-record-completed! workflow-state)
+                             (emit-event emitter
+                                         (now-ms)
+                                         (FactoryStageAccepted)
+                                         factory-id
+                                         (load (field worker file))
+                                         run-id
+                                         provider-name
+                                         model
+                                         (factory-stage-payload allocator
+                                                                worker
+                                                                provider-name
+                                                                model
+                                                                reasoning
+                                                                reported
+                                                                ready)))
+                           (store! result 1)))))
+          (allocation-domain-close! allocator domain)))
+    (load result)))
+
+(defn factory-apply-workflow-decision! [(allocator (ptr Allocator))
+                                        (definition-directory (slice u8))
+                                        (workflow-state (ptr FactoryWorkflowState))
+                                        (stage (ptr i64))
+                                        (finished (ptr bool))
+                                        (result (ptr i64))] (-> i64)
+  (cond (= (load (field workflow-state decision)) 1) (store! finished true)
+        (= (load (field workflow-state decision)) 2)
+          (let [target-index
+                  (factory-workflow-worker-index allocator
+                                                 definition-directory
+                                                 (load (field workflow-state target)))]
+            (if (< target-index 0)
+                (store! result 65)
+                (store! stage target-index)))
+        :else (store! stage (+ (load stage) 1)))
+  0)
+
+(defn run-factory-stage-with-commands [(allocator (ptr Allocator))
+                                       (provider (dyn ModelProvider))
+                                       (definition (ref FactoryDefinition))
+                                       (worker (ref FactoryWorker))
+                                       (worker-status (ptr FactoryWorkerStatus))
+                                       (workflow-state (ptr FactoryWorkflowState))
+                                       (stage i64)
+                                       (invocation i64)
+                                       (factory-id (slice u8))
+                                       (workspace (slice u8))
+                                       (provider-name (slice u8))
+                                       (model (slice u8))
+                                       (reasoning (slice u8))
+                                       (emitter (ptr EventEmitter))] (-> i64)
+  (let [(mut result) 0
+        worker-file (load (field worker file))]
+    (store! result
+            (run-factory-commands allocator
+                                  (load (field definition before-each-commands))
+                                  "before-each"
+                                  invocation
+                                  factory-id
+                                  worker-file
+                                  workspace
+                                  provider-name
+                                  model
+                                  emitter))
+    (when (= (load result) 0)
+      (store! result
+              (run-factory-commands allocator
+                                    (load (field worker before-commands))
+                                    "before-state"
+                                    invocation
+                                    factory-id
+                                    worker-file
+                                    workspace
+                                    provider-name
+                                    model
+                                    emitter))
+      0)
+    (when (= (load result) 0)
+      (store! result
+              (run-factory-stage allocator
+                                 provider
+                                 definition
+                                 worker
+                                 worker-status
+                                 workflow-state
+                                 stage
+                                 invocation
+                                 factory-id
+                                 workspace
+                                 provider-name
+                                 model
+                                 reasoning
+                                 emitter))
+      0)
+    (when (= (load result) 0)
+      (store! result
+              (run-factory-commands allocator
+                                    (load (field worker after-commands))
+                                    "after-state"
+                                    invocation
+                                    factory-id
+                                    worker-file
+                                    workspace
+                                    provider-name
+                                    model
+                                    emitter))
+      0)
+    (when (= (load result) 0)
+      (store! result
+              (run-factory-commands allocator
+                                    (load (field definition after-each-commands))
+                                    "after-each"
+                                    invocation
+                                    factory-id
+                                    worker-file
+                                    workspace
+                                    provider-name
+                                    model
+                                    emitter))
+      0)
+    (load result)))
+
+(defn run-factory-definition [(allocator (ptr Allocator))
+                              (definition (ref FactoryDefinition))
+                              (runtime-contexts (ArrayList (slice u8)))
+                              (workspace (slice u8))
+                              (provider-name (slice u8))
+                              (model (slice u8))
+                              (emitter (ptr EventEmitter))] (-> i64)
+  (let [worker-status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+        provider-factory
+          (box allocator
+               DefaultRuntimeProviderFactory
+               (zeroed DefaultRuntimeProviderFactory))
+        factory-id (factory-run-id allocator (load (field definition name)))
+        workflow-state
+          (box allocator
+               FactoryWorkflowState
+               (factory-workflow-state-new allocator (load (field definition directory))))
+        (mut result) 0
+        (mut stage) 0
+        (mut invocation) 0
+        (mut finished) false]
+    (let [(mut created) (json-object allocator)]
+      (json-put-string! (mut created) "factory" (load (field definition name)))
+      (json-put-string! (mut created) "workspace" workspace)
+      (json-put-string! (mut created) "definition" (load (field definition directory)))
+      (emit-event emitter
+                  (now-ms)
+                  (FactoryRunCreated)
+                  factory-id
+                  "factory"
+                  ""
+                  provider-name
+                  model
+                  (load created)))
+    (store! result
+            (run-factory-commands allocator
+                                  (load (field definition before-commands))
+                                  "before-flow"
+                                  0
+                                  factory-id
+                                  "factory"
+                                  workspace
+                                  provider-name
+                                  model
+                                  emitter))
+    (default-runtime-provider-factory-init! provider-factory allocator)
+    (loop (if (or (load finished) (!= (load result) 0))
+              (break)
+              (match (load-factory-definition allocator
+                                              (load (field definition directory)))
+                (FactoryInvalid [message] (store! result 65))
+                (FactoryLoaded [refreshed-value]
+                               (let [(mut refreshed) refreshed-value
+                                     (mut context-index) 0
+                                     context-count (al-len [(slice u8)] runtime-contexts)]
+                                 (loop (if (>= (load context-index) context-count)
+                                           (break)
+                                           (do
+                                             (al-push! [(slice u8)]
+                                                       (mut (field refreshed common-context))
+                                                       (al-get [(slice u8)]
+                                                               runtime-contexts
+                                                               (load context-index)))
+                                             (store! context-index (+ (load context-index) 1)))))
+                                 (if (>= (load stage)
+                                         (al-len [FactoryWorker] (load (field refreshed workers))))
+                                     (store! finished true)
+                                     (let [worker
+                                             (al-get [FactoryWorker]
+                                                     (load (field refreshed workers))
+                                                     (load stage))
+                                           stage-provider
+                                             (factory-worker-setting
+                                               (load (field worker provider))
+                                               provider-name)
+                                           stage-model
+                                             (factory-worker-setting
+                                               (load (field worker model))
+                                               model)
+                                           stage-reasoning
+                                             (factory-worker-setting
+                                               (load (field worker reasoning))
+                                               "medium")]
+                                       (if (< (default-runtime-provider-factory-prepare!
+                                                provider-factory
+                                                stage-provider
+                                                allocator)
+                                              0)
+                                           (store! result 70)
+                                           (match (resolve-runtime-provider provider-factory
+                                                                            allocator
+                                                                            stage-provider)
+                                             (None [] (store! result 64))
+                                             (Some [provider]
+                                                   (store! result
+                                                           (run-factory-stage-with-commands
+                                                             allocator
+                                                             provider
+                                                             refreshed
+                                                             worker
+                                                             worker-status
+                                                             workflow-state
+                                                             (load stage)
+                                                             (load invocation)
+                                                             factory-id
+                                                             workspace
+                                                             stage-provider
+                                                             stage-model
+                                                             stage-reasoning
+                                                             emitter)))))
+                                       (when (= (load result) 0)
+                                         (store! invocation (+ (load invocation) 1))
+                                         (factory-apply-workflow-decision! allocator
+                                                                           (load (field definition directory))
+                                                                           workflow-state
+                                                                           (mut stage)
+                                                                           (mut finished)
+                                                                           (mut result))))))))))
+    (when (= (load result) 0)
+      (match (load-factory-definition allocator (load (field definition directory)))
+        (FactoryInvalid [message] (store! result 65))
+        (FactoryLoaded [final-definition-value]
+                       (let [final-definition final-definition-value]
+                         (store! result
+                                 (run-factory-commands allocator
+                                                       (load (field final-definition after-commands))
+                                                       "after-flow"
+                                                       (load invocation)
+                                                       factory-id
+                                                       "factory"
+                                                       workspace
+                                                       provider-name
+                                                       model
+                                                       emitter)))))
+      0)
+    (emit-event emitter
+                (now-ms)
+                (if (= (load result) 0) (FactoryRunCompleted) (FactoryRunFailed))
+                factory-id
+                "factory"
+                ""
+                provider-name
+                model
+                (json-integer allocator (load result)))
+    (default-runtime-provider-factory-close! provider-factory)
+    (load result)))

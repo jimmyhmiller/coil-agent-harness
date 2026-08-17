@@ -144,19 +144,17 @@
                       (anthropic-messages allocator request))
     (json-put-string! (mut thinking)
                       "type"
-                      (match-else (load (field request reasoning))
-                                  (ReasoningNone [] "disabled")
-                                  (_ (if oauth "adaptive" "enabled"))))
-    (when (not (match-else (load (field request reasoning))
-                           (ReasoningNone [] true)
-                           (_ false)))
+                      (if (str-eq (load (field request reasoning)) "none")
+                          "disabled"
+                          (if oauth "adaptive" "enabled")))
+    (when (not (str-eq (load (field request reasoning)) "none"))
       (when (not oauth)
         (json-object-put! (mut thinking) "budget_tokens" (json-integer allocator 1024))
         0)
       (let [(mut output-config) (json-object allocator)]
         (json-put-string! (mut output-config)
                           "effort"
-                          (reasoning-effort-name (load (field request reasoning))))
+                          (load (field request reasoning)))
         (json-object-put! (mut body) "output_config" (load output-config)))
       0)
     (json-object-put! (mut body) "thinking" (load thinking))
@@ -190,6 +188,7 @@
     (store! (field usage reasoning-tokens) 0)
     (store! (field usage cached-input-tokens)
             (json-number-i64 (json-get wire "cache_read_input_tokens")))
+    (store! (field usage cache-write-tokens) 0)
     (load usage)))
 
 (defn anthropic-parse-response [(allocator (ptr Allocator))

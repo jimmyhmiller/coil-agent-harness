@@ -1,9 +1,12 @@
 (module harness-bash-tool-test)
 
 (import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-bash-tool" :use *)
+(import "harness-filesystem-tools" :use *)
 (import "harness-json" :use *)
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
@@ -67,3 +70,103 @@
                                  (_ false)))
              (assert (str-eq (load (field result error)) "command cancelled")))
            (cancellation-token-close! cancellation)))
+
+(deftest bash-honors-an-optional-shorter-timeout
+         (let [allocator (malloc-allocator)
+               tool (alloc/stack BashTool)
+               call (alloc/stack ToolCall)
+               context (alloc/stack ToolExecutionContext)]
+           (store! (field tool cwd) ".")
+           (store! call (bash-call allocator "bash-short-timeout" "sleep 1"))
+           (let [(mut arguments) (load (field call arguments))]
+             (json-object-put! (mut arguments) "timeout_ms" (json-integer allocator 20))
+             (store! (field call arguments) (load arguments)))
+           (store! (field context run-id) "bash-run")
+           (store! (field context cancellation) (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [result (execute-bash tool call context allocator)
+                 output (load (field result output))]
+             (assert (match-else (load (field result status))
+                                 (ToolErrored [] true)
+                                 (_ false)))
+             (assert (match (json-bool-value (json-get output "timed_out"))
+                       (Some [value] value)
+                       (None [] false))))))
+
+(deftest bash-schema-documents-the-optional-default-timeout
+         (let [allocator (malloc-allocator)
+               schema (bash-schema allocator)
+               timeout-schema (json-get (json-get schema "properties") "timeout_ms")]
+           (assert (= (json-number-i64 (json-get timeout-schema "default")) 120000))
+           (assert (= (json-number-i64 (json-get timeout-schema "minimum")) 1))
+           (assert (not (json-has-key? timeout-schema "maximum")))
+           (assert (not (match (json-array-items (json-get schema "required"))
+                          (Some [items] (> (al-len [Json] (load items)) 1))
+                          (None [] true))))))
+
+(deftest bash-spills-complete-large-output-before-returning-a-preview
+         (let [allocator (malloc-allocator)
+               tool (alloc/stack BashTool)
+               call (alloc/stack ToolCall)
+               context (alloc/stack ToolExecutionContext)]
+           (store! (field tool cwd) ".")
+           (store! call
+                   (bash-call allocator
+                              "bash-large-output"
+                              "yes x | head -c 9000"))
+           (store! (field context cancellation)
+                   (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [result (execute-bash tool call context allocator)
+                 output (load (field result output))]
+             (assert (match (json-bool-value (json-get output "stdout_truncated"))
+                       (Some [value] value)
+                       (None [] false)))
+             (assert (match (json-string-at output "stdout")
+                       (Some [value] (= (slice-len [u8] value) 8192))
+                       (None [] false)))
+             (assert (match (json-string-at output "stdout_artifact")
+                       (Some [value]
+                             (str-eq value
+                                     ".factory-artifacts/tool-output/bash-large-output.stdout"))
+                       (None [] false)))
+             (match (bounded-read-file allocator
+                                       ".factory-artifacts/tool-output/bash-large-output.stdout")
+               (BoundedReadFailed [message] (assert false))
+               (BoundedReadOk [bytes truncated]
+                              (do
+                                (assert (not truncated))
+                                (assert-eq (slice-len [u8] bytes) 9000)))))))
+
+(deftest bash-keeps-binary-bytes-in-artifact-not-model-output
+         (let [allocator (malloc-allocator)
+               tool (alloc/stack BashTool)
+               call (alloc/stack ToolCall)
+               context (alloc/stack ToolExecutionContext)]
+           (store! (field tool cwd) ".")
+           (store! call
+                   (bash-call allocator
+                              "bash-binary-output"
+                              "printf '\\377\\000text'"))
+           (store! (field context cancellation) (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [result (execute-bash tool call context allocator)
+                 output (load (field result output))]
+             (assert (match (json-bool-value (json-get output "stdout_binary"))
+                       (Some [value] value)
+                       (None [] false)))
+             (assert (match (json-string-at output "stdout")
+                       (Some [value]
+                             (str-eq value
+                                     "[stdout contained binary or invalid UTF-8; complete bytes are in stdout_artifact]"))
+                       (None [] false)))
+             (match (bounded-read-file allocator
+                                       ".factory-artifacts/tool-output/bash-binary-output.stdout")
+               (BoundedReadFailed [message] (assert false))
+               (BoundedReadOk [bytes truncated]
+                              (do
+                                (assert (not truncated))
+                                (assert-eq (slice-len [u8] bytes) 6)))))))

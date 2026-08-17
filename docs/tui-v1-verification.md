@@ -46,7 +46,7 @@ CJK, emoji, malformed UTF-8, tabs, newlines, and terminal controls.
 
 ## Interaction and lifecycle coverage
 
-`scripts/tui_pty_test.py` exercises editing, bracketed paste, resize, interruption,
+The native TUI tests exercise editing, bracketed paste, resize, interruption,
 submission, ANSI styling, and final termios restoration. Separate PTYs cover SIGTERM
 and Ctrl-Z suspend/resume.
 
@@ -62,7 +62,7 @@ reject ANSI bytes. `NO_COLOR`, explicit color, compact, verbose, reduced-motion,
 width, and locale-derived Unicode policy have unit coverage. Screen-reader mode uses
 ASCII labels and forces motion and interactive redraw off.
 
-`scripts/tui_compat_pty_test.py` runs the same bounded inline protocol with
+The compatibility coverage runs the same bounded inline protocol with
 `xterm-256color`, `xterm-kitty`, `alacritty`, `wezterm`, `ghostty`,
 `screen-256color`, `tmux-256color`, and `vt100`. It verifies normal-buffer operation,
 paste-mode pairing, and termios restoration. SSH uses the remote terminal's `TERM`

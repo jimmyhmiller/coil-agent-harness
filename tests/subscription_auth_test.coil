@@ -1,0 +1,252 @@
+(module harness-subscription-auth-test)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coil.thread" :use *)
+(import "harness-http-listener" :use *)
+(import "harness-json" :use *)
+(import "harness-oauth" :use *)
+(import "harness-subscription-auth" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
+
+(extern close :cc c [i32] (-> i32))
+
+(defstruct OAuthTokenServerJob
+  [(allocator (ptr Allocator))
+   (listener (ptr HttpListener))
+   (body (ptr (slice u8)))])
+
+(defn oauth-token-server-thread [(opaque (ptr i8))] (-> (ptr i8))
+  (let [job (cast (ptr OAuthTokenServerJob) opaque)
+        client (http-listener-accept (load (field job listener)))]
+    (when (>= client 0)
+      (match (read-accepted-http (load (field job allocator)) client)
+        (HttpRequestRejected [status]
+                             (write-http-response (load (field job allocator)) client 400 "{}"))
+        (HttpRequestAccepted [request]
+                             (let [accepted request]
+                               (store! (load (field job body))
+                                       (load (field accepted body)))
+                               (write-http-response (load (field job allocator))
+                                                    client
+                                                    200
+                                                    "{\"access_token\":\"native-access\",\"refresh_token\":\"native-refresh\",\"expires_in\":3600}"))))
+      (close (cast i32 client))
+      0)
+    (cast (ptr i8) 0)))
+
+(defn test-jwt [(allocator (ptr Allocator)) (expires-seconds i64)] (-> (slice u8))
+  (let [(mut claims) (json-object allocator)]
+    (json-object-put! (mut claims) "exp" (json-integer allocator expires-seconds))
+    (json-put-string! (mut claims) "chatgpt_account_id" "account-test")
+    (concat-or-empty allocator
+                     "e30."
+                     (concat-or-empty allocator
+                                      (oauth-base64-encode allocator
+                                                           (json-stringify allocator (load claims))
+                                                           true
+                                                           false)
+                                      ".sig"))))
+
+(deftest native-codex-credentials-load-from-secure-json
+         (let [allocator (malloc-allocator)
+               directory
+                 (concat-or-empty allocator
+                                  "/tmp/harness-native-codex-auth-"
+                                  (json-stringify allocator (json-integer allocator (now-ms))))]
+           (os/env-set allocator "HARNESS_AUTH_DIR" directory true)
+           (os/env-unset allocator "HARNESS_CODEX_ACCESS_TOKEN")
+           (let [(mut tokens) (json-object allocator)
+                 (mut document) (json-object allocator)
+                 access (test-jwt allocator (+ (/ (now-ms) 1000) 3600))]
+             (json-put-string! (mut tokens) "access_token" access)
+             (json-put-string! (mut tokens) "refresh_token" "refresh-test")
+             (json-put-string! (mut tokens) "id_token" access)
+             (json-object-put! (mut document) "tokens" (load tokens))
+             (assert (auth-write-secure-json allocator (codex-harness-auth-path allocator) (load document)))
+             (assert (match (codex-load-native allocator)
+                       (CodexCredentialsFailed [message] false)
+                       (CodexCredentialsLoaded [loaded]
+                                               (let [credentials loaded]
+                                                 (and (str-eq (load (field credentials access-token)) access)
+                                                      (str-eq (load (field credentials account-id))
+                                                              "account-test")))))))
+           (os/env-unset allocator "HARNESS_AUTH_DIR")))
+
+(deftest native-claude-credentials-load-without-refreshing-valid-token
+         (let [allocator (malloc-allocator)
+               directory
+                 (concat-or-empty allocator
+                                  "/tmp/harness-native-claude-auth-"
+                                  (json-stringify allocator (json-integer allocator (now-ms))))]
+           (os/env-set allocator "HARNESS_AUTH_DIR" directory true)
+           (os/env-unset allocator "ANTHROPIC_OAUTH_TOKEN")
+           (os/env-unset allocator "ANTHROPIC_AUTH_TOKEN")
+           (let [(mut credential) (json-object allocator)
+                 (mut document) (json-object allocator)]
+             (json-put-string! (mut credential) "access" "claude-access")
+             (json-put-string! (mut credential) "refresh" "claude-refresh")
+             (json-object-put! (mut credential) "expires" (json-integer allocator (+ (now-ms) 3600000)))
+             (json-object-put! (mut document) "anthropic" (load credential))
+             (assert (auth-write-secure-json allocator (claude-auth-path allocator) (load document)))
+             (assert (match (claude-load-native allocator)
+                       (ClaudeCredentialsFailed [message] false)
+                       (ClaudeCredentialsLoaded [loaded]
+                                                (let [credentials loaded]
+                                                  (str-eq (load (field credentials access-token))
+                                                          "claude-access"))))))
+           (os/env-unset allocator "HARNESS_AUTH_DIR")))
+
+(deftest codex-refresh-window-is-derived-from-native-jwt-claims
+         (let [allocator (malloc-allocator)
+               now-seconds (/ (now-ms) 1000)]
+           (assert (not (codex-token-expiring? allocator
+                                               (test-jwt allocator (+ now-seconds 3600)))))
+           (assert (codex-token-expiring? allocator
+                                          (test-jwt allocator (+ now-seconds 60))))
+           (assert (codex-token-expiring? allocator "not-a-jwt"))))
+
+(deftest oauth-form-builder-percent-encodes-token-fields
+         (let [allocator (malloc-allocator)
+               (mut form) (sb-new allocator)]
+           (auth-form-pair! allocator (mut form) "code" "a+b/c=")
+           (auth-form-pair! allocator (mut form) "scope" "openid profile")
+           (assert-eq (sb-finish! (mut form))
+                      "code=a%2Bb%2Fc%3D&scope=openid%20profile")))
+
+(deftest native-token-exchange-posts-and-parses-json-without-a-helper-process
+         (let [allocator (malloc-allocator)
+               listener (box allocator HttpListener (zeroed HttpListener))
+               received (box allocator (slice u8) "")
+               job (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
+               worker (stack Thread)]
+           (match (http-listener-open allocator 0)
+             (ListenerOpenFailed [message] (assert false))
+             (ListenerOpened [opened] (store! listener opened)))
+           (store! (field job allocator) allocator)
+           (store! (field job listener) listener)
+           (store! (field job body) received)
+           (assert (= (thread-spawn worker
+                                    (fnptr-of oauth-token-server-thread)
+                                    (cast (ptr i8) job))
+                      0))
+           (let [port (load (field listener port))
+                 url
+                   (concat-or-empty allocator
+                                    "http://127.0.0.1:"
+                                    (json-stringify allocator (json-integer allocator port)))
+                 response
+                   (auth-http-token allocator
+                                    url
+                                    "grant_type=refresh_token&refresh_token=abc"
+                                    "application/x-www-form-urlencoded")]
+             (thread-join worker)
+             (http-listener-close! listener)
+             (assert-eq (match (json-string-at response "access_token")
+                          (Some [value] value)
+                          (None [] ""))
+                        "native-access")
+             (assert-eq (load received)
+                        "grant_type=refresh_token&refresh_token=abc"))))
+
+(deftest codex-native-login-builds-the-documented-pkce-contract
+         (let [allocator (malloc-allocator)
+               verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+               redirect "http://localhost:1455/auth/callback"
+               url (codex-authorize-url allocator verifier "state-value" redirect)
+               form (codex-code-form allocator "code/value" verifier redirect)]
+           (assert-eq (oauth-query-value allocator url "code_challenge")
+                      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+           (assert-eq (oauth-query-value allocator url "state") "state-value")
+           (assert-eq (oauth-query-value allocator url "redirect_uri") redirect)
+           (assert-eq (oauth-query-value allocator (concat-or-empty allocator "?" form) "code")
+                      "code/value")
+           (assert-eq (oauth-query-value allocator (concat-or-empty allocator "?" form) "code_verifier")
+                      verifier)))
+
+(deftest claude-native-login-builds-the-documented-pkce-contract
+         (let [allocator (malloc-allocator)
+               verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+               redirect "http://localhost:53692/callback"
+               url (claude-authorize-url allocator verifier redirect)
+               body (claude-code-body allocator "code/value" verifier redirect)]
+           (assert-eq (oauth-query-value allocator url "code_challenge")
+                      "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+           (assert-eq (oauth-query-value allocator url "state") verifier)
+           (assert-eq (oauth-query-value allocator url "redirect_uri") redirect)
+           (assert-eq (match (json-string-at body "code")
+                        (Some [value] value)
+                        (None [] ""))
+                      "code/value")
+           (assert-eq (match (json-string-at body "code_verifier")
+                        (Some [value] value)
+                        (None [] ""))
+                      verifier)))
+
+(deftest native-provider-refreshes-use-the-shared-token-transport
+         (let [allocator (malloc-allocator)
+               listener (box allocator HttpListener (zeroed HttpListener))
+               received (box allocator (slice u8) "")
+               job (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
+               worker (stack Thread)]
+           (match (http-listener-open allocator 0)
+             (ListenerOpenFailed [message] (assert false))
+             (ListenerOpened [opened] (store! listener opened)))
+           (store! (field job allocator) allocator)
+           (store! (field job listener) listener)
+           (store! (field job body) received)
+           (assert (= (thread-spawn worker (fnptr-of oauth-token-server-thread) (cast (ptr i8) job)) 0))
+           (let [(mut tokens) (json-object allocator)
+                 endpoint
+                   (concat-or-empty allocator
+                                    "http://127.0.0.1:"
+                                    (json-stringify allocator
+                                                    (json-integer allocator
+                                                                  (load (field listener port)))))]
+             (json-put-string! (mut tokens) "refresh_token" "old-codex-refresh")
+             (let [response (codex-refresh-native-at allocator (load tokens) endpoint)]
+               (thread-join worker)
+               (http-listener-close! listener)
+               (assert-eq (match (json-string-at response "access_token")
+                            (Some [value] value)
+                            (None [] ""))
+                          "native-access")
+               (assert-eq (match (json-string-at response "refresh_token")
+                            (Some [value] value)
+                            (None [] ""))
+                          "native-refresh")))
+           (let [listener-two (box allocator HttpListener (zeroed HttpListener))
+                 received-two (box allocator (slice u8) "")
+                 job-two (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
+                 worker-two (stack Thread)]
+             (match (http-listener-open allocator 0)
+               (ListenerOpenFailed [message] (assert false))
+               (ListenerOpened [opened] (store! listener-two opened)))
+             (store! (field job-two allocator) allocator)
+             (store! (field job-two listener) listener-two)
+             (store! (field job-two body) received-two)
+             (assert (= (thread-spawn worker-two
+                                      (fnptr-of oauth-token-server-thread)
+                                      (cast (ptr i8) job-two))
+                        0))
+             (let [endpoint
+                     (concat-or-empty allocator
+                                      "http://127.0.0.1:"
+                                      (json-stringify allocator
+                                                      (json-integer allocator
+                                                                    (load (field listener-two port)))))
+                   response (claude-refresh-native-at allocator "old-claude-refresh" endpoint)]
+               (thread-join worker-two)
+               (http-listener-close! listener-two)
+               (assert-eq (match (json-string-at response "access_token")
+                            (Some [value] value)
+                            (None [] ""))
+                          "native-access")
+               (assert-eq (match (json-string-at response "refresh_token")
+                            (Some [value] value)
+                            (None [] ""))
+                          "native-refresh")))))

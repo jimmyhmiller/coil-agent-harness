@@ -1,66 +1,24 @@
 (module claude-agent)
 
 (import "coil.alloc" :as alloc :use *)
-(import "coil.io" :as io)
-(import "coil.match" :use *)
-(import "coil.os" :as os)
-(import "coil.result" :use *)
 (import "coil.slice" :use *)
-(import "coil.subprocess" :as subprocess)
 (import "harness-event" :use *)
 (import "harness-model" :use *)
+(import "harness-subscription-auth" :as subscription)
 (import "harness-http" :use *)
 (import "deepseek-anthropic" :use *)
 (import "provider-common" :use *)
 
 ;; Anthropic subscription traffic uses the native Messages API and the same
-;; provider-neutral tool loop as every other HTTP adapter. A small broker owns
-;; OAuth login, storage, locking, and refresh; tokens never enter CLI arguments.
+;; provider-neutral tool loop as every other HTTP adapter. Credentials are read
+;; directly from the provider's configured environment variables.
 (defstruct ClaudeAnthropicContext [(messages DeepSeekAnthropicContext)])
 
-(defn claude-oauth-helper [(allocator (ptr Allocator))] (-> (slice u8))
-  (match (os/env-get allocator "HARNESS_CLAUDE_OAUTH_HELPER")
-    (Ok [found]
-        (match found
-          (Some [value] (os/owned-string-slice value))
-          (None [] "scripts/claude_oauth.py")))
-    (Err [failure] "scripts/claude_oauth.py")))
-
-(defn claude-oauth-command [(allocator (ptr Allocator))
-                            (action (slice u8))
-                            (capture bool)] (-> (slice u8))
-  (let [child (alloc/stack subprocess/Child)
-        args (alloc/stack (array (slice u8) 2))]
-    (store! (index args 0) (claude-oauth-helper allocator))
-    (store! (index args 1) action)
-    (match (subprocess/spawn allocator
-                             child
-                             "python3"
-                             (slice-new [(slice u8)] (index args 0) 2)
-                             (subprocess/inherit-stdio)
-                             (if capture (subprocess/pipe-stdio) (subprocess/inherit-stdio))
-                             (subprocess/inherit-stdio))
-      (Err [failure] "")
-      (Ok [spawned]
-          (let [(mut value) ""]
-            (when capture
-              (let [reader (alloc/stack io/Reader)]
-                (match (subprocess/child-stdout-reader reader child)
-                  (Some [input]
-                        (match (io/read-line-alloc allocator input 65536)
-                          (Ok [owned] (store! value (io/owned-bytes-slice owned)))
-                          (Err [failure] 0)))
-                  (None [] 0)))
-              0)
-            (subprocess/child-wait child)
-            (subprocess/child-close child)
-            (load value))))))
-
 (defn claude-login [(allocator (ptr Allocator))] (-> i64)
-  (if (> (slice-len [u8] (claude-oauth-command allocator "login" true)) 0) 0 1))
+  (subscription/claude-login-native allocator))
 
 (defn claude-logout [(allocator (ptr Allocator))] (-> i64)
-  (if (> (slice-len [u8] (claude-oauth-command allocator "logout" true)) 0) 0 1))
+  (subscription/claude-logout-native allocator))
 
 (defn claude-anthropic-context-default [(allocator (ptr Allocator))] (-> ClaudeAnthropicContext)
   (let [context (alloc/stack ClaudeAnthropicContext)
@@ -85,14 +43,14 @@
                   (emitter (ptr EventEmitter))
                   (allocator (ptr Allocator))]
                  (-> ModelResult)
-                 (let [token (claude-oauth-command allocator "token" true)]
-                   (if (= (slice-len [u8] token) 0)
-                       (model-failure "claude-anthropic"
-                                      0
-                                      "Claude is not authenticated; run harness login claude")
-                       (do
-                         (store! (field (field self messages) credential-value) token)
-                         (deepseek-anthropic-execute-stream (field self messages)
-                                                            request
-                                                            emitter
-                                                            allocator))))))
+                 (match (subscription/claude-load-native allocator)
+                   (subscription/ClaudeCredentialsFailed [message]
+                                                         (model-failure "claude-anthropic" 0 message))
+                   (subscription/ClaudeCredentialsLoaded [loaded]
+                                                         (let [credentials loaded]
+                                                           (store! (field (field self messages) credential-value)
+                                                                   (load (field credentials access-token)))
+                                                           (deepseek-anthropic-execute-stream (field self messages)
+                                                                                              request
+                                                                                              emitter
+                                                                                              allocator))))))

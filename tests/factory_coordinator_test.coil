@@ -1,0 +1,129 @@
+(module harness-factory-coordinator-test)
+
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "harness-factory-coordinator" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-workflow" :use *)
+(import "harness-event" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+
+(deftest worker-settings-override-or-inherit-without-validation
+         (assert-eq (factory-worker-setting "" "run-default") "run-default")
+         (assert-eq (factory-worker-setting "provider-future-level" "medium")
+                    "provider-future-level"))
+
+(deftest factory-request-preserves-opaque-reasoning
+         (let [allocator (malloc-allocator)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               request (stack ModelRequest)]
+           (store! request
+                   (factory-request allocator
+                                    registry
+                                    "opaque-reasoning-test"
+                                    "future-model"
+                                    "provider-future-level"
+                                    "test"))
+           (assert-eq (load (field request model)) "future-model")
+           (assert-eq (load (field request reasoning)) "provider-future-level")))
+
+(deftest factory-tool-groups-control-the-registry
+         (let [allocator (malloc-allocator)]
+           (match (load-factory-definition allocator "factories/snake")
+             (FactoryInvalid [message] (assert false))
+             (FactoryLoaded [definition]
+                            (let [(mut registry) (tool-registry-new allocator)
+                                  loaded definition]
+                              (factory-register-configured-tools! (mut registry) allocator "." loaded)
+                              (assert (match-else (tool-find (load registry) "read_text_file")
+                                                  (Some [tool] true)
+                                                  (_ false)))
+                              (assert (match-else (tool-find (load registry) "search_text")
+                                                  (Some [tool] true)
+                                                  (_ false)))
+                              (assert (match-else (tool-find (load registry) "bash")
+                                                  (Some [tool] true)
+                                                  (_ false))))))))
+
+(deftest workflow-decisions-can-complete-skip-and-jump-backward
+         (let [allocator (malloc-allocator)
+               state
+                 (box allocator
+                      FactoryWorkflowState
+                      (factory-workflow-state-new allocator "factories/architecture-3"))
+               stage (box allocator i64 0)
+               finished (box allocator bool false)
+               result (box allocator i64 0)]
+           ;; Default traversal advances one step.
+           (factory-apply-workflow-decision! allocator
+                                             "factories/architecture-3"
+                                             state
+                                             stage
+                                             finished
+                                             result)
+           (assert (= (load stage) 1))
+           ;; A named transition can skip directly to verify.
+           (store! (field state decision) 2)
+           (store! (field state target) "03-verify.md")
+           (factory-apply-workflow-decision! allocator
+                                             "factories/architecture-3"
+                                             state
+                                             stage
+                                             finished
+                                             result)
+           (assert (= (load stage) 2))
+           ;; The same mechanism can jump backward.
+           (store! (field state target) "01-architect.md")
+           (factory-apply-workflow-decision! allocator
+                                             "factories/architecture-3"
+                                             state
+                                             stage
+                                             finished
+                                             result)
+           (assert (= (load stage) 0))
+           ;; Completion short-circuits successfully.
+           (store! (field state decision) 1)
+           (factory-apply-workflow-decision! allocator
+                                             "factories/architecture-3"
+                                             state
+                                             stage
+                                             finished
+                                             result)
+           (assert (load finished))
+           (assert (= (load result) 0))))
+
+(deftest factory-commands-run-and-stop-on-first-failure
+         (let [allocator (malloc-allocator)
+               sink (box allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box allocator i64 0)
+               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
+               (mut successful) (al-new [(slice u8)] allocator)
+               (mut failing) (al-new [(slice u8)] allocator)]
+           (al-push! [(slice u8)] (mut successful) "true")
+           (assert (= (run-factory-commands allocator
+                                            (load successful)
+                                            "before-flow"
+                                            0
+                                            "test-run"
+                                            ""
+                                            "."
+                                            "test"
+                                            "test"
+                                            emitter)
+                      0))
+           (al-push! [(slice u8)] (mut failing) "false")
+           (al-push! [(slice u8)] (mut failing) "exit 99")
+           (assert (= (run-factory-commands allocator
+                                            (load failing)
+                                            "after-flow"
+                                            0
+                                            "test-run"
+                                            ""
+                                            "."
+                                            "test"
+                                            "test"
+                                            emitter)
+                      1))))

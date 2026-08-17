@@ -168,10 +168,10 @@
 (deftest a-name-is-trimmed-and-stripped-of-control-characters
          (let [allocator (malloc-allocator)]
            (assert (str-eq (cc-sanitize-name allocator "  spaced  ") "spaced"))
-           (assert (str-eq (cc-sanitize-name allocator "a\x07b") "ab"))
+           (assert (str-eq (cc-sanitize-name allocator "a\x7;b") "ab"))
            ;; U+200B ZERO WIDTH SPACE and U+FEFF, both Cf.
-           (assert (str-eq (cc-sanitize-name allocator "a\xE2\x80\x8Bb") "ab"))
-           (assert (str-eq (cc-sanitize-name allocator "a\xEF\xBB\xBFb") "ab"))))
+           (assert (str-eq (cc-sanitize-name allocator "a\x200B;b") "ab"))
+           (assert (str-eq (cc-sanitize-name allocator "a\xFEFF;b") "ab"))))
 
 ;; A name that sanitizes away entirely must be omitted, not rendered empty:
 ;; `from-name=""` fails the receiver's pattern, which requires one character.

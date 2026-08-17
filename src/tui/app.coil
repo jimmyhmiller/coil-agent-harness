@@ -1009,8 +1009,8 @@
                                                                                                                label)))))
                                                                         (ChoiceCancelled []
                                                                                          (store! effort
-                                                                                                 (reasoning-effort-name (load (field choice
-                                                                                                                                     default-effort)))))
+                                                                                                 (load (field choice
+                                                                                                              default-effort))))
                                                                         (ChoiceClosed [] (store! done true))
                                                                         (ChoiceFailed [] 0)))
                                                                   (when (str-eq (load provider) "codex")

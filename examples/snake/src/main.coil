@@ -1,0 +1,8 @@
+(module snake)
+
+(import "std/io" (println print))
+
+(defn main [] (-> i64)
+  (println "Snake")
+  (println "Use W A S D to move; Q to quit.")
+  0)

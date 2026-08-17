@@ -1,0 +1,17 @@
+{
+  "name": "coil-snake-issue",
+  "goal": "Implement the supplied change-request context in an existing Coil Snake workspace. Satisfy its acceptance behavior, preserve unrelated behavior, update focused tests and documentation, and leave the native application building and the complete test suite passing.",
+  "context": [
+    "../snake/invariants.md"
+  ],
+  "tools": {
+    "groups": [
+      "filesystem",
+      "bash"
+    ]
+  },
+  "workers": [
+    "01-issue-implementer.md",
+    "02-issue-verifier.md"
+  ]
+}

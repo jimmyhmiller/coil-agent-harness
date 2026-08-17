@@ -1,0 +1,6 @@
+(module snake)
+
+(import "std/io" (println))
+
+(defn main [] (-> i64)
+  0)

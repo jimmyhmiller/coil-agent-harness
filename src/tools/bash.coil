@@ -4,28 +4,78 @@
 (import "coil.cancellation" :as native-cancellation)
 (import "coil.match" :use *)
 (import "coil.slice" :use *)
+(import "coil.str" :use *)
 (import "coil.subprocess" :as subprocess)
 (import "coil.time" :as time)
 (import "harness-json" :use *)
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
+(import "provider-common" :use *)
 
-(const BASH_CAPTURE_LIMIT 1048576)
+;; Tool output becomes durable model history. Sixteen KiB per stream is enough
+;; for compiler diagnostics while preventing broad discovery commands from
+;; polluting every later turn in the conversation.
+(const BASH_CAPTURE_LIMIT 8192)
 (const BASH_TIMEOUT_MS 120000)
 
+(const BASH_SPOOL_SCRIPT
+       "mkdir -p .factory-artifacts/tool-output || exit 74; /bin/bash -lc \"$1\" >\"$2\" 2>\"$3\"; status=$?; head -c 8193 \"$2\"; head -c 8193 \"$3\" >&2; exit $status")
+
 (defstruct BashTool [(cwd (slice u8))])
+
+;; Model and journal strings must be UTF-8. Process pipes are byte streams, so a
+;; command such as `cat executable` may return arbitrary bytes. Keep those bytes
+;; in the artifact and replace only the inline preview with a useful explanation.
+(defn bash-text-output? [(value (slice u8))] (-> bool)
+  (let [(mut at) 0
+        count (slice-len [u8] value)
+        (mut valid) true]
+    (loop (if (or (not (load valid)) (>= (load at) count))
+              (break)
+              (let [b0 (cast i64 (slice-get [u8] value (load at)))
+                    (mut width) 1]
+                (cond (= b0 0) (store! valid false)
+                      (< b0 128) 0
+                      (and (>= b0 194) (<= b0 223)) (store! width 2)
+                      (and (>= b0 224) (<= b0 239)) (store! width 3)
+                      (and (>= b0 240) (<= b0 244)) (store! width 4)
+                      :else (store! valid false))
+                (when (and (load valid) (> (load width) 1))
+                  (when (> (+ (load at) (load width)) count)
+                    (store! valid false)
+                    0)
+                  (let [(mut offset) 1]
+                    (loop (if (or (not (load valid)) (>= (load offset) (load width)))
+                              (break)
+                              (let [next (cast i64 (slice-get [u8] value (+ (load at) (load offset))))]
+                                (if (or (< next 128) (> next 191))
+                                    (store! valid false)
+                                    (store! offset (+ (load offset) 1)))))))
+                  0)
+                (when (load valid)
+                  (store! at (+ (load at) (load width)))
+                  0))))
+    (load valid)))
+
+(defn bash-inline-output [(value (slice u8)) (stream (slice u8))] (-> (slice u8))
+  (if (bash-text-output? value)
+      value
+      (if (str-eq stream "stdout")
+          "[stdout contained binary or invalid UTF-8; complete bytes are in stdout_artifact]"
+          "[stderr contained binary or invalid UTF-8; complete bytes are in stderr_artifact]")))
 
 (defn bash-error [(call (ptr ToolCall)) (message (slice u8))] (-> ToolResult)
   (let [(mut result) (tool-result-empty (load (field call id)) (ToolErrored))]
     (store! (field result error) message)
     (load result)))
 
-(defn bash-deadline [(context (ptr ToolExecutionContext))] (-> (Option time/Instant))
+(defn bash-deadline [(context (ptr ToolExecutionContext))
+                     (timeout-ms i64)] (-> (Option time/Instant))
   (let [absolute (load (field context tool-deadline-monotonic-ms))
         remaining
           (if (> absolute 0)
-              (deadline-remaining-ms absolute BASH_TIMEOUT_MS)
-              BASH_TIMEOUT_MS)]
+              (deadline-remaining-ms absolute timeout-ms)
+              timeout-ms)]
     (match (time/duration-millis remaining)
       (Err [failure] (None [time/Instant]))
       (Ok [duration]
@@ -45,21 +95,48 @@
   (let [command
           (match (json-string-at (load (field call arguments)) "command")
             (Some [value] value)
-            (None [] ""))]
+            (None [] ""))
+        supplied-timeout (json-number-i64 (json-get (load (field call arguments)) "timeout_ms"))
+        timeout-ms
+          (if (json-has-key? (load (field call arguments)) "timeout_ms")
+              supplied-timeout
+              BASH_TIMEOUT_MS)]
     (cond (= (slice-len [u8] command) 0) (bash-error call "command must not be empty")
+          (<= timeout-ms 0) (bash-error call "timeout_ms must be positive")
+          (or (str-eq (load (field call id)) "..")
+              (match (str-find (load (field call id)) "/")
+                (Some [position] true)
+                (None [] false)))
+            (bash-error call "tool call id cannot be used as an artifact name")
           (cancellation-requested? (load (field context cancellation))) (bash-error call "command cancelled")
           :else
-            (let [args (alloc/stack (array (slice u8) 2))
+            (let [stdout-artifact
+                    (concat-or-empty allocator
+                                     ".factory-artifacts/tool-output/"
+                                     (concat-or-empty allocator
+                                                      (load (field call id))
+                                                      ".stdout"))
+                  stderr-artifact
+                    (concat-or-empty allocator
+                                     ".factory-artifacts/tool-output/"
+                                     (concat-or-empty allocator
+                                                      (load (field call id))
+                                                      ".stderr"))
+                  args (alloc/stack (array (slice u8) 6))
                   run-result (alloc/stack subprocess/RunResult)]
-              (store! (index args 0) "-lc")
-              (store! (index args 1) command)
+              (store! (index args 0) "-c")
+              (store! (index args 1) BASH_SPOOL_SCRIPT)
+              (store! (index args 2) "harness-bash")
+              (store! (index args 3) command)
+              (store! (index args 4) stdout-artifact)
+              (store! (index args 5) stderr-artifact)
               (let [options
                       (subprocess/run-options "/bin/bash"
-                                              (slice-new [(slice u8)] (index args 0) 2)
+                                              (slice-new [(slice u8)] (index args 0) 6)
                                               (load (field self cwd))
                                               BASH_CAPTURE_LIMIT
                                               BASH_CAPTURE_LIMIT
-                                              (bash-deadline context)
+                                              (bash-deadline context timeout-ms)
                                               (if (= (load (field context cancellation))
                                                      (cast (ptr CancellationToken) 0))
                                                   (cast (ptr native-cancellation/Cancellation) 0)
@@ -77,11 +154,21 @@
                         (json-object-put! (mut output)
                                           "stdout"
                                           (JsonString (json-copy-string allocator
-                                                                        (load (field completed stdout)))))
+                                                                        (bash-inline-output (load (field completed
+                                                                                                         stdout))
+                                                                                            "stdout"))))
                         (json-object-put! (mut output)
                                           "stderr"
                                           (JsonString (json-copy-string allocator
-                                                                        (load (field completed stderr)))))
+                                                                        (bash-inline-output (load (field completed
+                                                                                                         stderr))
+                                                                                            "stderr"))))
+                        (json-object-put! (mut output)
+                                          "stdout_binary"
+                                          (JsonBool (not (bash-text-output? (load (field completed stdout))))))
+                        (json-object-put! (mut output)
+                                          "stderr_binary"
+                                          (JsonBool (not (bash-text-output? (load (field completed stderr))))))
                         (json-object-put! (mut output)
                                           "exit_code"
                                           (json-integer allocator
@@ -92,6 +179,14 @@
                         (json-object-put! (mut output)
                                           "stderr_truncated"
                                           (JsonBool (load (field completed stderr-truncated))))
+                        (json-put-string! (mut output) "stdout_artifact" stdout-artifact)
+                        (json-put-string! (mut output) "stderr_artifact" stderr-artifact)
+                        (when (or (load (field completed stdout-truncated))
+                                  (load (field completed stderr-truncated)))
+                          (json-put-string! (mut output)
+                                            "hint"
+                                            "Output exceeded the inline limit. The complete stdout and stderr were saved in the artifact paths above; inspect those files with ranged read_text_file or search_text instead of rerunning the command. If this command was reading source files in bulk, use the focused file tools instead.")
+                          0)
                         (json-object-put! (mut output)
                                           "timed_out"
                                           (JsonBool (load (field completed timed-out))))
@@ -120,6 +215,7 @@
 
 (defn bash-schema [(allocator (ptr Allocator))] (-> Json)
   (let [(mut command) (json-object allocator)
+        (mut timeout-ms) (json-object allocator)
         (mut properties) (json-object allocator)
         (mut required) (json-array allocator)
         (mut schema) (json-object allocator)]
@@ -127,7 +223,14 @@
     (json-object-put! (mut command)
                       "description"
                       (JsonString "Bash source to execute in the workspace."))
+    (json-put-string! (mut timeout-ms) "type" "integer")
+    (json-object-put! (mut timeout-ms) "minimum" (json-integer allocator 1))
+    (json-object-put! (mut timeout-ms) "default" (json-integer allocator BASH_TIMEOUT_MS))
+    (json-put-string! (mut timeout-ms)
+                      "description"
+                      "Optional command timeout in milliseconds. Defaults to 120000 (120 seconds) when omitted.")
     (json-object-put! (mut properties) "command" (load command))
+    (json-object-put! (mut properties) "timeout_ms" (load timeout-ms))
     (json-array-push! (mut required) (JsonString "command"))
     (json-object-put! (mut schema) "type" (JsonString "object"))
     (json-object-put! (mut schema) "properties" (load properties))
@@ -144,10 +247,14 @@
     (store! (field (field definition spec) description)
             "Execute a Bash command in the workspace and return bounded stdout, stderr, and exit status.")
     (store! (field (field definition spec) input-schema) (bash-schema allocator))
-    (store! (field (field definition spec) strict) true)
+    ;; timeout_ms is intentionally optional, so this cannot be an OpenAI strict
+    ;; function schema (strict requires every property to be required).
+    (store! (field (field definition spec) strict) false)
     (store! (field (field definition spec) effect) (Destructive))
     (store! (field (field definition spec) idempotent) false)
-    (store! (field (field definition spec) timeout-ms) BASH_TIMEOUT_MS)
+    ;; Bash applies its argument-aware deadline internally. A static ToolSpec
+    ;; deadline would incorrectly cap explicit values above the default.
+    (store! (field (field definition spec) timeout-ms) 0)
     (store! (field definition implementation) implementation)
     (load definition)))
 

@@ -1,0 +1,7 @@
+{
+  "name": "architecture-3",
+  "goal": "Describe the outcome this factory should produce.",
+  "context": ["context.md"],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "workers": ["01-architect.md", "02-implement.md", "03-verify.md"]
+}

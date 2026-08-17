@@ -255,6 +255,12 @@
         value
         "Be concise. Use tools when they are required by the request. When starting multiple independent asynchronous operations, emit all start calls together in one response with distinct run IDs, never retry a successful start, and register exactly one notify_async call containing the complete handle set.")))
 
+(defn runtime-command-cache-scope [(command Json)] (-> (slice u8))
+  (let [conversation-id (command-string command "conversation_id")]
+    (if (> (str-len conversation-id) 0)
+        conversation-id
+        (command-string command "run_id"))))
+
 (defn runtime-model-request [(controller (ptr RuntimeRunController))
                              (command Json)
                              (allocator (ptr Allocator))] (-> (ptr ModelRequest))
@@ -306,13 +312,11 @@
       ;; Cache routing is conversation-scoped. Sharing a provider prompt-cache
       ;; key between unrelated chats reduces prefix locality and can couple
       ;; continuation validation to the wrong conversation.
-      (json-put-string! (mut cache)
-                        "conversation_id"
-                        (command-string command "conversation_id"))
+      (json-put-string! (mut cache) "conversation_id" (runtime-command-cache-scope command))
       (json-put-string! (mut cache) "instructions" (load (field request instructions)))
       (json-put-string! (mut cache)
                         "reasoning"
-                        (reasoning-effort-name (load (field request reasoning))))
+                        (load (field request reasoning)))
       (store! (field request cache-key) (json-stringify allocator (load cache))))
     (store! (field request prompt-cache-key)
             (concat-or-empty allocator
@@ -323,8 +327,7 @@
                                                                (load (field request model))
                                                                (concat-or-empty allocator
                                                                                 "/"
-                                                                                (command-string command
-                                                                                                "conversation_id"))))))
+                                                                                (runtime-command-cache-scope command))))))
     (store! (field request max-output-tokens) 4096)
     ;; The transport timeout bounds one HTTP request. It is deliberately not the
     ;; run's deadline: when the run has none, `model-request-remaining-ms` falls

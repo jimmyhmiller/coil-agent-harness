@@ -1,0 +1,125 @@
+(module harness-factory-workspace)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.cancellation" :as native-cancellation)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coil.subprocess" :as subprocess)
+(import "coil.time" :as time)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+(import "harness-system" :use *)
+
+(defsum FactorySnapshotResult
+  (FactorySnapshotCreated [(directory (slice u8))])
+  (FactorySnapshotFailed [(message (slice u8))]))
+
+(defn initialize-workspace-repository [(allocator (ptr Allocator))
+                                       (workspace (slice u8))] (-> bool)
+  (let [args (alloc/stack (array (slice u8) 2))
+        run-result (alloc/stack subprocess/RunResult)]
+    (store! (index args 0) "init")
+    (store! (index args 1) "--quiet")
+    (let [options
+            (subprocess/run-options "/usr/bin/git"
+                                    (slice-new [(slice u8)] (index args 0) 2)
+                                    workspace
+                                    4096
+                                    4096
+                                    (None [time/Instant])
+                                    (cast (ptr native-cancellation/Cancellation) 0)
+                                    (zeroed time/Duration))]
+      (match (subprocess/run allocator run-result options)
+        (Err [failure] false)
+        (Ok [completed]
+            (let [success
+                    (match (load (field completed status))
+                      (subprocess/Exited [code] (= code 0))
+                      (subprocess/Signaled [signal] false))]
+              (subprocess/run-result-free allocator completed)
+              success))))))
+
+;; Copy the entire reusable factory definition into a run-owned location. `cp`
+;; receives paths as argv entries rather than shell source, so names cannot be
+;; interpreted as commands or options.
+(defn snapshot-factory-definition [(allocator (ptr Allocator))
+                                   (source (slice u8))
+                                   (workspace (slice u8))] (-> FactorySnapshotResult)
+  (if (not (initialize-workspace-repository allocator workspace))
+      (FactorySnapshotFailed "could not initialize workspace git repository")
+      (let [root (path-join allocator workspace ".factory/definitions")
+            (mut name) (sb-new allocator)]
+        (directory-create-all allocator root 448)
+        (sb-push-str! (mut name) "definition-")
+        (sb-push-str! (mut name) (json-stringify allocator (json-integer allocator (now-ms))))
+        (let [destination (path-join allocator root (sb-finish! (mut name)))
+              args (alloc/stack (array (slice u8) 3))
+              run-result (alloc/stack subprocess/RunResult)]
+          (store! (index args 0) "-R")
+          (store! (index args 1) source)
+          (store! (index args 2) destination)
+          (let [options
+                  (subprocess/run-options "/bin/cp"
+                                          (slice-new [(slice u8)] (index args 0) 3)
+                                          "."
+                                          4096
+                                          4096
+                                          (None [time/Instant])
+                                          (cast (ptr native-cancellation/Cancellation) 0)
+                                          (zeroed time/Duration))]
+            (match (subprocess/run allocator run-result options)
+              (Err [failure] (FactorySnapshotFailed "could not copy factory definition"))
+              (Ok [completed]
+                  (let [success
+                          (match (load (field completed status))
+                            (subprocess/Exited [code] (= code 0))
+                            (subprocess/Signaled [signal] false))]
+                    (subprocess/run-result-free allocator completed)
+                    (if (not success)
+                        (FactorySnapshotFailed "could not copy factory definition")
+                        (let [source-context (path-join allocator source "context.md")]
+                          (if (not (path-exists? allocator source-context))
+                              (FactorySnapshotCreated destination)
+                              (match (fs/read-file allocator source-context)
+                                (Err [failure]
+                                     (FactorySnapshotFailed "could not read factory context.md"))
+                                (Ok [context]
+                                    (match (fs/write-file allocator
+                                                          (path-join allocator workspace "context.md")
+                                                          context)
+                                      (Err [failure]
+                                           (FactorySnapshotFailed "could not write workspace context.md"))
+                                      (Ok [written]
+                                          (let [manifest-path (path-join allocator destination "factory.json")]
+                                            (match (fs/read-file allocator manifest-path)
+                                              (Err [failure]
+                                                   (FactorySnapshotFailed "could not read copied factory.json"))
+                                              (Ok [manifest-text]
+                                                  (let [parsed (json-parse allocator manifest-text)]
+                                                    (if (not (load (field parsed ok)))
+                                                        (FactorySnapshotFailed "copied factory.json is invalid")
+                                                        (let [(mut manifest) (load (field parsed value))
+                                                              (mut contexts) (json-array allocator)]
+                                                          ;; destination is
+                                                          ;; workspace/.factory/definitions/definition-N.
+                                                          (json-array-push! (mut contexts)
+                                                                            (JsonString "../../../context.md"))
+                                                          (json-object-put! (mut manifest)
+                                                                            "context"
+                                                                            (load contexts))
+                                                          (match (fs/write-file allocator
+                                                                                manifest-path
+                                                                                (json-stringify allocator
+                                                                                                (load manifest)))
+                                                            (Err [failure]
+                                                                 (FactorySnapshotFailed "could not update copied factory.json"))
+                                                            (Ok [updated]
+                                                                (do
+                                                                  (path-remove allocator
+                                                                               (path-join allocator
+                                                                                          destination
+                                                                                          "context.md"))
+                                                                  (FactorySnapshotCreated destination)))))))))))))))))))))))))

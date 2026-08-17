@@ -1,0 +1,68 @@
+(module harness-factory-scaffold-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-scaffold" :use *)
+(import "harness-json" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
+
+(deftest scaffolds-a-loadable-generic-markdown-factory
+         (let [allocator (malloc-allocator)
+               directory
+                 (concat-or-empty allocator
+                                  "/tmp/harness-factory-scaffold-"
+                                  (json-stringify allocator (json-integer allocator (now-ms))))]
+           (assert (match (scaffold-factory allocator directory)
+                     (FactoryScaffolded [created] (str-eq created directory))
+                     (FactoryScaffoldFailed [message] false)))
+           (assert (path-exists? allocator (path-join allocator directory "factory.json")))
+           (assert (path-exists? allocator (path-join allocator directory "context.md")))
+           (assert (path-exists? allocator (path-join allocator directory "01-worker.md")))
+           (assert (match (load-factory-definition allocator directory)
+                     (FactoryLoaded [definition]
+                       (let [loaded definition]
+                         (and (str-eq (load (field loaded name))
+                                      (factory-directory-name directory))
+                              (= (al-len [FactoryWorker]
+                                         (load (field loaded workers)))
+                                 1))))
+                     (FactoryInvalid [message] false)))
+           (assert (match (scaffold-factory allocator directory)
+                     (FactoryScaffolded [created] false)
+                     (FactoryScaffoldFailed [message]
+                       (str-eq message "refusing to overwrite an existing path"))))))
+
+(deftest scaffolds-named-steps-in-the-requested-order
+         (let [allocator (malloc-allocator)
+               directory
+                 (concat-or-empty allocator
+                                  "/tmp/harness-factory-named-steps-"
+                                  (json-stringify allocator (json-integer allocator (now-ms))))
+               (mut steps) (al-new [(slice u8)] allocator)]
+           (al-push! [(slice u8)] (mut steps) "architect")
+           (al-push! [(slice u8)] (mut steps) "implement")
+           (al-push! [(slice u8)] (mut steps) "verify")
+           (assert (match (scaffold-factory-with-steps allocator directory (load steps))
+                     (FactoryScaffolded [created] true)
+                     (FactoryScaffoldFailed [message] false)))
+           (assert (match (load-factory-definition allocator directory)
+                     (FactoryInvalid [message] false)
+                     (FactoryLoaded [definition]
+                       (let [loaded definition
+                             workers (load (field loaded workers))
+                             first (al-get [FactoryWorker] workers 0)
+                             second (al-get [FactoryWorker] workers 1)
+                             third (al-get [FactoryWorker] workers 2)]
+                         (and (= (al-len [FactoryWorker] workers) 3)
+                              (and (str-eq (load (field first file))
+                                           "01-architect.md")
+                                   (and (str-eq (load (field second file))
+                                                "02-implement.md")
+                                        (str-eq (load (field third file))
+                                                "03-verify.md"))))))))))

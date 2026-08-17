@@ -1,0 +1,6 @@
+.factory/
+.coil/
+build/
+snake
+snake.o
+failed-attempt/

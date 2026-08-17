@@ -1,0 +1,162 @@
+(module harness-factory-scaffold)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+
+(defsum FactoryScaffoldResult
+  (FactoryScaffolded [(directory (slice u8))])
+  (FactoryScaffoldFailed [(message (slice u8))]))
+
+(defn factory-directory-name [(directory (slice u8))] (-> (slice u8))
+  (let [count (slice-len [u8] directory)
+        (mut end) count]
+    (loop (if (or (<= (load end) 0)
+                  (!= (cast i64 (slice-get [u8] directory (- (load end) 1))) 47))
+              (break)
+              (store! end (- (load end) 1))))
+    (let [(mut start) (load end)]
+      (loop (if (or (<= (load start) 0)
+                    (= (cast i64 (slice-get [u8] directory (- (load start) 1))) 47))
+                (break)
+                (store! start (- (load start) 1))))
+      (substr directory (load start) (load end)))))
+
+(defn scaffold-write [(allocator (ptr Allocator))
+                      (directory (slice u8))
+                      (name (slice u8))
+                      (contents (slice u8))] (-> bool)
+  (match (fs/write-file allocator (path-join allocator directory name) contents)
+    (Ok [written] true)
+    (Err [failure] false)))
+
+(defn scaffold-step-slug [(allocator (ptr Allocator))
+                          (step (slice u8))] (-> (slice u8))
+  (let [(mut slug) (sb-new allocator)
+        (mut at) 0
+        (mut last-dash) false
+        count (slice-len [u8] step)]
+    (loop (if (>= (load at) count)
+              (break)
+              (let [byte (cast i64 (slice-get [u8] step (load at)))]
+                (cond (and (>= byte 65) (<= byte 90))
+                        (do
+                          (sb-push-byte! (mut slug) (cast u8 (+ byte 32)))
+                          (store! last-dash false))
+                      (or (and (>= byte 97) (<= byte 122))
+                          (and (>= byte 48) (<= byte 57)))
+                        (do
+                          (sb-push-byte! (mut slug) (cast u8 byte))
+                          (store! last-dash false))
+                      (and (> (slice-len [u8] (sb-str (load slug))) 0)
+                           (not (load last-dash)))
+                        (do
+                          (sb-push-byte! (mut slug) (cast u8 45))
+                          (store! last-dash true))
+                      :else 0)
+                (store! at (+ (load at) 1)))))
+    (let [value (sb-finish! (mut slug))
+          length (slice-len [u8] value)]
+      (if (and (> length 0)
+               (= (cast i64 (slice-get [u8] value (- length 1))) 45))
+          (substr value 0 (- length 1))
+          value))))
+
+(defn scaffold-worker-file [(allocator (ptr Allocator))
+                            (number i64)
+                            (slug (slice u8))] (-> (slice u8))
+  (let [(mut filename) (sb-new allocator)]
+    (when (< number 10) (sb-push-byte! (mut filename) (cast u8 48)) 0)
+    (sb-push-str! (mut filename)
+                  (json-stringify allocator (json-integer allocator number)))
+    (sb-push-byte! (mut filename) (cast u8 45))
+    (sb-push-str! (mut filename) slug)
+    (sb-push-str! (mut filename) ".md")
+    (sb-finish! (mut filename))))
+
+(defn scaffold-factory-with-steps [(allocator (ptr Allocator))
+                                   (directory (slice u8))
+                                   (steps (ArrayList (slice u8)))] (-> FactoryScaffoldResult)
+  (let [name (factory-directory-name directory)
+        step-count (al-len [(slice u8)] steps)
+        (mut filenames) (al-new [(slice u8)] allocator)
+        (mut step-index) 0
+        (mut steps-valid) true]
+    (loop (if (>= (load step-index) step-count)
+              (break)
+              (let [slug
+                      (scaffold-step-slug allocator
+                                          (al-get [(slice u8)] steps (load step-index)))]
+                (if (= (slice-len [u8] slug) 0)
+                    (do (store! steps-valid false) (break))
+                    (al-push! [(slice u8)]
+                              (mut filenames)
+                              (scaffold-worker-file allocator (+ (load step-index) 1) slug)))
+                (store! step-index (+ (load step-index) 1)))))
+    (cond (= (slice-len [u8] directory) 0) (FactoryScaffoldFailed "factory directory must not be empty")
+          (= (slice-len [u8] name) 0) (FactoryScaffoldFailed "factory directory must have a final path component")
+          (not (load steps-valid)) (FactoryScaffoldFailed "step names must contain a letter or number")
+          (path-exists? allocator directory) (FactoryScaffoldFailed "refusing to overwrite an existing path")
+          (!= (directory-create-all allocator directory 448) 0)
+            (FactoryScaffoldFailed "could not create factory directory")
+          :else
+            (let [(mut manifest) (sb-new allocator)
+                  (mut ok) true]
+              (sb-push-str! (mut manifest) "{\n  \"name\": ")
+              (sb-push-str! (mut manifest) (json-stringify allocator (JsonString name)))
+              (sb-push-str! (mut manifest)
+                            ",\n  \"goal\": \"Describe the outcome this factory should produce.\",\n  \"context\": [\"context.md\"],\n  \"tools\": {\"groups\": [\"filesystem\", \"bash\"]},\n  \"commands\": {\"before\": [], \"after\": [], \"before_each\": [], \"after_each\": []},\n  \"workers\": [")
+              (store! step-index 0)
+              (loop (if (>= (load step-index) step-count)
+                        (break)
+                        (do
+                          (when (> (load step-index) 0) (sb-push-str! (mut manifest) ", ") 0)
+                          (sb-push-str! (mut manifest)
+                                        (json-stringify allocator
+                                                        (JsonString (al-get [(slice u8)]
+                                                                            filenames
+                                                                            (load step-index)))))
+                          (store! step-index (+ (load step-index) 1)))))
+              (sb-push-str! (mut manifest) "]\n}\n")
+              (when (not (scaffold-write allocator directory "factory.json" (sb-finish! (mut manifest))))
+                (store! ok false)
+                0)
+              (when (not (scaffold-write allocator
+                                         directory
+                                         "context.md"
+                                         "# Shared context\n\nDescribe the job's constraints, invariants, and relevant background here.\n"))
+                (store! ok false)
+                0)
+              (store! step-index 0)
+              (loop (if (or (not (load ok)) (>= (load step-index) step-count))
+                        (break)
+                        (let [step (al-get [(slice u8)] steps (load step-index))
+                              (mut contents) (sb-new allocator)]
+                          (sb-push-str! (mut contents) "# Worker: ")
+                          (sb-push-str! (mut contents) step)
+                          (sb-push-str! (mut contents)
+                                        "\n\nComplete this step of the factory goal in the provided workspace. Use the available tools as needed, validate your work according to the shared context, and report whether it is ready.\n")
+                          (when (not (scaffold-write allocator
+                                                     directory
+                                                     (al-get [(slice u8)]
+                                                             filenames
+                                                             (load step-index))
+                                                     (sb-finish! (mut contents))))
+                            (store! ok false)
+                            0)
+                          (store! step-index (+ (load step-index) 1)))))
+              (if (load ok)
+                  (FactoryScaffolded directory)
+                  (FactoryScaffoldFailed "could not write factory scaffold files"))))))
+
+(defn scaffold-factory [(allocator (ptr Allocator))
+                        (directory (slice u8))] (-> FactoryScaffoldResult)
+  (let [(mut steps) (al-new [(slice u8)] allocator)]
+    (al-push! [(slice u8)] (mut steps) "worker")
+    (scaffold-factory-with-steps allocator directory (load steps))))

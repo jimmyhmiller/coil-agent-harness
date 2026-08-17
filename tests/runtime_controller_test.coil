@@ -163,6 +163,13 @@
              (assert (str-eq (load (field request run-id)) "controller-run"))
              (assert (str-eq (load (field request instructions)) "test instructions"))
              (assert (> (str-len (load (field request cache-key))) 0))
+             (assert (str-eq (load (field request prompt-cache-key))
+                             "fake/fake-model/controller-run"))
+             (let [(mut scoped) (controller-command allocator)]
+               (json-put-string! (mut scoped) "conversation_id" "conversation-42")
+               (let [scoped-request (runtime-model-request controller (load scoped) allocator)]
+                 (assert (str-eq (load (field scoped-request prompt-cache-key))
+                                 "fake/fake-model/conversation-42"))))
              (let [(mut continued) command]
                (json-put-string! (mut continued) "previous_response_id" "response-1")
                (json-put-string! (mut continued)

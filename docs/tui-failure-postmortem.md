@@ -400,10 +400,10 @@ not yet release-complete.
 
 The first recovery milestone is now implemented:
 
-- `scripts/vt_oracle.py` executes the ANSI emitted by the production binary into a
+- The terminal oracle executes the ANSI emitted by the production binary into a
   terminal cell model, including cursor position, wrapping, visible rows, and
   scrollback.
-- `scripts/tui_product_test.py` drives the optimized `./harness tui` command through
+- The product-level TUI test drives the optimized `./harness tui` command through
   a PTY one byte at a time. On failure it preserves the raw ANSI stream, every
   terminal snapshot, and the final reconstructed screen.
 - A deterministic streaming provider is available only when
@@ -423,10 +423,10 @@ Test names now mean:
 
 - Coil tests: semantic, layout, and renderer-plan unit tests;
 - existing focused PTY scripts: terminal lifecycle or component regressions;
-- `scripts/tui_product_test.py`: deterministic offline product test using the
+- Deterministic offline product coverage using the
   optimized production command and terminal-state oracle;
 - `scripts/e2e.sh --live-codex`: live CLI and HTTP provider checks plus
-  `scripts/tui_live_pty_test.py`, which drives the real interactive TUI through a
+  live PTY coverage, which drives the real interactive TUI through a
   pseudo-terminal and types character-by-character.
 
 ## Claude crash investigation update
@@ -447,9 +447,9 @@ without a reproducer. Instead it strengthened the test boundary:
   domains, invokes the OAuth helper to perturb the same allocator, serializes on a
   worker thread, joins the worker, and destroys the domain. One run covers 5,000
   complete native-tool request trees.
-- `scripts/claude_wire_regression_test.py` runs that optimized fixture with macOS
+- The Claude wire regression runs that optimized fixture with macOS
   Guard Malloc edges and scribbled freed allocations.
-- `scripts/claude_live_regression_test.py` is an authenticated, opt-in release test
+- The Claude live regression is an authenticated, opt-in release test
   that drives the optimized production `./harness tui` command, real controller,
   worker, OAuth helper, registry, serializer, transport, and Claude response.
 

@@ -55,6 +55,9 @@
                (mut messages) (al-new [Message] allocator)
                message (alloc/stack Message)
                policy (alloc/stack AgentRunPolicy)]
+           ;; Optional request fields, especially the opt-in run deadline, must
+           ;; start at zero. A stack slot is not implicitly initialized.
+           (store! request (zeroed ModelRequest))
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -73,7 +76,7 @@
            (store! (field request tools) registry)
            (store! (field request tool-choice) (ToolsAuto))
            (store! (field request parallel-tool-calls) true)
-           (store! (field request reasoning) (ReasoningNone))
+           (store! (field request reasoning) "none")
            (store! (field policy max-model-turns) 0)
            (store! (field policy max-parallel-tools) 4)
            (match (run-agent allocator provider request emitter (load policy))

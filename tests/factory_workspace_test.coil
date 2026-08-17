@@ -1,0 +1,43 @@
+(module harness-factory-workspace-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-workspace" :use *)
+(import "harness-json" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
+
+(deftest snapshots-the-whole-factory-tree-into-the-workspace
+         (let [allocator (malloc-allocator)
+               suffix (json-stringify allocator (json-integer allocator (now-ms)))
+               source (concat-or-empty allocator "/tmp/factory-snapshot-source-" suffix)
+               workspace (concat-or-empty allocator "/tmp/factory-snapshot-workspace-" suffix)
+               nested (path-join allocator source "notes")]
+           (directory-create-all allocator nested 448)
+           (directory-create-all allocator workspace 448)
+           (fs/write-file allocator
+                          (path-join allocator source "factory.json")
+                          "{\"name\":\"test\",\"goal\":\"test\",\"context\":[\"context.md\"],\"tools\":{\"groups\":[\"filesystem\"]},\"workers\":[\"worker.md\"]}")
+           (fs/write-file allocator (path-join allocator source "context.md") "shared context")
+           (fs/write-file allocator (path-join allocator source "worker.md") "worker")
+           (fs/write-file allocator (path-join allocator nested "handoff.md") "handoff")
+           (match (snapshot-factory-definition allocator source workspace)
+             (FactorySnapshotFailed [message] (assert false))
+             (FactorySnapshotCreated [snapshot]
+                                     (do
+                                       (assert (path-exists? allocator (path-join allocator snapshot "factory.json")))
+                                       (assert (path-exists? allocator (path-join allocator workspace ".git")))
+                                       (assert (path-exists? allocator (path-join allocator snapshot "worker.md")))
+                                       (assert (path-exists? allocator (path-join allocator workspace "context.md")))
+                                       (assert (not (path-exists? allocator (path-join allocator snapshot "context.md"))))
+                                       (assert (match (load-factory-definition allocator snapshot)
+                                                 (FactoryLoaded [definition] true)
+                                                 (FactoryInvalid [message] false)))
+                                       (assert (path-exists? allocator
+                                                             (path-join allocator snapshot "notes/handoff.md"))))))))
