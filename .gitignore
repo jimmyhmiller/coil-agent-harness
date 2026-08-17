@@ -49,6 +49,7 @@ dist/
 /harness.o
 /.harness-tui*.jsonl
 /.coil-harness/
+/.factory-artifacts/
 /test
 /.coil/
 /.build/
@@ -57,3 +58,4 @@ dist/
 .DS_Store
 .claude/settings.local.json
 __pycache__/
+/agent-sdk/node_modules/

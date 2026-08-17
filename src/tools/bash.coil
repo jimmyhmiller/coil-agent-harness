@@ -4,14 +4,22 @@
 (import "coil.cancellation" :as native-cancellation)
 (import "coil.match" :use *)
 (import "coil.slice" :use *)
+(import "coil.str" :use *)
 (import "coil.subprocess" :as subprocess)
 (import "coil.time" :as time)
 (import "harness-json" :use *)
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
+(import "provider-common" :use *)
 
-(const BASH_CAPTURE_LIMIT 1048576)
+;; Tool output becomes durable model history. Sixteen KiB per stream is enough
+;; for compiler diagnostics while preventing broad discovery commands from
+;; polluting every later turn in the conversation.
+(const BASH_CAPTURE_LIMIT 8192)
 (const BASH_TIMEOUT_MS 120000)
+
+(const BASH_SPOOL_SCRIPT
+  "mkdir -p .factory-artifacts/tool-output || exit 74; /bin/bash -lc \"$1\" >\"$2\" 2>\"$3\"; status=$?; head -c 8193 \"$2\"; head -c 8193 \"$3\" >&2; exit $status")
 
 (defstruct BashTool [(cwd (slice u8))])
 
@@ -47,15 +55,36 @@
             (Some [value] value)
             (None [] ""))]
     (cond (= (slice-len [u8] command) 0) (bash-error call "command must not be empty")
+          (or (str-eq (load (field call id)) "..")
+              (match (str-find (load (field call id)) "/")
+                (Some [position] true)
+                (None [] false)))
+            (bash-error call "tool call id cannot be used as an artifact name")
           (cancellation-requested? (load (field context cancellation))) (bash-error call "command cancelled")
           :else
-            (let [args (alloc/stack (array (slice u8) 2))
+            (let [stdout-artifact
+                    (concat-or-empty allocator
+                                     ".factory-artifacts/tool-output/"
+                                     (concat-or-empty allocator
+                                                      (load (field call id))
+                                                      ".stdout"))
+                  stderr-artifact
+                    (concat-or-empty allocator
+                                     ".factory-artifacts/tool-output/"
+                                     (concat-or-empty allocator
+                                                      (load (field call id))
+                                                      ".stderr"))
+                  args (alloc/stack (array (slice u8) 6))
                   run-result (alloc/stack subprocess/RunResult)]
-              (store! (index args 0) "-lc")
-              (store! (index args 1) command)
+              (store! (index args 0) "-c")
+              (store! (index args 1) BASH_SPOOL_SCRIPT)
+              (store! (index args 2) "harness-bash")
+              (store! (index args 3) command)
+              (store! (index args 4) stdout-artifact)
+              (store! (index args 5) stderr-artifact)
               (let [options
                       (subprocess/run-options "/bin/bash"
-                                              (slice-new [(slice u8)] (index args 0) 2)
+                                              (slice-new [(slice u8)] (index args 0) 6)
                                               (load (field self cwd))
                                               BASH_CAPTURE_LIMIT
                                               BASH_CAPTURE_LIMIT
@@ -92,6 +121,15 @@
                         (json-object-put! (mut output)
                                           "stderr_truncated"
                                           (JsonBool (load (field completed stderr-truncated))))
+                        (json-put-string! (mut output) "stdout_artifact" stdout-artifact)
+                        (json-put-string! (mut output) "stderr_artifact" stderr-artifact)
+                        (when (or (load (field completed stdout-truncated))
+                                  (load (field completed stderr-truncated)))
+                          (json-put-string!
+                            (mut output)
+                            "hint"
+                            "Output exceeded the inline limit. The complete stdout and stderr were saved in the artifact paths above; inspect those files with ranged read_text_file or search_text instead of rerunning the command. If this command was reading source files in bulk, use the focused file tools instead.")
+                          0)
                         (json-object-put! (mut output)
                                           "timed_out"
                                           (JsonBool (load (field completed timed-out))))

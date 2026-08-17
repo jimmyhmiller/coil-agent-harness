@@ -20,7 +20,10 @@
 (import "harness-system" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-filesystem-tools" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-coordinator" :use *)
 (import "harness-bash-tool" :use *)
+(import "harness-search-tool" :use *)
 (import "harness-orchestration-tools" :use *)
 (import "harness-run-service" :use *)
 (import "harness-runtime-controller" :use *)
@@ -58,12 +61,32 @@
     (store! (index newline 0) (cast u8 10))
     (write-slice fd (slice-new [u8] (index newline 0) 1))))
 
+;; Tool groups are a deliberately small runtime configuration seam. An absent
+;; variable preserves the interactive harness defaults; factories can expose a
+;; narrower registry without requiring a different binary.
+(defn tool-group-enabled? [(allocator (ptr Allocator))
+                           (name (slice u8))] (-> bool)
+  (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
+    (Err [failure] true)
+    (Ok [found]
+      (match found
+        (None [] true)
+        (Some [configured]
+          (let [(mut value) configured
+                enabled
+                  (match (str-find (os/owned-string-slice (load value)) name)
+                    (Some [position] true)
+                    (None [] false))]
+            (os/owned-string-free allocator value)
+            enabled))))))
+
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
   (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude> <model> <prompt>")
   (write-line 2 "       harness <login|logout> <codex|claude>")
   (write-line 2 "       harness tui [--plain] [journal-path]")
   (write-line 2 "       harness serve <port> <journal-path>")
+  (write-line 2 "       harness factory run <factory-folder> [workspace] [model]")
   (write-line 2 "       harness peers [--all] [--realm <name>]")
   (write-line 2 "       harness send [--realm <name>] <peer> <message>")
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
@@ -76,6 +99,66 @@
   (write-line 2 "        other name is a private namespace using the same protocol with no")
   (write-line 2 "        contact in either direction. HARNESS_BUS_REALM sets the default.")
   64)
+
+(defn cli-factory-run-owned [(factory-directory (slice u8))
+                              (requested-workspace (slice u8))
+                              (model (slice u8))
+                              (allocator (ptr Allocator))] (-> i64)
+  (match (load-factory-definition allocator factory-directory)
+    (FactoryInvalid [message] (do (write-line 2 message) 65))
+    (FactoryLoaded [definition-value]
+      (let [definition definition-value
+            workspace
+              (if (> (slice-len [u8] requested-workspace) 0)
+                  requested-workspace
+                  (let [root ".factory-workspaces"
+                        (mut name) (sb-new allocator)]
+                    (directory-create-all allocator root 448)
+                    (sb-push-str! (mut name) (load (field definition name)))
+                    (sb-push-str! (mut name) "-")
+                    (sb-push-str! (mut name)
+                                  (json-stringify allocator
+                                    (json-integer allocator (now-ms))))
+                    (let [created (path-join allocator root (sb-finish! (mut name)))]
+                      (directory-create-all allocator created 448)
+                      created)))
+            runs-root (path-join allocator ".factory-runs" (load (field definition name)))
+            (mut run-name) (sb-new allocator)]
+        (directory-create-all allocator workspace 448)
+        (directory-create-all allocator runs-root 448)
+        (sb-push-str! (mut run-name)
+                      (json-stringify allocator (json-integer allocator (now-ms))))
+        (sb-push-str! (mut run-name) ".jsonl")
+        (let [journal-path (path-join allocator runs-root (sb-finish! (mut run-name)))
+              (mut journal) (cast (ptr EventJournal) 0)]
+          (write-line 1 (concat-or-empty allocator "factory workspace: " workspace))
+          (write-line 1 (concat-or-empty allocator "factory journal: " journal-path))
+          (match (event-journal-open allocator journal-path true)
+            (JournalOpenFailed [message] (do (write-line 2 message) 74))
+            (JournalOpened [opened]
+              (let [sequence (box allocator i64 1)
+                    emitter (box allocator EventEmitter (zeroed EventEmitter))]
+                (store! journal (box allocator EventJournal opened))
+                (event-emitter-init! emitter allocator (load journal) sequence)
+                (let [code (run-factory-definition allocator
+                                                   definition
+                                                   workspace
+                                                   "codex"
+                                                   model
+                                                   emitter)]
+                  (event-journal-close! journal)
+                  code)))))))))
+
+(defn cli-factory-run [(factory-directory (slice u8))
+                        (workspace (slice u8))
+                        (model (slice u8))] (-> i64)
+  (let [owner (malloc-allocator)
+        process-region (alloc/stack region/Region)]
+    (region/region-init process-region owner)
+    (let [result (cli-factory-run-owned factory-directory workspace model
+                                         (region/region-allocator process-region))]
+      (region/region-close! process-region)
+      result)))
 
 (defstruct CliEventSink [(allocator (ptr Allocator))])
 
@@ -366,14 +449,21 @@
                          (box process-allocator
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
-                 (register-filesystem-tools! registry process-allocator ".")
-                 (register-bash-tool! registry process-allocator ".")
+                 (when (tool-group-enabled? allocator "filesystem")
+                   (register-filesystem-tools! registry process-allocator ".")
+                   (register-search-text-tool! registry process-allocator ".")
+                   0)
+                 (when (tool-group-enabled? allocator "bash")
+                   (register-bash-tool! registry process-allocator ".")
+                   0)
                  (store! (field service allocator) allocator)
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
                  (store! (field service controller) controller)
-                 (register-orchestration-tools! registry process-allocator service)
+                 (when (tool-group-enabled? allocator "orchestration")
+                   (register-orchestration-tools! registry process-allocator service)
+                   0)
                  (when (< (service-recover-runs! service) 0)
                    (write-line 2 "could not recover durable runs")
                    (runtime-controller-join-all! controller)
@@ -536,14 +626,21 @@
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
                  (tool-register! registry (echo-definition process-allocator))
-                 (register-filesystem-tools! registry process-allocator ".")
-                 (register-bash-tool! registry process-allocator ".")
+                 (when (tool-group-enabled? allocator "filesystem")
+                   (register-filesystem-tools! registry process-allocator ".")
+                   (register-search-text-tool! registry process-allocator ".")
+                   0)
+                 (when (tool-group-enabled? allocator "bash")
+                   (register-bash-tool! registry process-allocator ".")
+                   0)
                  (store! (field service allocator) allocator)
                  (store! (field service journal-path) journal-path)
                  (store! (field service journal) journal)
                  (store! (field service emitter) emitter)
                  (store! (field service controller) controller)
-                 (register-orchestration-tools! registry process-allocator service)
+                 (when (tool-group-enabled? allocator "orchestration")
+                   (register-orchestration-tools! registry process-allocator service)
+                   0)
                  (match (http-listener-open allocator port)
                    (ListenerOpenFailed [message]
                                        (do
@@ -798,6 +895,17 @@
                           (str-eq provider "claude") (cli-claude-auth login)
                           :else (cli-usage)))
                   (cli-usage))
+              (if (str-eq command "factory")
+                  (if (and (>= count 4)
+                           (<= count 6)
+                           (str-eq (cstr->str (load (index argv 2))) "run"))
+                      (cli-factory-run
+                        (cstr->str (load (index argv 3)))
+                        (if (>= count 5) (cstr->str (load (index argv 4))) "")
+                        (if (>= count 6)
+                            (cstr->str (load (index argv 5)))
+                            "gpt-5.6-luna"))
+                      (cli-usage))
               (if (str-eq command "tui")
                   (cond (= count 2) (cli-tui-default false)
                         (= count 3)
@@ -837,4 +945,4 @@
                                         prompt (cstr->str (load (index argv 4)))]
                                     (cond (str-eq command "run") (cli-run provider model prompt false)
                                           (str-eq command "tool") (cli-run provider model prompt true)
-                                          :else (cli-usage)))))))))))))
+                                          :else (cli-usage))))))))))))))

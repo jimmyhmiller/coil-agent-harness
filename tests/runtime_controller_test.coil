@@ -163,6 +163,13 @@
              (assert (str-eq (load (field request run-id)) "controller-run"))
              (assert (str-eq (load (field request instructions)) "test instructions"))
              (assert (> (str-len (load (field request cache-key))) 0))
+             (assert (str-eq (load (field request prompt-cache-key))
+                             "fake/fake-model/controller-run"))
+             (let [(mut scoped) (controller-command allocator)]
+               (json-put-string! (mut scoped) "conversation_id" "conversation-42")
+               (let [scoped-request (runtime-model-request controller (load scoped) allocator)]
+                 (assert (str-eq (load (field scoped-request prompt-cache-key))
+                                 "fake/fake-model/conversation-42"))))
              (let [(mut continued) command]
                (json-put-string! (mut continued) "previous_response_id" "response-1")
                (json-put-string! (mut continued)
@@ -478,3 +485,136 @@
            ;; ceiling clamping an hour-long budget back down to minutes.
            (json-object-put! (mut command) "timeout_ms" (json-integer allocator 3600000))
            (assert (> (runtime-command-deadline (load command)) 0))))
+
+(defstruct ToolPlaneEchoTool [])
+
+(impl ToolImplementation ToolPlaneEchoTool
+  (execute-tool [(self (ptr ToolPlaneEchoTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (ptr Allocator))]
+                (-> ToolResult)
+                (let [(mut result) (tool-result-empty (load (field call id)) (ToolSucceeded))]
+                  (store! (field result output) (load (field call arguments)))
+                  (load result))))
+
+(defn tool-plane-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
+  (let [parsed
+          (json-parse allocator
+                      "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false}")
+        definition (alloc/stack ToolDefinition)
+        implementation (box allocator ToolPlaneEchoTool (zeroed ToolPlaneEchoTool))]
+    (store! (field (field definition spec) name) "plane_echo")
+    (store! (field (field definition spec) description) "Return the supplied text.")
+    (store! (field (field definition spec) input-schema) (load (field parsed value)))
+    (store! (field (field definition spec) strict) true)
+    (store! (field (field definition spec) effect) (ReadOnly))
+    (store! (field (field definition spec) idempotent) true)
+    (store! (field (field definition spec) timeout-ms) 1000)
+    (store! (field definition implementation) implementation)
+    (load definition)))
+
+(defn tool-plane-command [(allocator (ptr Allocator))
+                          (name (slice u8))
+                          (arguments Json)] (-> Json)
+  (let [(mut command) (json-object allocator)]
+    (json-put-string! (mut command) "name" name)
+    (json-object-put! (mut command) "arguments" arguments)
+    (json-put-string! (mut command) "session_id" "sdk-session")
+    (load command)))
+
+(defn tool-plane-authorized? [(decision Json)] (-> bool)
+  (match (json-bool-value (json-get decision "authorized"))
+    (Some [value] value)
+    (None [] false)))
+
+;; The tool plane an external agent loop calls back into. Execution stays on the
+;; harness path, so a bridged call is schema-checked and journaled exactly like
+;; a call made by a run the harness drives itself.
+(deftest tool-plane-describes-authorizes-and-invokes-registered-tools
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-tool-plane.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
+               factory
+                 (box allocator
+                      ControllerFakeProviderFactory
+                      (let [value (alloc/stack ControllerFakeProviderFactory)]
+                        (store! (field value provider) provider)
+                        (load value)))]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (assert (tool-register! registry (tool-plane-definition allocator)))
+           (let [controller
+                   (box allocator
+                        RuntimeRunController
+                        (runtime-controller-new allocator registry factory emitter journal path))
+                 (mut arguments) (json-object allocator)]
+             (let [catalog (runtime-controller-tools-json controller allocator)
+                   tools (json-get catalog "tools")]
+               (assert-eq (json-number-i64 (json-get catalog "version")) 1)
+               (assert-eq (json-array-length tools) 1)
+               (let [entry (json-array-get tools 0)]
+                 (assert (str-eq (command-string entry "name") "plane_echo"))
+                 (assert (str-eq (command-string entry "effect") "read_only"))
+                 (assert-eq (json-number-i64 (json-get entry "timeout_ms")) 1000)
+                 (assert (match (json-bool-value (json-get entry "idempotent"))
+                           (Some [value] value)
+                           (None [] false)))
+                 (assert (str-eq (command-string (json-get entry "input_schema") "type")
+                                 "object"))))
+             (json-put-string! (mut arguments) "text" "hello")
+             (let [command (tool-plane-command allocator "plane_echo" (load arguments))]
+               (assert (tool-plane-authorized? (runtime-controller-authorize-tool controller
+                                                                                  command
+                                                                                  allocator)))
+               (let [result (runtime-controller-invoke-tool controller command allocator)]
+                 (assert (str-eq (command-string result "status") "succeeded"))
+                 (assert (str-eq (command-string result "session_id") "sdk-session"))
+                 (assert (str-eq (command-string (json-get result "output") "text") "hello"))
+                 ;; Absent a call ID the tool name identifies the operation, so
+                 ;; the journaled events still name what ran.
+                 (assert (str-eq (command-string result "call_id") "plane_echo"))))
+             ;; A tool the model invented is reported as a tool result, not a
+             ;; transport failure it cannot act on.
+             (let [unknown (tool-plane-command allocator "missing" (json-object allocator))
+                   decision (runtime-controller-authorize-tool controller unknown allocator)]
+               (assert (not (tool-plane-authorized? decision)))
+               (assert (str-eq (command-string decision "reason") "unknown tool"))
+               (assert (str-eq (command-string (runtime-controller-invoke-tool controller
+                                                                               unknown
+                                                                               allocator)
+                                               "status")
+                               "unknown")))
+             ;; Arguments that miss the schema are refused before the tool runs.
+             (let [malformed (tool-plane-command allocator "plane_echo" (json-object allocator))]
+               (assert (not (tool-plane-authorized? (runtime-controller-authorize-tool controller
+                                                                                       malformed
+                                                                                       allocator))))
+               (assert (str-eq (command-string (runtime-controller-invoke-tool controller
+                                                                               malformed
+                                                                               allocator)
+                                               "status")
+                               "denied"))))
+           (let [recovery (event-journal-recover allocator path)
+                 events (field recovery events)
+                 (mut completed) 0
+                 (mut i) 0]
+             (assert (load (field recovery ok)))
+             (loop (if (>= (load i) (al-len [Json] (load events)))
+                       (break)
+                       (let [event (al-get [Json] (load events) (load i))]
+                         (when (and (str-eq (command-string event "event") "tool.call.completed")
+                                    (str-eq (command-string event "run_id") "sdk-session"))
+                           (assert (str-eq (command-string event "provider") "agent-sdk"))
+                           (store! completed (+ (load completed) 1))
+                           0)
+                         (store! i (+ (load i) 1)))))
+             (assert-eq (load completed) 1))
+           (event-journal-close! journal)))

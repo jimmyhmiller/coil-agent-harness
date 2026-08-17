@@ -110,6 +110,19 @@ coil build integration/event_journal_background_fixture.coil -O1 \
   -o "$work_dir/event-journal-background"
 "$work_dir/event-journal-background" "$work_dir/background-events.jsonl"
 
+echo "e2e: verifying remote out-of-process worker dispatch and recovery"
+python3 scripts/worker_e2e_test.py ./harness
+
+echo "e2e: verifying the tool plane external agent loops call back into"
+python3 scripts/tool_plane_e2e_test.py ./harness
+
+if [ -d agent-sdk/node_modules ]; then
+  echo "e2e: verifying the Claude Agent SDK bridge over that tool plane"
+  node agent-sdk/test/bridge-test.ts ./harness
+else
+  echo "e2e: skipping the Agent SDK bridge (run npm install --prefix agent-sdk)"
+fi
+
 echo "e2e: verifying inline startup and restoration in a pseudo-terminal"
 python3 scripts/tui_pty_test.py ./harness
 python3 scripts/tui_signal_pty_test.py ./harness

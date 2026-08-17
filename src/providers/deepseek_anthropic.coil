@@ -190,6 +190,7 @@
     (store! (field usage reasoning-tokens) 0)
     (store! (field usage cached-input-tokens)
             (json-number-i64 (json-get wire "cache_read_input_tokens")))
+    (store! (field usage cache-write-tokens) 0)
     (load usage)))
 
 (defn anthropic-parse-response [(allocator (ptr Allocator))

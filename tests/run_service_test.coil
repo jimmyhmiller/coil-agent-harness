@@ -27,7 +27,26 @@
                       (-> RunCancellationResult)
                       (do
                         (store! (field self cancels) (+ (load (field self cancels)) 1))
-                        (RunCancellationAccepted))))
+                        (RunCancellationAccepted)))
+  ;; No registry behind this double, which is the case the service reports as
+  ;; 501 rather than pretending an empty tool list is the truth.
+  (describe-tools [(self (ptr FakeRunController))
+                   (allocator (ptr Allocator))
+                   (out (ptr Json))]
+                  (-> i64)
+                  -1)
+  (authorize-tool-call [(self (ptr FakeRunController))
+                        (command (ptr Json))
+                        (allocator (ptr Allocator))
+                        (out (ptr Json))]
+                       (-> i64)
+                       -1)
+  (invoke-tool [(self (ptr FakeRunController))
+                (command (ptr Json))
+                (allocator (ptr Allocator))
+                (out (ptr Json))]
+               (-> i64)
+               -1))
 
 (defn service-command [(allocator (ptr Allocator))
                        (command-id (slice u8))] (-> Json)
@@ -68,6 +87,9 @@
                          (target (slice u8))
                          (body (slice u8))] (-> ServiceResponse)
   (http-service-call-as service method target body "test-operator" true true))
+
+(defn response-status [(response ServiceResponse)] (-> i64)
+  (load (field response status)))
 
 (deftest subagents-have-private-clean-slate-conversations
          (let [allocator (malloc-allocator)
@@ -143,6 +165,87 @@
              (assert (str-eq (command-string (json-array-get (json-get (load grandchild-payload) "messages") 0)
                                              "content")
                              "Write one line")))
+           (event-journal-close! journal)))
+
+(deftest worker-claims-and-completes-a-durable-run-without-local-execution
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-worker-service.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field controller cancels) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (let [created
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/runs"
+                                      "{\"version\":1,\"command_id\":\"remote-create\",\"run_id\":\"remote-worker-run\",\"provider\":\"fake\",\"model\":\"fake-model\",\"prompt\":\"hello\",\"execution_target\":\"worker\"}")
+                 registered
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/register"
+                                      "{\"version\":1,\"worker_id\":\"worker-1\",\"capabilities\":{\"agent_process\":true}}")
+                 claimed
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/claim"
+                                      "{\"version\":1,\"command_id\":\"lease-1\",\"worker_id\":\"worker-1\",\"lease_ms\":30000}")
+                 replayed-claim
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/claim"
+                                      "{\"version\":1,\"command_id\":\"lease-1\",\"worker_id\":\"worker-1\",\"lease_ms\":30000}")
+                 second-claim
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/claim"
+                                      "{\"version\":1,\"command_id\":\"lease-2\",\"worker_id\":\"worker-2\",\"lease_ms\":30000}")]
+             (assert-eq (load (field created status)) 202)
+             (assert-eq (load (field registered status)) 200)
+             (assert-eq (load (field controller starts)) 0)
+             (assert (str-eq (command-string (load (field claimed body)) "status") "claimed"))
+             (assert (str-eq (command-string (load (field claimed body)) "run_id") "remote-worker-run"))
+             (assert (str-eq (command-string (load (field replayed-claim body)) "lease_id") "lease-1"))
+             (assert (str-eq (command-string (load (field replayed-claim body)) "run_id") "remote-worker-run"))
+             (assert (str-eq (command-string (json-get (load (field claimed body)) "assignment") "prompt") "hello"))
+             (assert-eq (load (field second-claim status)) 409))
+           (let [heartbeat
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/heartbeat"
+                                      "{\"version\":1,\"command_id\":\"heartbeat-1\",\"run_id\":\"remote-worker-run\",\"worker_id\":\"worker-1\",\"lease_id\":\"lease-1\",\"lease_ms\":30000}")
+                 progress
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/progress"
+                                      "{\"version\":1,\"command_id\":\"progress-1\",\"run_id\":\"remote-worker-run\",\"worker_id\":\"worker-1\",\"lease_id\":\"lease-1\",\"event\":{\"event\":\"model.response.delta\",\"text\":\"hello\"}}")
+                 rejected
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/complete"
+                                      "{\"version\":1,\"run_id\":\"remote-worker-run\",\"worker_id\":\"worker-2\",\"lease_id\":\"lease-1\",\"outcome\":\"succeeded\"}")
+                 completed
+                   (http-service-call service
+                                      "POST"
+                                      "/v1/workers/complete"
+                                      "{\"version\":1,\"run_id\":\"remote-worker-run\",\"worker_id\":\"worker-1\",\"lease_id\":\"lease-1\",\"outcome\":\"succeeded\",\"output\":\"done\"}")]
+             (assert (str-eq (command-string (load (field heartbeat body)) "status") "renewed"))
+             (assert-eq (load (field progress status)) 202)
+             (assert-eq (load (field rejected status)) 409)
+             (assert-eq (load (field completed status)) 200)
+             (assert (str-eq (command-string (load (field completed body)) "status") "succeeded")))
            (event-journal-close! journal)))
 
 (deftest persists-idempotent-create-cancel-and-cursor-queries
@@ -491,4 +594,65 @@
              (assert (match (json-string-at (load (field cancelling body)) "status")
                        (Some [value] (str-eq value "cancelled"))
                        (None [] false))))
+           (event-journal-close! journal)))
+
+;; Routing and capability checks for the tool plane. This double has no
+;; registry, so a routed request must surface that as 501 rather than an empty
+;; catalog -- an external loop told "no tools" would proceed as if the harness
+;; had none.
+(deftest tool-plane-routes-are-capability-gated
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-tool-plane-routes.jsonl"
+               journal (alloc/stack EventJournal)
+               sequence (box allocator i64 1)
+               emitter (alloc/stack EventEmitter)
+               controller (alloc/stack FakeRunController)
+               service (alloc/stack RunService)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (store! (field controller starts) 0)
+           (store! (field controller cancels) 0)
+           (store! (field service allocator) allocator)
+           (store! (field service journal-path) path)
+           (store! (field service journal) journal)
+           (store! (field service emitter) emitter)
+           (store! (field service controller) controller)
+           (assert-eq (response-status (http-service-call service "GET" "/v1/tools" "")) 501)
+           (assert-eq (response-status (http-service-call service
+                                                          "POST"
+                                                          "/v1/tools/call"
+                                                          "{\"name\":\"echo\"}"))
+                      501)
+           (assert-eq (response-status (http-service-call service
+                                                          "POST"
+                                                          "/v1/tools/authorize"
+                                                          "{\"name\":\"echo\"}"))
+                      501)
+           ;; A named tool is required before the controller is consulted.
+           (assert-eq (response-status (http-service-call service "POST" "/v1/tools/call" "{}"))
+                      400)
+           (assert-eq (response-status (http-service-call service
+                                                          "POST"
+                                                          "/v1/tools/call"
+                                                          "not json"))
+                      400)
+           (assert-eq (response-status (http-service-call-as service
+                                                            "GET"
+                                                            "/v1/tools"
+                                                            ""
+                                                            "test-anonymous"
+                                                            false
+                                                            false))
+                      403)
+           (assert-eq (response-status (http-service-call-as service
+                                                            "POST"
+                                                            "/v1/tools/call"
+                                                            "{\"name\":\"echo\"}"
+                                                            "test-observer"
+                                                            true
+                                                            false))
+                      403)
            (event-journal-close! journal)))

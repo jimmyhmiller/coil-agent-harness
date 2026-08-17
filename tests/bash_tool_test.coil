@@ -2,8 +2,10 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
+(import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-bash-tool" :use *)
+(import "harness-filesystem-tools" :use *)
 (import "harness-json" :use *)
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
@@ -67,3 +69,38 @@
                                  (_ false)))
              (assert (str-eq (load (field result error)) "command cancelled")))
            (cancellation-token-close! cancellation)))
+
+(deftest bash-spills-complete-large-output-before-returning-a-preview
+         (let [allocator (malloc-allocator)
+               tool (alloc/stack BashTool)
+               call (alloc/stack ToolCall)
+               context (alloc/stack ToolExecutionContext)]
+           (store! (field tool cwd) ".")
+           (store! call
+                   (bash-call allocator
+                              "bash-large-output"
+                              "yes x | head -c 9000"))
+           (store! (field context cancellation)
+                   (cast (ptr CancellationToken) 0))
+           (store! (field context run-deadline-monotonic-ms) 0)
+           (store! (field context tool-deadline-monotonic-ms) 0)
+           (let [result (execute-bash tool call context allocator)
+                 output (load (field result output))]
+             (assert (match (json-bool-value (json-get output "stdout_truncated"))
+                       (Some [value] value)
+                       (None [] false)))
+             (assert (match (json-string-at output "stdout")
+                       (Some [value] (= (slice-len [u8] value) 8192))
+                       (None [] false)))
+             (assert (match (json-string-at output "stdout_artifact")
+                       (Some [value]
+                         (str-eq value
+                                 ".factory-artifacts/tool-output/bash-large-output.stdout"))
+                       (None [] false)))
+             (match (bounded-read-file allocator
+                                       ".factory-artifacts/tool-output/bash-large-output.stdout")
+               (BoundedReadFailed [message] (assert false))
+               (BoundedReadOk [bytes truncated]
+                 (do
+                   (assert (not truncated))
+                   (assert-eq (slice-len [u8] bytes) 9000)))))))

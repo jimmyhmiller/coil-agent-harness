@@ -221,6 +221,46 @@
       0)
     (load input)))
 
+;; Direct requests use store=false, so retain the complete replay chain rather
+;; than only the immediately previous response and tool result.
+(defn codex-direct-cumulative-raw-output [(allocator (ptr Allocator))
+                                          (request (ptr ModelRequest))
+                                          (response (ptr ModelResponse))] (-> Json)
+  (let [(mut combined) (json-array allocator)
+        continuation (field request continuation)]
+    (when (load (field continuation present))
+      (let [prior (json-get (load (field continuation previous-output)) "output")
+            (mut i) 0
+            count (json-array-length prior)]
+        (loop (if (>= (load i) count)
+                  (break)
+                  (do
+                    (json-array-push! (mut combined) (json-array-get prior (load i)))
+                    (store! i (+ (load i) 1))))))
+      (let [results (load (field continuation tool-results))]
+        (when (!= results (cast (ptr (ArrayList ToolResult)) 0))
+          (let [items (openai-tool-results allocator results)
+                (mut i) 0
+                count (json-array-length items)]
+            (loop (if (>= (load i) count)
+                      (break)
+                      (do
+                        (json-array-push! (mut combined) (json-array-get items (load i)))
+                        (store! i (+ (load i) 1))))))
+          0))
+      0)
+    (let [current (json-get (load (field response raw-output)) "output")
+          (mut i) 0
+          count (json-array-length current)]
+      (loop (if (>= (load i) count)
+                (break)
+                (do
+                  (json-array-push! (mut combined) (json-array-get current (load i)))
+                  (store! i (+ (load i) 1))))))
+    (let [(mut envelope) (json-object allocator)]
+      (json-object-put! (mut envelope) "output" (load combined))
+      (load envelope))))
+
 (defn codex-direct-request-json [(allocator (ptr Allocator))
                                  (request (ptr ModelRequest))] (-> Json)
   (let [request-value (load request)
@@ -236,6 +276,9 @@
       (json-put-string! (mut wire)
                         "prompt_cache_key"
                         (load (field request prompt-cache-key)))
+      ;; The ChatGPT subscription endpoint rejects prompt_cache_options. Its
+      ;; omission selects the documented implicit/default caching behavior;
+      ;; prompt_cache_key remains the stable routing hint.
       ;; Reasoning items must be replayable on store=false tool continuations.
       (json-array-push! (mut include) (JsonString "reasoning.encrypted_content"))
       (json-object-put! (mut wire) "include" (load include))
@@ -302,6 +345,9 @@
                             (json-integer allocator
                                           (al-len [Message] (load (load (field request messages))))))
           (json-put-string! (mut started) "effort" (reasoning-effort-name (load (field request reasoning))))
+          (json-put-string! (mut started)
+                            "prompt_cache_key"
+                            (load (field request prompt-cache-key)))
           (codex-direct-event emitter request (ModelRequestStarted) (load started)))
         (let [http (streaming-http-send (load (field self transport)) allocator http-request)
               status (load (field http status-code))]
@@ -311,7 +357,12 @@
                   (>= status 300)
                   (load (field state failed))
                   (not (load (field state completed))))
-              (let [message
+              (if (model-request-cancelled? request)
+                  ;; Cancellation deliberately interrupts libcurl/SSE. It is a
+                  ;; run lifecycle event, not a provider failure, and the partial
+                  ;; response body can be both huge and misleading.
+                  (model-failure "codex-direct" 0 "request cancelled")
+                  (let [message
                       (if (or (< status 200) (>= status 300))
                           (let [parsed (json-parse allocator (load (field http body)))]
                             (if (load (field parsed ok))
@@ -334,11 +385,13 @@
                                                               (concat-or-empty allocator ": " message)))
                             (concat-or-empty allocator "codex-direct: " message))]
                   (codex-direct-event emitter request (ModelRequestFailed) (JsonString described))
-                  (model-failure "codex-direct" status described)))
+                  (model-failure "codex-direct" status described))))
               (let [(mut response) (openai-parse-response allocator (load (field state response)))]
                 (store! (field response provider) "codex-direct")
                 (store! (field response provider-session-id)
                         (load (field response response-id)))
+                (store! (field response raw-output)
+                        (codex-direct-cumulative-raw-output allocator request (mut response)))
                 (codex-direct-event emitter
                                     request
                                     (ModelRequestCompleted)

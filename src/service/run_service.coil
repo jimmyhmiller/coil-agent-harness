@@ -24,7 +24,22 @@
   ;; Enqueue control-plane cancellation without journal I/O on the caller's
   ;; input path. The controller remains responsible for durable-first ordering.
   (request-cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> i64))
-  (cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> RunCancellationResult)))
+  (cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> RunCancellationResult))
+  ;; The tool plane, for agent loops the harness does not drive itself. The
+  ;; registry belongs to the controller, so the service reaches it through the
+  ;; trait it already holds rather than aliasing the registry pointer. Zero means
+  ;; `out` holds the response body; -1 means this controller exposes no registry.
+  (describe-tools [(self (ptr Self)) (allocator (ptr Allocator)) (out (ptr Json))] (-> i64))
+  (authorize-tool-call [(self (ptr Self))
+                        (command (ptr Json))
+                        (allocator (ptr Allocator))
+                        (out (ptr Json))]
+                       (-> i64))
+  (invoke-tool [(self (ptr Self))
+                (command (ptr Json))
+                (allocator (ptr Allocator))
+                (out (ptr Json))]
+               (-> i64)))
 
 (defstruct RunService
   [(allocator (ptr Allocator))
@@ -302,8 +317,13 @@
                                                                             500
                                                                             "journal_write_failed"
                                                                             "create command was not durable")
-                                                             (let [start-code
-                                                                     (service-start-durable-run service command)
+                                                             (let [remote-worker
+                                                                     (str-eq (command-string command "execution_target")
+                                                                             "worker")
+                                                                   start-code
+                                                                     (if remote-worker
+                                                                         0
+                                                                         (service-start-durable-run service command))
                                                                    refreshed (service-recover-into service allocator)]
                                                                (if (!= start-code 0)
                                                                    (service-error allocator
@@ -918,30 +938,39 @@
                         (let [view (project-run events run-id)]
                           (match-else (load (field view status))
                                       (RunQueued []
-                                                 (let [start-code
-                                                         (service-start-durable-run service
-                                                                                    (json-get event "payload"))]
-                                                   (if (= start-code 0)
-                                                       (store! recovered (+ (load recovered) 1))
-                                                       (emit-event (load (field service emitter))
-                                                                   (now-ms)
-                                                                   (RunFailed)
-                                                                   run-id
-                                                                   run-id
-                                                                   ""
-                                                                   (load (field view provider))
-                                                                   (load (field view model))
-                                                                   (JsonString "queued run could not restart")))))
+                                                 (let [created (json-get event "payload")]
+                                                   (if (str-eq (command-string created "execution_target")
+                                                               "worker")
+                                                       0
+                                                       (let [start-code (service-start-durable-run service created)]
+                                                         (if (= start-code 0)
+                                                             (store! recovered (+ (load recovered) 1))
+                                                             (emit-event (load (field service emitter))
+                                                                         (now-ms)
+                                                                         (RunFailed)
+                                                                         run-id
+                                                                         run-id
+                                                                         ""
+                                                                         (load (field view provider))
+                                                                         (load (field view model))
+                                                                         (JsonString "queued run could not restart")))))))
                                       (RunRunning []
-                                                  (emit-event (load (field service emitter))
-                                                              (now-ms)
-                                                              (RunFailed)
-                                                              run-id
-                                                              run-id
-                                                              ""
-                                                              (load (field view provider))
-                                                              (load (field view model))
-                                                              (JsonString "service restarted while run was in flight")))
+                                                  (let [created (json-get event "payload")]
+                                                    (if (str-eq (command-string created "execution_target")
+                                                                "worker")
+                                                        (service-worker-recovery-required! service
+                                                                                           run-id
+                                                                                           (worker-latest-claim events
+                                                                                                                run-id))
+                                                        (emit-event (load (field service emitter))
+                                                                    (now-ms)
+                                                                    (RunFailed)
+                                                                    run-id
+                                                                    run-id
+                                                                    ""
+                                                                    (load (field view provider))
+                                                                    (load (field view model))
+                                                                    (JsonString "service restarted while run was in flight")))))
                                       (RunCancelling []
                                                      (emit-event (load (field service emitter))
                                                                  (now-ms)
@@ -996,6 +1025,390 @@
               ""))
     (None [] "")))
 
+(defn worker-event-for-run? [(event Json)
+                             (kind (slice u8))
+                             (run-id (slice u8))] (-> bool)
+  (and (str-eq (command-string event "event") kind)
+       (str-eq (command-string event "run_id") run-id)))
+
+(defn worker-latest-claim [(events (ref (ArrayList Json)))
+                           (run-id (slice u8))] (-> Json)
+  (let [(mut result) (JsonNull)
+        (mut i) 0
+        n (al-len [Json] (load events))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [event (al-get [Json] (load events) (load i))]
+                (when (or (worker-event-for-run? event "worker.assignment.claimed" run-id)
+                          (worker-event-for-run? event "worker.lease.renewed" run-id))
+                  (store! result (json-get event "payload"))
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load result)))
+
+(defn worker-run-finished? [(events (ref (ArrayList Json)))
+                            (run-id (slice u8))] (-> bool)
+  (let [(mut finished) false
+        (mut i) 0
+        n (al-len [Json] (load events))]
+    (loop (if (or (>= (load i) n) (load finished))
+              (break)
+              (let [event (al-get [Json] (load events) (load i))
+                    kind (command-string event "event")]
+                (when (and (str-eq (command-string event "run_id") run-id)
+                           (or (str-eq kind "run.completed")
+                               (or (str-eq kind "run.failed")
+                                   (str-eq kind "run.cancelled"))))
+                  (store! finished true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load finished)))
+
+(defn service-worker-recovery-required! [(service (ptr RunService))
+                                         (run-id (slice u8))
+                                         (lease Json)] (-> i64)
+  (let [provider (command-string lease "provider")
+        model (command-string lease "model")]
+    (emit-event (load (field service emitter))
+                (now-ms)
+                (WorkerAssignmentRecoveryRequired)
+                run-id
+                run-id
+                ""
+                provider
+                model
+                lease)
+    (emit-event (load (field service emitter))
+                (now-ms)
+                (RunFailed)
+                run-id
+                run-id
+                ""
+                provider
+                model
+                lease)
+    0))
+
+(defn service-register-worker [(service (ptr RunService))
+                               (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        worker-id (command-string command "worker_id")]
+    (if (or (!= (json-number-i64 (json-get command "version")) 1)
+            (= (slice-len [u8] worker-id) 0))
+        (service-error allocator 400 "invalid_worker" "worker_id and version 1 are required")
+        (do
+          (emit-event (load (field service emitter))
+                      (now-ms)
+                      (WorkerRegistered)
+                      worker-id
+                      worker-id
+                      ""
+                      ""
+                      ""
+                      command)
+          (let [(mut body) (json-object allocator)]
+            (json-object-put! (mut body) "version" (json-integer allocator 1))
+            (json-put-string! (mut body) "worker_id" worker-id)
+            (json-put-string! (mut body) "status" "registered")
+            (service-response 200 (load body)))))))
+
+(defn worker-registered-for-agent-process? [(events (ref (ArrayList Json)))
+                                            (worker-id (slice u8))] (-> bool)
+  (let [(mut registered) false
+        (mut i) 0
+        n (al-len [Json] (load events))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [event (al-get [Json] (load events) (load i))
+                    payload (json-get event "payload")]
+                (when (and (worker-event-for-run? event "worker.registered" worker-id)
+                           (match (json-bool-value (json-get (json-get payload "capabilities")
+                                                             "agent_process"))
+                             (Some [enabled] enabled)
+                             (None [] false)))
+                  (store! registered true)
+                  0)
+                (store! i (+ (load i) 1)))))
+    (load registered)))
+
+(defn service-claim-worker-assignment [(service (ptr RunService))
+                                       (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        worker-id (command-string command "worker_id")
+        command-id (command-string command "command_id")
+        requested-lease-ms (json-number-i64 (json-get command "lease_ms"))
+        lease-ms (if (> requested-lease-ms 0) requested-lease-ms 30000)
+        recovery (service-recover-into service allocator)]
+    (if (or (= (slice-len [u8] worker-id) 0)
+            (= (slice-len [u8] command-id) 0))
+        (service-error allocator 400 "invalid_claim" "worker_id and command_id are required")
+        (if (not (load (field recovery ok)))
+            (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+            (if (not (worker-registered-for-agent-process? (field recovery events) worker-id))
+                (service-error allocator
+                               409
+                               "worker_not_registered"
+                               "worker must register the agent_process capability before claiming")
+                (let [events (field recovery events)
+                      (mut assignment) (JsonNull)
+                      (mut replay-lease) (JsonNull)
+                      (mut run-id) ""
+                      (mut i) 0
+                      n (al-len [Json] (load events))]
+                  (loop (if (>= (load i) n)
+                            (break)
+                            (let [event (al-get [Json] (load events) (load i))
+                                  payload (json-get event "payload")
+                                  candidate (command-string event "run_id")]
+                              (when (and (str-eq (command-string event "event") "run.created")
+                                         (and (str-eq (command-string payload "execution_target") "worker")
+                                              (not (worker-run-finished? events candidate))))
+                                (let [lease (worker-latest-claim events candidate)
+                                      lease-id (command-string lease "lease_id")]
+                                  (if (and (str-eq lease-id command-id)
+                                           (str-eq (command-string lease "worker_id") worker-id))
+                                      (do
+                                        (store! assignment payload)
+                                        (store! replay-lease lease)
+                                        (store! run-id candidate)
+                                        (break))
+                                      (if (= (slice-len [u8] lease-id) 0)
+                                          (do
+                                            (store! assignment payload)
+                                            (store! run-id candidate)
+                                            (break))
+                                          (when (<= (json-number-i64 (json-get lease "lease_expires_at_ms"))
+                                                    (now-ms))
+                                            (service-worker-recovery-required! service candidate lease)
+                                            0))))
+                                0)
+                              (store! i (+ (load i) 1)))))
+                  (if (= (slice-len [u8] (load run-id)) 0)
+                      (let [(mut body) (json-object allocator)]
+                        (json-object-put! (mut body) "version" (json-integer allocator 1))
+                        (json-put-string! (mut body) "status" "empty")
+                        (service-response 200 (load body)))
+                      (let [replayed (> (slice-len [u8] (command-string (load replay-lease) "lease_id")) 0)
+                            lease-id command-id
+                            expires-at (+ (now-ms) lease-ms)
+                            (mut claim)
+                              (if replayed
+                                  (json-clone allocator (load replay-lease))
+                                  (json-object allocator))]
+                        (when (not replayed)
+                          (json-object-put! (mut claim) "version" (json-integer allocator 1))
+                          (json-put-string! (mut claim) "worker_id" worker-id)
+                          (json-put-string! (mut claim) "lease_id" lease-id)
+                          (json-put-string! (mut claim) "provider" (command-string (load assignment) "provider"))
+                          (json-put-string! (mut claim) "model" (command-string (load assignment) "model"))
+                          (json-object-put! (mut claim) "lease_expires_at_ms" (json-integer allocator expires-at))
+                          (emit-event (load (field service emitter))
+                                      (now-ms)
+                                      (WorkerAssignmentClaimed)
+                                      (load run-id)
+                                      (load run-id)
+                                      ""
+                                      (command-string (load assignment) "provider")
+                                      (command-string (load assignment) "model")
+                                      (load claim))
+                          (emit-event (load (field service emitter))
+                                      (now-ms)
+                                      (RunStarted)
+                                      (load run-id)
+                                      (load run-id)
+                                      ""
+                                      (command-string (load assignment) "provider")
+                                      (command-string (load assignment) "model")
+                                      (load claim))
+                          0)
+                        (json-object-put! (mut claim) "assignment" (load assignment))
+                        (json-put-string! (mut claim) "run_id" (load run-id))
+                        (json-put-string! (mut claim) "status" "claimed")
+                        (service-response 200 (load claim))))))))))
+
+(defn service-worker-heartbeat [(service (ptr RunService))
+                                (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        run-id (command-string command "run_id")
+        worker-id (command-string command "worker_id")
+        lease-id (command-string command "lease_id")
+        requested-lease-ms (json-number-i64 (json-get command "lease_ms"))
+        lease-ms (if (> requested-lease-ms 0) requested-lease-ms 30000)
+        recovery (service-recover-into service allocator)]
+    (if (not (load (field recovery ok)))
+        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (let [lease (worker-latest-claim (field recovery events) run-id)]
+          (if (or (not (str-eq worker-id (command-string lease "worker_id")))
+                  (not (str-eq lease-id (command-string lease "lease_id"))))
+              (service-error allocator 409 "lease_mismatch" "heartbeat requires the current worker lease")
+              (if (<= (json-number-i64 (json-get lease "lease_expires_at_ms")) (now-ms))
+                  (do
+                    (service-worker-recovery-required! service run-id lease)
+                    (service-error allocator 409 "lease_expired" "worker lease has expired"))
+                  (let [(mut renewed) (json-object allocator)]
+                    (json-object-put! (mut renewed) "version" (json-integer allocator 1))
+                    (json-put-string! (mut renewed) "worker_id" worker-id)
+                    (json-put-string! (mut renewed) "lease_id" lease-id)
+                    (json-put-string! (mut renewed) "provider" (command-string lease "provider"))
+                    (json-put-string! (mut renewed) "model" (command-string lease "model"))
+                    (json-object-put! (mut renewed)
+                                      "lease_expires_at_ms"
+                                      (json-integer allocator (+ (now-ms) lease-ms)))
+                    (emit-event (load (field service emitter))
+                                (now-ms)
+                                (WorkerLeaseRenewed)
+                                run-id
+                                run-id
+                                ""
+                                (command-string lease "provider")
+                                (command-string lease "model")
+                                (load renewed))
+                    (json-put-string! (mut renewed) "status" "renewed")
+                    (service-response 200 (load renewed)))))))))
+
+(defn service-worker-complete [(service (ptr RunService))
+                               (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        run-id (command-string command "run_id")
+        worker-id (command-string command "worker_id")
+        lease-id (command-string command "lease_id")
+        outcome (command-string command "outcome")
+        recovery (service-recover-into service allocator)]
+    (if (not (load (field recovery ok)))
+        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (let [claim (worker-latest-claim (field recovery events) run-id)]
+          (if (or (= (slice-len [u8] run-id) 0)
+                  (or (not (str-eq worker-id (command-string claim "worker_id")))
+                      (not (str-eq lease-id (command-string claim "lease_id")))))
+              (service-error allocator 409 "lease_mismatch" "completion requires the current worker lease")
+              (if (<= (json-number-i64 (json-get claim "lease_expires_at_ms")) (now-ms))
+                  (do
+                    (service-worker-recovery-required! service run-id claim)
+                    (service-error allocator 409 "lease_expired" "worker lease has expired"))
+                  (if (worker-run-finished? (field recovery events) run-id)
+                      (service-run-response service (field recovery events) run-id 200)
+                      (do
+                        (emit-event (load (field service emitter))
+                                    (now-ms)
+                                    (WorkerAssignmentCompleted)
+                                    run-id
+                                    run-id
+                                    ""
+                                    (command-string command "provider")
+                                    (command-string command "model")
+                                    command)
+                        (emit-event (load (field service emitter))
+                                    (now-ms)
+                                    (if (str-eq outcome "succeeded") (RunCompleted) (RunFailed))
+                                    run-id
+                                    run-id
+                                    ""
+                                    (command-string command "provider")
+                                    (command-string command "model")
+                                    command)
+                        (let [refreshed (service-recover-into service allocator)]
+                          (service-run-response service (field refreshed events) run-id 200))))))))))
+
+(defn worker-progress-kind [(name (slice u8))] (-> EventKind)
+  (cond (str-eq name "model.request.started") (ModelRequestStarted)
+        (str-eq name "model.response.delta") (ModelResponseDelta)
+        (str-eq name "model.request.completed") (ModelRequestCompleted)
+        (str-eq name "model.request.failed") (ModelRequestFailed)
+        (str-eq name "tool.call.proposed") (ToolCallProposed)
+        (str-eq name "tool.call.rejected") (ToolCallRejected)
+        (str-eq name "tool.call.started") (ToolCallStarted)
+        (str-eq name "tool.call.completed") (ToolCallCompleted)
+        (str-eq name "tool.call.failed") (ToolCallFailed)
+        (str-eq name "codex.notification") (CodexNotification)
+        :else (WorkerProgress)))
+
+(defn service-worker-progress [(service (ptr RunService))
+                               (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        run-id (command-string command "run_id")
+        worker-id (command-string command "worker_id")
+        lease-id (command-string command "lease_id")
+        recovery (service-recover-into service allocator)]
+    (if (not (load (field recovery ok)))
+        (service-error allocator 500 "journal_recovery_failed" (load (field recovery error)))
+        (let [lease (worker-latest-claim (field recovery events) run-id)]
+          (if (or (not (str-eq worker-id (command-string lease "worker_id")))
+                  (not (str-eq lease-id (command-string lease "lease_id"))))
+              (service-error allocator 409 "lease_mismatch" "progress requires the current worker lease")
+              (if (<= (json-number-i64 (json-get lease "lease_expires_at_ms")) (now-ms))
+                  (service-error allocator 409 "lease_expired" "worker lease has expired")
+                  (let [remote-event (json-get command "event")
+                        remote-kind (command-string remote-event "event")
+                        kind (worker-progress-kind remote-kind)
+                        semantic (not (str-eq (event-kind-name kind) "worker.progress"))]
+                    (emit-event-for-agent (load (field service emitter))
+                                          (now-ms)
+                                          kind
+                                          run-id
+                                          run-id
+                                          (if semantic
+                                              (command-string remote-event "operation_id")
+                                              run-id)
+                                          (if semantic
+                                              (command-string remote-event "parent_operation_id")
+                                              "")
+                                          (command-string lease "provider")
+                                          (command-string lease "model")
+                                          (if semantic (json-get remote-event "payload") command))
+                    (let [(mut body) (json-object allocator)]
+                      (json-object-put! (mut body) "version" (json-integer allocator 1))
+                      (json-put-string! (mut body) "status" "recorded")
+                      (service-response 202 (load body))))))))))
+
+(defn service-tool-plane-unavailable [(allocator (ptr Allocator))] (-> ServiceResponse)
+  (service-error allocator
+                 501
+                 "tool_plane_unavailable"
+                 "this service is not backed by a tool registry"))
+
+;; An external agent loop drives the model itself and calls back for tools. The
+;; three endpoints below are the whole surface it needs: what exists, whether a
+;; call is allowed, and running it. Execution stays on the harness's own path, so
+;; a bridged call is schema-validated, deadline-bounded, and journaled exactly
+;; like a call from a run the harness drives.
+(defn service-list-tools [(service (ptr RunService))] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        out (alloc/stack Json)]
+    (if (< (describe-tools (load (field service controller)) allocator out) 0)
+        (service-tool-plane-unavailable allocator)
+        (service-response 200 (load out)))))
+
+(defn service-authorize-tool [(service (ptr RunService))
+                              (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        command-ref (alloc/stack Json)
+        out (alloc/stack Json)]
+    (store! command-ref command)
+    (if (= (slice-len [u8] (command-string command "name")) 0)
+        (service-error allocator 400 "invalid_command" "a tool name is required")
+        (if (< (authorize-tool-call (load (field service controller))
+                                    command-ref
+                                    allocator
+                                    out)
+               0)
+            (service-tool-plane-unavailable allocator)
+            (service-response 200 (load out))))))
+
+;; Every executed outcome is a 200 carrying the harness's own status, including
+;; an unknown tool or a denial. The caller is a model loop: it has to read the
+;; refusal as a tool result, not as a transport failure it cannot act on.
+(defn service-call-tool [(service (ptr RunService))
+                         (command Json)] (-> ServiceResponse)
+  (let [allocator (load (field service allocator))
+        command-ref (alloc/stack Json)
+        out (alloc/stack Json)]
+    (store! command-ref command)
+    (if (= (slice-len [u8] (command-string command "name")) 0)
+        (service-error allocator 400 "invalid_command" "a tool name is required")
+        (if (< (invoke-tool (load (field service controller)) command-ref allocator out) 0)
+            (service-tool-plane-unavailable allocator)
+            (service-response 200 (load out))))))
+
 ;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
 ;; request into this value and serialize the returned status/body.
 (defn service-handle-http [(service (ptr RunService))
@@ -1006,7 +1419,60 @@
         principal (load (field request principal))
         can-observe (load (field request can-observe))
         can-control (load (field request can-control))]
-    (cond (and (str-eq method "POST") (str-eq target "/v1/runs"))
+    (cond (and (str-eq method "GET") (str-eq target "/v1/tools"))
+            (if (not can-observe)
+                (service-forbidden allocator)
+                (service-list-tools service))
+          (and (str-eq method "POST") (str-eq target "/v1/tools/authorize"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-authorize-tool service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/tools/call"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-call-tool service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/workers/register"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-register-worker service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/workers/claim"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-claim-worker-assignment service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/workers/complete"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-worker-complete service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/workers/heartbeat"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-worker-heartbeat service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/workers/progress"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (load (field parsed ok))
+                      (service-worker-progress service (load (field parsed value)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON"))))
+          (and (str-eq method "POST") (str-eq target "/v1/runs"))
             (if (not can-control)
                 (service-forbidden allocator)
                 (let [parsed (service-parse-command service (load (field request body)))]
@@ -1038,7 +1504,10 @@
                                   (service-command-actor! (mut command) principal)
                                   (if (not (str-eq (command-string (load command) "run_id")
                                                    assessment-run-id))
-                                      (service-error allocator 409 "run_id_mismatch" "path and command run IDs differ")
+                                      (service-error allocator
+                                                     409
+                                                     "run_id_mismatch"
+                                                     "path and command run IDs differ")
                                       (service-record-assessment service (load command)))))))
                     (and (str-eq method "POST")
                          (> (slice-len [u8] intervention-run-id) 0))
@@ -1051,7 +1520,10 @@
                                   (service-command-actor! (mut command) principal)
                                   (if (not (str-eq (command-string (load command) "run_id")
                                                    intervention-run-id))
-                                      (service-error allocator 409 "run_id_mismatch" "path and command run IDs differ")
+                                      (service-error allocator
+                                                     409
+                                                     "run_id_mismatch"
+                                                     "path and command run IDs differ")
                                       (service-request-intervention service (load command)))))))
                     (and (str-eq method "POST")
                          (> (slice-len [u8] cancel-run-id) 0))

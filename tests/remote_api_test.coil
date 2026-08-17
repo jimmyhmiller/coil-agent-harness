@@ -32,7 +32,24 @@
                               0)
   (cancel-durable-run [(self (ptr RemoteFakeController)) (command (ptr Json))]
                       (-> RunCancellationResult)
-                      (RunCancellationAccepted)))
+                      (RunCancellationAccepted))
+  (describe-tools [(self (ptr RemoteFakeController))
+                   (allocator (ptr Allocator))
+                   (out (ptr Json))]
+                  (-> i64)
+                  -1)
+  (authorize-tool-call [(self (ptr RemoteFakeController))
+                        (command (ptr Json))
+                        (allocator (ptr Allocator))
+                        (out (ptr Json))]
+                       (-> i64)
+                       -1)
+  (invoke-tool [(self (ptr RemoteFakeController))
+                (command (ptr Json))
+                (allocator (ptr Allocator))
+                (out (ptr Json))]
+               (-> i64)
+               -1))
 
 (defstruct RemoteServerJob
   [(allocator (ptr Allocator))

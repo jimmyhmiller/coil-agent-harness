@@ -137,6 +137,7 @@
             (json-number-i64 (json-get (json-get wire "completion_tokens_details") "reasoning_tokens")))
     (store! (field usage cached-input-tokens)
             (json-number-i64 (json-get wire "prompt_cache_hit_tokens")))
+    (store! (field usage cache-write-tokens) 0)
     (load usage)))
 
 (defn deepseek-openai-parse-response [(allocator (ptr Allocator)) (root Json)] (-> ModelResponse)

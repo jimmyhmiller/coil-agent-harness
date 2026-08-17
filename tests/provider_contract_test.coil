@@ -342,6 +342,14 @@
                        (Some [value] (str-eq value "Lima"))
                        (None [] false))))))
 
+(deftest openai-usage-parses-cache-read-and-write-telemetry
+         (let [allocator (malloc-allocator)
+               parsed (json-parse allocator
+                                  "{\"usage\":{\"input_tokens\":1400,\"output_tokens\":20,\"input_tokens_details\":{\"cached_tokens\":1024,\"cache_write_tokens\":256},\"output_tokens_details\":{\"reasoning_tokens\":10}}}")
+               usage (openai-usage (load (field parsed value)))]
+           (assert-eq (load (field usage cached-input-tokens)) 1024)
+           (assert-eq (load (field usage cache-write-tokens)) 256)))
+
 (deftest deepseek-openai-replays-reasoning-content
          (let [allocator (malloc-allocator)
                request (test-request allocator)
@@ -601,6 +609,7 @@
            (store! (field response provider-session-id) "thread-cache")
            (store! (field (field response usage) input-tokens) 100)
            (store! (field (field response usage) cached-input-tokens) 80)
+           (store! (field (field response usage) cache-write-tokens) 20)
            (let [request (test-request allocator)]
              (store! (field request cache-key) "cache-key-v1")
              (let [payload (model-completion-payload allocator request (mut response))]
@@ -614,7 +623,9 @@
                          (Some [value] (str-eq value "cache-key-v1"))
                          (None [] false)))
                (assert-eq (json-number-i64 (json-get (json-get payload "usage") "cached_input_tokens"))
-                          80)))))
+                          80)
+               (assert-eq (json-number-i64 (json-get (json-get payload "usage") "cache_write_tokens"))
+                          20)))))
 
 (deftest codex-transport-call-and-close-contract
          (let [allocator (malloc-allocator)
@@ -722,6 +733,7 @@
              (assert (match (json-string-at wire "prompt_cache_key")
                        (Some [value] (str-eq value "conversation-cache-key"))
                        (None [] false)))
+             (assert (not (json-object-has? wire "prompt_cache_options")))
              (assert-eq (json-array-length input) 4)
              (assert (match (json-string-at (json-array-get input 1) "encrypted_content")
                        (Some [value] (str-eq value "opaque"))
@@ -735,6 +747,39 @@
                                  (_ false)))
              (assert (match (json-bool-value (json-get wire "stream"))
                        (Some [enabled] enabled)
+                       (None [] false))))))
+
+(deftest codex-direct-store-false-history-accumulates-across-tool-turns
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               prior (json-parse allocator
+                                 "{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"first\",\"arguments\":\"{}\"}]}")
+               current (json-parse allocator
+                                   "{\"id\":\"resp-2\",\"model\":\"gpt-test\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"second\",\"arguments\":\"{}\"}],\"usage\":{}}")
+               response (alloc/stack ModelResponse)
+               results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+               result (alloc/stack ToolResult)]
+           (store! response (openai-parse-response allocator (load (field current value))))
+           (store! (field result call-id) "call-1")
+           (store! (field result status) (ToolSucceeded))
+           (store! (field result output) (JsonString "first-result"))
+           (store! (field result error) "")
+           (al-push! [ToolResult] results (load result))
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) previous-output)
+                   (load (field prior value)))
+           (store! (field (field request continuation) tool-results) results)
+           (let [cumulative (codex-direct-cumulative-raw-output allocator request response)
+                 output (json-get cumulative "output")]
+             (assert-eq (json-array-length output) 3)
+             (assert (match (json-string-at (json-array-get output 0) "call_id")
+                       (Some [value] (str-eq value "call-1"))
+                       (None [] false)))
+             (assert (match (json-string-at (json-array-get output 1) "type")
+                       (Some [value] (str-eq value "function_call_output"))
+                       (None [] false)))
+             (assert (match (json-string-at (json-array-get output 2) "call_id")
+                       (Some [value] (str-eq value "call-2"))
                        (None [] false))))))
 
 (deftest codex-connection-closes-and-emits-one-terminal-failure

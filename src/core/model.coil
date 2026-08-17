@@ -69,7 +69,8 @@
   [(input-tokens i64)
    (output-tokens i64)
    (reasoning-tokens i64)
-   (cached-input-tokens i64)])
+   (cached-input-tokens i64)
+   (cache-write-tokens i64)])
 
 (defstruct ModelResponse
   [(provider (slice u8))

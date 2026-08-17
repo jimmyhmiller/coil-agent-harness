@@ -4,6 +4,9 @@
 
 This repository contains the first vertical slice of a headless, observable agent
 runtime written in COIL. The durable architectural rules live in [agent.md](agent.md).
+The current product milestone is the narrowly scoped distributed software-factory
+MVP described in [docs/software-factory-mvp.md](docs/software-factory-mvp.md). The TUI
+is a client and development workbench, not the product boundary.
 
 The current slice can:
 
@@ -42,6 +45,49 @@ The version 1 service routes are `POST /v1/runs`,
 `GET /v1/runs/{run_id}/events?after={sequence}`. Mutation bodies carry a
 stable `command_id`; replaying the same command does not repeat its effect.
 
+`GET /v1/tools`, `POST /v1/tools/authorize`, and `POST /v1/tools/call` expose the
+same registry to an agent loop the harness does not drive, such as the Claude
+Agent SDK bridge in `agent-sdk/`. A bridged call runs on the harness's own
+execution path — schema validation, per-tool deadlines, and journaled
+`tool.call.*` events under the caller's session ID. See
+[docs/agent-sdk-bridge.md](docs/agent-sdk-bridge.md).
+
+Runs with `"execution_target":"worker"` remain durably queued for an
+out-of-process worker instead of launching inside the server. Start the minimal worker
+with the same operator credential used by the server:
+
+```sh
+HARNESS_OPERATOR_TOKEN=... python3 scripts/run_worker.py \
+  --server http://127.0.0.1:8080 --worker-id laptop-1
+```
+
+The worker registers, claims one leased assignment at a time, renews its lease while
+the real `harness run` agent process executes, forwards structured progress, and
+records completion through the service. `--once` is useful for automation.
+
+The repository also includes a working Markdown-defined software factory. Its
+manifest contains a goal and reusable worker-role files, not a list of expected output
+files. Run the Snake example entirely through the harness with Luna:
+
+```sh
+python3 scripts/run_markdown_factory.py factories/snake \
+  --harness ./harness --model gpt-5.6-luna
+```
+
+With no workspace argument, the runner creates a fresh directory under
+`.factory-workspaces/` and prints its path. Pass a workspace only when the factory is
+intentionally modifying an existing codebase:
+
+```sh
+python3 scripts/run_markdown_factory.py factories/snake /path/to/existing/codebase \
+  --harness ./harness --model gpt-5.6-luna
+```
+
+Use `--start-at WORKER.md --instruction "..."` to redirect and resume after an
+operator intervention. Factory workers have no arbitrary turn budget. Product-specific
+Markdown invariants and cleanup workers can enforce repository shape and release
+requirements without hard-coding those policies into the generic runner.
+
 A create command can pin `provider` and `model`, or set both to `auto` and provide a
 `routing_profile`. Optional `requires_harness_tools` and `requires_subscription`
 constraints are checked against provider metadata. The resolved command persists a
@@ -70,6 +116,8 @@ string values remain explicit per-child overrides.
 
 Requirements are COIL with its bundled HTTP dependency and Python 3 for subscription
 OAuth. The Codex CLI is needed only when using the optional App Server strategy.
+The Agent SDK bridge is optional: Node 22.18+ and `npm install --prefix agent-sdk`,
+plus the `claude` CLI.
 
 ```sh
 coil build
