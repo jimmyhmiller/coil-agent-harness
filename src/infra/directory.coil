@@ -34,14 +34,19 @@
 (extern chmod :cc c [(ptr i8) u32] (-> i32))
 (extern access :cc c [(ptr i8) i32] (-> i32))
 
+;; hygiene: these platform constants intentionally enter this module's public
+;; namespace -- the code below refers to them by hand, so the generator publishes
+;; the bare name explicitly rather than leaving it in its own template context.
+(defn dirent--public-name [(name Code)] (-> Code)
+  (primitive/syntax->datum name))
 (defn gen-dirent-layout [] (-> Code)
   (if (primitive/code-eq (primitive/target-os) `linux)
       `(do
-         (const DIRENT_NAME_OFFSET 19)
-         (const DIRENT_TYPE_OFFSET 18))
+         (const ~(dirent--public-name `DIRENT_NAME_OFFSET) 19)
+         (const ~(dirent--public-name `DIRENT_TYPE_OFFSET) 18))
       `(do
-         (const DIRENT_NAME_OFFSET 21)
-         (const DIRENT_TYPE_OFFSET 20))))
+         (const ~(dirent--public-name `DIRENT_NAME_OFFSET) 21)
+         (const ~(dirent--public-name `DIRENT_TYPE_OFFSET) 20))))
 (meta (gen-dirent-layout))
 
 ;; DT_SOCK, for callers that want to skip non-sockets without a stat.

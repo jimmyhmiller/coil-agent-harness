@@ -21,11 +21,16 @@
 
 (defn journal-os-pick [(linux Code) (darwin Code)] (-> Code)
   (if (primitive/code-eq (primitive/target-os) `linux) linux darwin))
+;; hygiene: these platform constants intentionally enter this module's public
+;; namespace -- the code below refers to them by hand, so the generator publishes
+;; the bare name explicitly rather than leaving it in its own template context.
+(defn journal--public-name [(name Code)] (-> Code)
+  (primitive/syntax->datum name))
 (defn journal-open-constants [] (-> Code)
   `(do
-     (const JOURNAL_O_APPEND ~(journal-os-pick `1024 `8))
-     (const JOURNAL_O_CREAT ~(journal-os-pick `64 `512))
-     (const JOURNAL_O_CLOEXEC ~(journal-os-pick `524288 `16777216))))
+     (const ~(journal--public-name `JOURNAL_O_APPEND) ~(journal-os-pick `1024 `8))
+     (const ~(journal--public-name `JOURNAL_O_CREAT) ~(journal-os-pick `64 `512))
+     (const ~(journal--public-name `JOURNAL_O_CLOEXEC) ~(journal-os-pick `524288 `16777216))))
 (meta (journal-open-constants))
 (const JOURNAL_O_WRONLY 1)
 (const JOURNAL_FILE_MODE 420)
