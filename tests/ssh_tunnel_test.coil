@@ -1,0 +1,133 @@
+;; Supervisor behavior is tested against a fixture that stands in for ssh, so every
+;; failure path is exercised without needing a reachable SSH server. The one case
+;; that genuinely requires a network peer -- a healthy tunnel to a real host -- lives
+;; in the live integration suite instead.
+(module harness-ssh-tunnel-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-ssh-tunnel" :use *)
+
+(const FIXTURE_PATH "scripts/ssh_tunnel_fixture.sh")
+
+;; Selecting the fixture's behavior is part of building the tunnel that will run it,
+;; so a test never has a spec and a mode that disagree.
+(defn fixture-tunnel [(allocator (ptr Allocator))
+                      (mode (slice u8))
+                      (ready-timeout-ms i64)] (-> SshTunnel)
+  (let [(mut spec) (ssh-tunnel-spec "fixture-host" "" 8080)]
+    (match (os/env-set allocator "SSH_TUNNEL_FIXTURE_MODE" mode true)
+      (Ok [value] 0)
+      (Err [failure] 0))
+    (set! (.ssh-binary spec) FIXTURE_PATH)
+    (set! (.ready-timeout-ms spec) ready-timeout-ms)
+    (ssh-tunnel-new (load spec))))
+
+(defn contains? [(haystack (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find haystack needle)
+    (Some [at] true)
+    (None [] false)))
+
+(deftest spec-defaults-fill-every-omitted-field
+         (let [spec (ssh-tunnel-spec "example.invalid" "" 8080)]
+           ;; An omitted remote host means loopback on the far side, which is the
+           ;; only default that makes forwarding a locally-bound service work.
+           (assert (= (.remote-host spec) "127.0.0.1"))
+           (assert (= (.ssh-binary spec) "ssh"))
+           (assert (> (.ready-timeout-ms spec) 0))
+           (assert (> (.keepalive-seconds spec) 0))
+           (assert (= (slice-len [u8] (.identity-file spec)) 0))))
+
+(deftest spec-validation-names-the-missing-piece
+         (let [(mut no-host) (ssh-tunnel-spec "" "" 8080)
+               (mut no-port) (ssh-tunnel-spec "example.invalid" "" 0)
+               (mut huge-port) (ssh-tunnel-spec "example.invalid" "" 70000)
+               (mut valid) (ssh-tunnel-spec "example.invalid" "" 8080)]
+           (assert (contains? (ssh-tunnel-spec-problem (mut no-host)) "host"))
+           (assert (contains? (ssh-tunnel-spec-problem (mut no-port)) "port"))
+           (assert (contains? (ssh-tunnel-spec-problem (mut huge-port)) "65535"))
+           (assert (= (slice-len [u8] (ssh-tunnel-spec-problem (mut valid))) 0))))
+
+(deftest forward-argument-binds-only-loopback
+         (let [allocator (malloc-allocator)
+               (mut spec) (ssh-tunnel-spec "example.invalid" "10.0.0.5" 9999)
+               argument (ssh-forward-argument allocator 41234 (mut spec))]
+           ;; The local bind address is explicit so a forwarded private service is
+           ;; never republished on a public interface.
+           (assert (= argument "127.0.0.1:41234:10.0.0.5:9999"))))
+
+(deftest backoff-grows-and-is-capped
+         (let [first (ssh-tunnel-backoff-ms 1)
+               second (ssh-tunnel-backoff-ms 2)
+               far (ssh-tunnel-backoff-ms 40)]
+           (assert (> second first))
+           (assert (>= far second))
+           ;; A permanently broken destination must keep being retried eventually,
+           ;; so the delay saturates rather than growing without bound.
+           (assert (<= far 30000))))
+
+(deftest reserved-local-port-is-usable
+         (let [allocator (malloc-allocator)
+               port (ssh-reserve-local-port allocator)]
+           (assert (> port 0))
+           (assert (<= port 65535))
+           ;; Released before it is handed to ssh, so nothing is listening on it.
+           (assert (not (ssh-tunnel-port-accepting? allocator port)))))
+
+(deftest base-url-targets-the-forwarded-port
+         (let [allocator (malloc-allocator)]
+           (assert (= (ssh-tunnel-base-url allocator 41234) "http://127.0.0.1:41234"))))
+
+(deftest a-refused-connection-reports-ssh-own-diagnostic
+         (let [allocator (malloc-allocator)
+               (mut tunnel) (fixture-tunnel allocator "refuse" 2000)]
+           (match (ssh-tunnel-open! (mut tunnel) allocator)
+             (SshTunnelReady [port] (assert false))
+             (SshTunnelFailed [message]
+                              (do
+                                ;; The destination must be named: an operator with
+                                ;; several tunnelled providers has to know which one.
+                                (assert (contains? message "fixture-host"))
+                                ;; ssh's own words survive, rather than being
+                                ;; flattened into a generic transport error.
+                                (assert (contains? message "Permission denied")))))
+           ;; A failed open leaves nothing running and no port claimed.
+           (assert (not (ssh-tunnel-child-alive? (mut tunnel))))
+           (assert (= (.local-port (mut tunnel)) 0))
+           (assert (> (.failures (mut tunnel)) 0))
+           (ssh-tunnel-close! (mut tunnel))))
+
+(deftest a-tunnel-that-never-forwards-fails-on-the-readiness-budget
+         (let [allocator (malloc-allocator)
+               (mut tunnel) (fixture-tunnel allocator "hang" 400)]
+           (match (ssh-tunnel-open! (mut tunnel) allocator)
+             (SshTunnelReady [port] (assert false))
+             (SshTunnelFailed [message]
+                              (assert (contains? message "readiness timeout"))))
+           ;; The child is killed rather than left forwarding nothing forever.
+           (assert (not (ssh-tunnel-child-alive? (mut tunnel))))
+           (ssh-tunnel-close! (mut tunnel))))
+
+(deftest backoff-returns-the-original-cause-instead-of-retrying
+         (let [allocator (malloc-allocator)
+               (mut tunnel) (fixture-tunnel allocator "refuse" 2000)]
+           (match (ssh-tunnel-open! (mut tunnel) allocator)
+             (SshTunnelReady [port] (assert false))
+             (SshTunnelFailed [message] 0))
+           ;; Inside the backoff window the caller sees why it broke the first time,
+           ;; not a fresh timeout that has lost the original diagnostic.
+           (match (ssh-tunnel-ensure! (mut tunnel) allocator)
+             (SshTunnelReady [port] (assert false))
+             (SshTunnelFailed [message]
+                              (assert (contains? message "Permission denied"))))
+           (ssh-tunnel-close! (mut tunnel))))
+
+(deftest closing-an-unopened-tunnel-is-safe
+         (let [allocator (malloc-allocator)
+               (mut tunnel) (fixture-tunnel allocator "refuse" 1000)]
+           ;; Every teardown path is allowed to close unconditionally.
+           (assert (= (ssh-tunnel-close! (mut tunnel)) 0))
+           (assert (= (ssh-tunnel-close! (mut tunnel)) 0))))

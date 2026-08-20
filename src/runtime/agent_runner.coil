@@ -10,6 +10,9 @@
 (import "harness-event" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
+(import "coil.slice" :use *)
+(import "harness-run-inbox" :use *)
+(import "provider-common" :use *)
 (import "harness-tool" :use *)
 (import "harness-system" :use *)
 (import "harness-tool-executor" :use *)
@@ -221,6 +224,8 @@
                  (emitter (ptr EventEmitter))
                  (policy AgentRunPolicy)] (-> ModelResult)
   (let [current (box allocator ModelRequest (load request))
+        ;; Where a person can speak into this run while it is going.
+        inbox (box allocator RunInbox (inbox-open (load (field request inbox))))
         lifecycle
           (if (= (load (field request run-lifecycle)) (cast (ptr i64) 0))
               (box allocator i64 RUN_LIFECYCLE_QUEUED)
@@ -266,6 +271,7 @@
                                                (JsonString "agent run deadline exceeded")))
                       (do
                         (set! turn (+ (load turn) 1))
+                        (runner-deliver-messages! allocator current inbox emitter)
                         (set! (.operation-id current)
                               (runner-model-operation-id allocator
                                                          root-operation-id
@@ -358,6 +364,10 @@
                                                                (set! (.previous-output (.continuation current))
                                                                      (.raw-output response-value))
                                                                (set! (.tool-results (.continuation current)) results)
+                                                               (continuation-remember! allocator
+                                                                                       (field current continuation)
+                                                                                       (.raw-output response-value)
+                                                                                       results)
                                                                ; Required/forced selection is an initial-turn constraint.
                                                                ; Continuing with it would force an endless tool loop after
                                                                ; the requested result has already been supplied.
@@ -373,6 +383,135 @@
       (cancellation-token-close! (load (field current cancellation)))
       0)
     (load final)))
+
+;; Keep the turn that just finished. The list is created on first use so a
+;; request that never continues carries nothing.
+(defn continuation-remember! [(allocator (ptr Allocator))
+                              (continuation (ptr ModelContinuation))
+                              (output Json)
+                              (results (ptr (ArrayList ToolResult)))] (-> i64)
+  (when (= (cast i64 (load (field continuation turns))) 0)
+    (store! (field continuation turns)
+            (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator)))
+    0)
+  (let [(mut turn) (zeroed ContinuationTurn)]
+    (set! (.output turn) output)
+    (set! (.results turn) results)
+    (set! (.user-text turn) "")
+    (al-push! [ContinuationTurn] (load (field continuation turns)) (load turn))
+    0))
+
+;; Put what a person said into the conversation, in order.
+;;
+;; Before the first model turn there is nothing to attach it to, so it joins the
+;; prompt as another user message. After that it becomes a turn of its own, which
+;; is what keeps "you said this after the second tool call" true in the
+;; transcript the model reads.
+;; What a person says arrives in the middle of a conversation the model is
+;; already deep in, right after a tool result, where it reads like more context
+;; rather than a change of orders. It is framed so it cannot be mistaken for
+;; either: this is the person watching, and what they just said wins.
+(defn interjection-text [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+  (let [(mut framed) (sb-new allocator)]
+    (sb-push-str! (mut framed)
+                  "[message from the person watching this run — this arrived just now and takes precedence over the instructions you were given earlier. Follow it from here, and say what you are doing differently.]\n\n")
+    (sb-push-str! (mut framed) text)
+    (sb-finish! (mut framed))))
+
+;; Returns where the message went: 0 into the prompt, because the model has not
+;; said anything yet, and 1 as its own turn in the transcript. The journal
+;; records which, because "the agent ignored me" and "the message went somewhere
+;; the model does not read" look identical from outside.
+;; A person's message is a change of orders, not an aside. Delivering it into the
+;; turn gets it acted on now; adding it to the instructions is what keeps it true
+;; afterwards. Without the second half an agent does the thing it was told and
+;; then drifts back to its original assignment on the next turn, which is worse
+;; than not listening at all.
+(defn instructions-with-order [(allocator (ptr Allocator))
+                               (instructions (slice u8))
+                               (raw (slice u8))] (-> (slice u8))
+  (let [(mut whole) (sb-new allocator)]
+    (sb-push-str! (mut whole) instructions)
+    (sb-push-str! (mut whole)
+                  "\n\nStanding instruction from the person watching this run, given while it was running. It replaces any earlier instruction it contradicts, including the assignment, and stays in force for the rest of the run:\n")
+    (sb-push-str! (mut whole) raw)
+    (sb-finish! (mut whole))))
+
+(defn continuation-interject! [(allocator (ptr Allocator))
+                               (request (ptr ModelRequest))
+                               (raw (slice u8))] (-> i64)
+  (let [continuation (field request continuation)
+        text (interjection-text allocator raw)]
+    (store! (field request instructions)
+            (instructions-with-order allocator
+                                     (load (field request instructions))
+                                     raw))
+    (if (not (load (field continuation present)))
+        (let [(mut spoken) (zeroed Message)]
+          (set! (.role spoken) (UserRole))
+          (set! (.content spoken) text)
+          (al-push! [Message] (load (field request messages)) (load spoken))
+          0)
+        (do
+          (when (= (cast i64 (load (field continuation turns))) 0)
+            (store! (field continuation turns)
+                    (box allocator
+                         (ArrayList ContinuationTurn)
+                         (al-new [ContinuationTurn] allocator)))
+            0)
+          (let [turns (load (field continuation turns))
+                n (al-len [ContinuationTurn] (load turns))]
+            ;; Attach it to the turn that just finished rather than inventing an
+            ;; empty one. A wire that pairs an assistant turn with exactly one
+            ;; user turn then carries the message beside the tool results it
+            ;; interrupted, which is where a person's words belong.
+            (if (and (> n 0)
+                     (= (slice-len [u8]
+                                   (.user-text (al-elem [ContinuationTurn]
+                                                        turns
+                                                        (- n 1))))
+                        0))
+                (do
+                  (set! (.user-text (al-elem [ContinuationTurn] turns (- n 1))) text)
+                  1)
+                (let [(mut turn) (zeroed ContinuationTurn)]
+                  (set! (.output turn) (JsonNull))
+                  (set! (.results turn) (cast (ptr (ArrayList ToolResult)) 0))
+                  (set! (.user-text turn) text)
+                  (al-push! [ContinuationTurn] turns (load turn))
+                  1)))))))
+
+;; Everything a person has said since the last turn. Draining here, immediately
+;; before the model is asked anything, is what makes a message land at the first
+;; moment the conversation can take one.
+(defn runner-deliver-messages! [(allocator (ptr Allocator))
+                                (request (ptr ModelRequest))
+                                (inbox (ptr RunInbox))
+                                (emitter (ptr EventEmitter))] (-> i64)
+  (if (= (slice-len [u8] (.path inbox)) 0)
+      0
+      (let [messages (inbox-drain! allocator inbox)
+            n (al-len [(slice u8)] messages)
+            (mut i) 0]
+        (loop (if (>= (load i) n)
+                  (break)
+                  (let [text (al-get [(slice u8)] messages (load i))
+                        placement (continuation-interject! allocator request text)
+                        (mut record) (json-object allocator)]
+                    (json-put-string! (mut record) "text" text)
+                    (json-put-string! (mut record)
+                                      "placement"
+                                      (if (= placement 0) "prompt" "turn"))
+                    (json-object-put! (mut record)
+                                      "turns"
+                                      (json-integer allocator
+                                                    (let [turns (load (field (field request continuation) turns))]
+                                                      (if (= (cast i64 turns) 0)
+                                                          0
+                                                          (al-len [ContinuationTurn] (load turns))))))
+                    (runner-event emitter request (OperatorMessageDelivered) (load record))
+                    (set! i (+ (load i) 1)))))
+        n)))
 
 (defn agent-run-worker [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr AgentRunJob) opaque)

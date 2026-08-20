@@ -6,6 +6,7 @@
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
+(import "harness-provider-config" :use *)
 (import "provider-common" :use *)
 
 (defsum ModelRouteResult
@@ -22,11 +23,36 @@
     (Some [value] value)
     (None [] false)))
 
-(defn route-known-provider? [(provider (slice u8))] (-> bool)
-  (let [capabilities (provider-capabilities-for provider)]
-    (> (.cost-tier capabilities) 0)))
+;; A provider is routable when the harness resolves it itself or when the operator
+;; declared it. Configuration is consulted rather than assumed absent, so a declared
+;; provider is a first-class routing target and not a special case bolted on after
+;; the decision has already been made.
+(defn route-known-provider? [(provider (slice u8))
+                             (config (ptr ProviderConfig))] (-> bool)
+  (if (provider-config-has? config provider)
+      true
+      (let [capabilities (provider-capabilities-for provider)]
+        (> (.cost-tier capabilities) 0))))
 
-(defn route-default-model [(provider (slice u8))] (-> (slice u8))
+;; Capabilities for either kind of provider. A declared provider describes itself;
+;; a built-in one is described by the capability table.
+(defn route-capabilities [(provider (slice u8))
+                          (config (ptr ProviderConfig))] (-> ProviderCapabilities)
+  (let [at (provider-config-find config provider)]
+    (if (>= at 0)
+        (configured-provider-capabilities (provider-config-at config at))
+        (provider-capabilities-for provider))))
+
+;; The model to use when a provider was pinned without one. A declared provider
+;; supplies its own, which is what lets an operator pin the provider alone.
+(defn route-default-model [(provider (slice u8))
+                           (config (ptr ProviderConfig))] (-> (slice u8))
+  (let [at (provider-config-find config provider)]
+    (if (>= at 0)
+        (load (field (provider-config-at config at) default-model))
+        (route-builtin-default-model provider))))
+
+(defn route-builtin-default-model [(provider (slice u8))] (-> (slice u8))
   (cond (= provider "openai") "gpt-5.6-terra"
         (= provider "deepseek-openai") "deepseek-v4-flash"
         (= provider "deepseek-anthropic") "deepseek-v4-flash"
@@ -64,7 +90,8 @@
     (load value)))
 
 (defn model-route-command! [(allocator (ptr Allocator))
-                            (command (mut Json))] (-> ModelRouteResult)
+                            (command (mut Json))
+                            (config (ptr ProviderConfig))] (-> ModelRouteResult)
   (let [requested-provider (route-command-string (load command) "provider")
         requested-model (route-command-string (load command) "model")
         automatic
@@ -80,16 +107,16 @@
               requested-provider)
         selected-model
           (if automatic
-              (route-default-model selected-provider)
+              (route-default-model selected-provider config)
               requested-model)
-        capabilities (provider-capabilities-for selected-provider)]
+        capabilities (route-capabilities selected-provider config)]
     (cond (= (slice-len [u8] selected-provider) 0) (ModelRouteRejected "unknown routing profile")
           (and automatic
                (and (> (slice-len [u8] requested-model) 0)
                     (not (= requested-model "auto"))))
             (ModelRouteRejected "automatic provider selection requires model to be omitted or auto")
           (and (not automatic)
-               (and (not (route-known-provider? selected-provider))
+               (and (not (route-known-provider? selected-provider config))
                     (or requires-tools requires-subscription)))
             (ModelRouteRejected "custom provider capabilities are unavailable for requested constraints")
           (or (= (slice-len [u8] selected-model) 0)

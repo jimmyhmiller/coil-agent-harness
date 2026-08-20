@@ -3,13 +3,22 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.atomic" :use *)
 (import "coil.match" :use *)
+(import "coil.slice" :use *)
 (import "harness-json" :use *)
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
 (defstruct FactoryWorkerStatus
   [(reported i64)
-   (ready i64)])
+   (ready i64)
+   ;; What the worker said when it reported. A worker that says it is not ready
+   ;; has just written down what is left to do; that sentence is the best
+   ;; instruction anyone could give it next, so it is kept rather than dropped.
+   (summary (slice u8))
+   (evidence (slice u8))
+   ;; Where to copy those into. The tool runs in a per-run allocator that is
+   ;; closed before the coordinator reads any of this.
+   (allocator (ptr Allocator))])
 
 (defstruct FactoryStatusTool
   [(status (ptr FactoryWorkerStatus))])
@@ -17,7 +26,15 @@
 (defn factory-worker-status-reset! [(status (ptr FactoryWorkerStatus))] (-> i64)
   (atomic-store (field status reported) 0)
   (atomic-store (field status ready) 0)
+  (store! (field status summary) "")
+  (store! (field status evidence) "")
   0)
+
+(defn factory-worker-status-summary [(status (ptr FactoryWorkerStatus))] (-> (slice u8))
+  (load (field status summary)))
+
+(defn factory-worker-status-evidence [(status (ptr FactoryWorkerStatus))] (-> (slice u8))
+  (load (field status evidence)))
 
 (defn factory-worker-status-reported? [(status (ptr FactoryWorkerStatus))] (-> bool)
   (!= (atomic-load (field status reported)) 0))
@@ -30,6 +47,16 @@
     (set! (.error result) message)
     (load result)))
 
+;; Copy into the status's own allocator: the argument JSON belongs to a run
+;; allocator that is gone by the time anyone asks what the worker said.
+(defn factory-status-keep [(status (ptr FactoryWorkerStatus))
+                           (value (Option (slice u8)))] (-> (slice u8))
+  (match value
+    (None [] "")
+    (Some [text]
+          (let [owner (load (field status allocator))]
+            (if (= (cast i64 owner) 0) "" (json-copy-string owner text))))))
+
 (defn execute-factory-status [(self (ptr FactoryStatusTool))
                               (call (ptr ToolCall))
                               (allocator (ptr Allocator))] (-> ToolResult)
@@ -40,6 +67,10 @@
                 (mut result) (tool-result-empty (.id call) (ToolSucceeded))
                 status (load (field self status))]
             (atomic-store (field status ready) (if ready 1 0))
+            (store! (field status summary)
+                    (factory-status-keep status (json-string-at (.arguments call) "summary")))
+            (store! (field status evidence)
+                    (factory-status-keep status (json-string-at (.arguments call) "evidence")))
             (atomic-store (field status reported) 1)
             (json-put-bool! (mut output) "recorded" true)
             (json-put-bool! (mut output) "ready" ready)

@@ -25,6 +25,13 @@
   [(directory (slice u8))
    (name (slice u8))
    (goal (slice u8))
+   ;; What this workflow needs before it can run: "" for nothing, "issue" for a
+   ;; piece of work handed to it as context. `factories/issues` reads "the issue
+   ;; supplied when this factory starts"; started without one it has a workspace
+   ;; and an instruction to fix something nobody named, which is a run that can
+   ;; only waste a model. Declaring it is what lets both the CLI and the window
+   ;; refuse instead.
+   (input (slice u8))
    (common-context (ArrayList (slice u8)))
    (tool-groups (ArrayList (slice u8)))
    (before-commands (ArrayList (slice u8)))
@@ -183,11 +190,16 @@
                       (match (json-string-at manifest "goal")
                         (Some [value] value)
                         (None [] ""))
+                    input
+                      (match (json-string-at manifest "input")
+                        (Some [value] value)
+                        (None [] ""))
                     commands (json-get manifest "commands")
                     (mut definition) (zeroed FactoryDefinition)]
                 (set! (.directory definition) directory)
                 (set! (.name definition) name)
                 (set! (.goal definition) goal)
+                (set! (.input definition) input)
                 (set! (.common-context definition) (al-new [(slice u8)] allocator))
                 (set! (.tool-groups definition) (al-new [(slice u8)] allocator))
                 (set! (.before-commands definition) (al-new [(slice u8)] allocator))
@@ -197,6 +209,8 @@
                 (set! (.workers definition) (al-new [FactoryWorker] allocator))
                 (cond (or (= (slice-len [u8] name) 0) (= (slice-len [u8] goal) 0))
                         (FactoryInvalid "factory.json requires non-empty name and goal")
+                      (not (or (= input "") (= input "issue")))
+                        (FactoryInvalid "factory.json input must be \"issue\" when present")
                       (not (factory-load-strings! (json-get (json-get manifest "tools") "groups")
                                                   (mut (field definition tool-groups))))
                         (FactoryInvalid "factory.json requires a tools.groups array")

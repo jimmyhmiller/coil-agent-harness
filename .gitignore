@@ -51,6 +51,10 @@ dist/
 /.factory-artifacts/
 /.factory-runs/
 /.factory-workspaces/
+# A run's inbox and the window's own scratch: local conversation, not source.
+/.factory-inbox/
+/.coil-gui-service-*.jsonl
+/.coil-gui-last-run.log
 **/.factory/
 **/.coil/
 /examples/**/build/

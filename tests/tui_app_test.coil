@@ -11,16 +11,22 @@
 (import "harness-run-service" :use *)
 (import "harness-system" :use *)
 (import "harness-tui-app" :use *)
+(import "harness-provider-config" :use *)
 (import "harness-tui-input-reader" :use *)
 (import "provider-common" :use *)
 
 (deftest automatic-selection-status-shows-the-resolved-model
-         (assert (= (tui-status-provider "auto") "codex"))
-         (assert (= (tui-status-model "auto" "auto") "gpt-5.6-terra")))
+         (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)]
+           (assert (= (tui-status-provider "auto") "codex"))
+           (assert (= (tui-status-model "auto" "auto" (mut empty-config)) "gpt-5.6-terra"))))
 
 (deftest pinned-selection-status-remains-pinned
-         (assert (= (tui-status-provider "claude") "claude"))
-         (assert (= (tui-status-model "claude" "claude-opus-5") "claude-opus-5")))
+         (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)]
+           (assert (= (tui-status-provider "claude") "claude"))
+           (assert (= (tui-status-model "claude" "claude-opus-5" (mut empty-config))
+                      "claude-opus-5"))))
 
 (deftest idle-composer-discovers-an-addressed-notification-run
          (let [allocator (malloc-allocator)

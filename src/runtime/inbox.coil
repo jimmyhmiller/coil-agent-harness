@@ -1,0 +1,147 @@
+;; Talking to a run while it is running.
+;;
+;; A run is a process somebody started and then watched. Until now the only thing
+;; a person could do to one was cancel it: if an agent was heading somewhere
+;; wrong, or the person thought of something halfway through, there was nowhere
+;; to put that. This is that place.
+;;
+;; A run's inbox is a file of one JSON object per line:
+;;
+;;   {"version":1,"text":"stop rewriting the tests, just fix the arity"}
+;;
+;; at `$HARNESS_INBOX_DIR/<run-id>.jsonl`, defaulting to `.factory-inbox` under
+;; the working directory. A file rather than a socket because the thing being
+;; talked to is a separate process that may have been started by a terminal, a
+;; window, or a cron job, and all three can write a line. Appends are O_APPEND,
+;; so a writer never has to coordinate with the reader or with another writer.
+;;
+;; The agent loop drains it between turns and injects what it finds as a user
+;; message. That means a message lands at the next turn boundary -- after the
+;; tool call in flight, before the next model request -- which is as soon as a
+;; conversation can honestly take one.
+(module harness-run-inbox)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.fs" :as fs)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-json" :use *)
+(import "provider-common" :use *)
+
+(const INBOX_DIRECTORY ".factory-inbox")
+
+;; How far into the file this reader has already read. Only whole lines are
+;; consumed, so a message being appended while this runs is picked up next time
+;; rather than delivered in half.
+(defstruct RunInbox [(path (slice u8)) (consumed i64)])
+
+(defn inbox-env-or [(allocator (ptr Allocator))
+                    (name (slice u8))
+                    (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get allocator name)
+    (Ok [found]
+        (match found
+          (Some [owned] (os/owned-string-slice owned))
+          (None [] fallback)))
+    (Err [failure] fallback)))
+
+(defn inbox-root [(allocator (ptr Allocator))] (-> (slice u8))
+  (inbox-env-or allocator "HARNESS_INBOX_DIR" INBOX_DIRECTORY))
+
+;; The inbox of one run. Run ids are already file-safe: they are built from a
+;; factory name and a timestamp.
+(defn inbox-path [(allocator (ptr Allocator)) (run-id (slice u8))] (-> (slice u8))
+  (let [(mut name) (sb-new allocator)]
+    (sb-push-str! (mut name) run-id)
+    (sb-push-str! (mut name) ".jsonl")
+    (path-join allocator (inbox-root allocator) (sb-finish! (mut name)))))
+
+(defn inbox-open [(path (slice u8))] (-> RunInbox)
+  (let [inbox (alloc/stack RunInbox)]
+    (set! (.path inbox) path)
+    (set! (.consumed inbox) 0)
+    (load inbox)))
+
+;; Put a message in a run's inbox. Appending is the whole protocol: no lock, no
+;; handshake, and nothing to clean up if the run has already finished -- an
+;; unread inbox is just a file nobody opened.
+(defn inbox-send! [(allocator (ptr Allocator))
+                   (path (slice u8))
+                   (text (slice u8))] (-> bool)
+  (if (= (slice-len [u8] text) 0)
+      false
+      (let [(mut record) (json-object allocator)
+            (mut line) (sb-new allocator)]
+        (directory-create-all allocator (inbox-root allocator) 448)
+        (json-object-put! (mut record) "version" (json-integer allocator 1))
+        (json-put-string! (mut record) "text" text)
+        (sb-push-str! (mut line) (json-stringify allocator (load record)))
+        (sb-push-byte! (mut line) (cast u8 10))
+        (>= (event-journal-append-bytes! allocator path (sb-finish! (mut line))) 0))))
+
+(defn inbox-last-newline [(text (slice u8))] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut at) n
+        (mut found) -1]
+    (loop (if (or (<= (load at) 0) (>= (load found) 0))
+              (break)
+              (do
+                (when (= (cast i64 (slice-get [u8] text (- (load at) 1))) 10)
+                  (store! found (- (load at) 1))
+                  0)
+                (set! at (- (load at) 1)))))
+    (load found)))
+
+(defn inbox-line-end [(text (slice u8)) (from i64)] (-> i64)
+  (let [n (slice-len [u8] text)
+        (mut at) from]
+    (loop (if (or (>= (load at) n) (= (cast i64 (slice-get [u8] text (load at))) 10))
+              (break)
+              (set! at (+ (load at) 1))))
+    (load at)))
+
+;; Everything written since the last drain, oldest first. A malformed line is
+;; skipped rather than failing the drain: a run must not die because something
+;; wrote nonsense into its mailbox.
+(defn inbox-drain! [(allocator (ptr Allocator))
+                    (inbox (ptr RunInbox))] (-> (ArrayList (slice u8)))
+  (let [(mut out) (al-new [(slice u8)] allocator)]
+    (if (not (path-exists? allocator (.path inbox)))
+        (load out)
+        (match (fs/read-file allocator (.path inbox))
+          (Err [failure] (load out))
+          (Ok [text]
+              (let [n (slice-len [u8] text)
+                    from (.consumed inbox)]
+                (if (>= from n)
+                    (load out)
+                    (let [complete (inbox-last-newline text)]
+                      (if (< complete from)
+                          (load out)
+                          (let [(mut at) from]
+                            (loop (if (>= (load at) n)
+                                      (break)
+                                      (let [stop (inbox-line-end text (load at))
+                                            line (subslice [u8] text (load at) stop)]
+                                        (when (> (slice-len [u8] line) 1)
+                                          (let [parsed (json-parse allocator line)]
+                                            (when (.ok parsed)
+                                              (match (json-string-at (.value parsed) "text")
+                                                (Some [message]
+                                                      (when (> (slice-len [u8] message) 0)
+                                                        (al-push! [(slice u8)]
+                                                                  (mut out)
+                                                                  (json-copy-string allocator message))
+                                                        0))
+                                                (None [] 0))
+                                              0))
+                                          0)
+                                        (if (>= stop n) (break) (set! at (+ stop 1))))))
+                            (store! (field inbox consumed) (+ complete 1))
+                            (load out)))))))))))

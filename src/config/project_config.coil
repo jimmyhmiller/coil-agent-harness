@@ -1,0 +1,289 @@
+;; Operator-declared projects.
+;;
+;; A factory run has always needed a workspace, and until now an unnamed one got a
+;; fresh empty scratch directory under `.factory-workspaces`. That is the right
+;; default for a factory that builds something from nothing and the wrong one for
+;; every workflow that exists to change a codebase someone already has. A project
+;; is the missing noun: a name for a checkout, declared once, so that running a
+;; workflow against it is `--project snake` rather than a path retyped at every
+;; call site and remembered by no one.
+;;
+;; The file lives at `$HARNESS_CONFIG_DIR/projects.json`, defaulting to
+;; `~/.coil-agent-harness/projects.json` -- the same directory `providers.json`
+;; already uses, and machine-specific for the same reason: where your checkouts
+;; live is not something to commit to a repository.
+;;
+;;   {
+;;     "version": 1,
+;;     "projects": [
+;;       {
+;;         "name": "snake",
+;;         "path": "~/Documents/Code/projects/coil-snake",
+;;         "label": "Coil Snake",
+;;         "summary": "SDL2 snake, the factory's standing example",
+;;         "default_issue_workflow": "issues"
+;;       }
+;;     ]
+;;   }
+;;
+;; Absence is not an error: an installation with no projects behaves exactly as it
+;; did before this file existed. Anything else -- unreadable, unparseable, missing a
+;; name or path, naming a relative path, or declaring one name twice -- is a hard
+;; failure that names the offending entry. A project resolves to a directory that
+;; agents are about to write into, so a typo must stop the run rather than quietly
+;; send the work somewhere else.
+(module harness-project-config)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.fs" :as fs)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+
+(const PROJECT_CONFIG_FILE "projects.json")
+(const PROJECT_CONFIG_VERSION 1)
+
+;; The workflow an issue is handed to when neither the issue nor the caller names
+;; one. `factories/issues` is the harness's own generic implement-and-verify
+;; workflow, which is what an issue filed against an existing codebase wants.
+(const PROJECT_DEFAULT_ISSUE_WORKFLOW "issues")
+
+(defstruct ConfiguredProject
+  [(name (slice u8))
+   ;; Absolute, with a leading `~` already expanded. Nothing downstream should
+   ;; have to know the file may have been written with a home-relative path.
+   (path (slice u8))
+   (label (slice u8))
+   (summary (slice u8))
+   (default-issue-workflow (slice u8))])
+
+(defstruct ProjectConfig [(projects (ArrayList ConfiguredProject))])
+
+(defsum ProjectConfigResult
+  (ProjectConfigLoaded [(config ProjectConfig)])
+  (ProjectConfigInvalid [(message (slice u8))]))
+
+(defn project-config-new [(allocator (ptr Allocator))] (-> ProjectConfig)
+  (let [config (alloc/stack ProjectConfig)]
+    (set! (.projects config) (al-new [ConfiguredProject] allocator))
+    (load config)))
+
+(defn project-config-count [(config (ptr ProjectConfig))] (-> i64)
+  (al-len [ConfiguredProject] (.projects config)))
+
+(defn project-config-at [(config (ptr ProjectConfig)) (at i64)] (-> (ptr ConfiguredProject))
+  (al-elem [ConfiguredProject] (mut (.projects config)) at))
+
+;; Index of the project with this name, or -1. Callers take the index rather than a
+;; borrowed pointer so a configuration can be consulted without pinning its storage.
+(defn project-config-find [(config (ptr ProjectConfig)) (name (slice u8))] (-> i64)
+  (let [n (project-config-count config)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (= (load (field (project-config-at config (load i)) name)) name)
+                  (store! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn project-config-has? [(config (ptr ProjectConfig)) (name (slice u8))] (-> bool)
+  (>= (project-config-find config name) 0))
+
+;; The checkout this name stands for, or "" when nothing declares it. Resolution is
+;; deliberately total: callers distinguish "no such project" from a real path by the
+;; empty string rather than by a sum they have to match on at every call site.
+(defn project-config-resolve [(config (ptr ProjectConfig)) (name (slice u8))] (-> (slice u8))
+  (let [at (project-config-find config name)]
+    (if (< at 0) "" (load (field (project-config-at config at) path)))))
+
+(defn project-config-issue-workflow [(config (ptr ProjectConfig))
+                                     (name (slice u8))] (-> (slice u8))
+  (let [at (project-config-find config name)]
+    (if (< at 0)
+        PROJECT_DEFAULT_ISSUE_WORKFLOW
+        (load (field (project-config-at config at) default-issue-workflow)))))
+
+(defn project-env-or [(allocator (ptr Allocator))
+                      (name (slice u8))
+                      (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get allocator name)
+    (Ok [found]
+        (match found
+          (Some [owned] (os/owned-string-slice owned))
+          (None [] fallback)))
+    (Err [failure] fallback)))
+
+(defn project-config-root [(allocator (ptr Allocator))] (-> (slice u8))
+  (let [configured (project-env-or allocator "HARNESS_CONFIG_DIR" "")]
+    (if (> (slice-len [u8] configured) 0)
+        configured
+        (path-join allocator
+                   (project-env-or allocator "HOME" "/tmp")
+                   ".coil-agent-harness"))))
+
+(defn project-config-path [(allocator (ptr Allocator))] (-> (slice u8))
+  (path-join allocator (project-config-root allocator) PROJECT_CONFIG_FILE))
+
+(defn project-string [(value Json) (key (slice u8)) (fallback (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [found] found)
+    (None [] fallback)))
+
+;; `~/x` becomes `$HOME/x`. A bare `~` is the home directory itself. Everything
+;; else is returned unchanged, including a `~user` form this does not resolve --
+;; the entry rule below rejects that separately rather than passing a path with a
+;; literal tilde to a subprocess.
+(defn project-expand-home [(allocator (ptr Allocator)) (path (slice u8))] (-> (slice u8))
+  (let [n (slice-len [u8] path)]
+    (if (or (= n 0) (not (= (primitive-byte path 0) 126)))
+        path
+        (let [home (project-env-or allocator "HOME" "")]
+          (cond (= (slice-len [u8] home) 0) path
+                (= n 1) home
+                (= (primitive-byte path 1) 47)
+                  (path-join allocator home (subslice [u8] path 2 n))
+                :else path)))))
+
+(defn primitive-byte [(text (slice u8)) (at i64)] (-> i64)
+  (cast i64 (slice-get [u8] text at)))
+
+(defn project-entry-error [(allocator (ptr Allocator))
+                           (name (slice u8))
+                           (at i64)
+                           (message (slice u8))] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)]
+    (sb-push-str! (mut text) "projects.json: project ")
+    (if (> (slice-len [u8] name) 0)
+        (do
+          (sb-push-byte! (mut text) 34)
+          (sb-push-str! (mut text) name)
+          (sb-push-byte! (mut text) 34)
+          0)
+        (do
+          (sb-push-str! (mut text) "at index ")
+          (sb-push-i64! (mut text) at)
+          0))
+    (sb-push-str! (mut text) " ")
+    (sb-push-str! (mut text) message)
+    (sb-str (load text))))
+
+;; A project name is used as a directory component and matched against a factory
+;; manifest, so it is restricted to what is unambiguous in both: letters, digits,
+;; dash, underscore, and dot.
+(defn project-name-valid? [(name (slice u8))] (-> bool)
+  (let [n (slice-len [u8] name)
+        (mut i) 0
+        (mut ok) (> n 0)]
+    (loop (if (or (>= (load i) n) (not (load ok)))
+              (break)
+              (let [c (primitive-byte name (load i))]
+                (when (not (or (and (>= c 97) (<= c 122))
+                               (or (and (>= c 65) (<= c 90))
+                                   (or (and (>= c 48) (<= c 57))
+                                       (or (= c 45) (or (= c 95) (= c 46)))))))
+                  (store! ok false)
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load ok)))
+
+;; Read one entry into `project`, returning "" or the reason it was rejected.
+(defn project-config-entry [(allocator (ptr Allocator))
+                            (entry Json)
+                            (at i64)
+                            (config (ptr ProjectConfig))
+                            (project (mut ConfiguredProject))] (-> (slice u8))
+  (let [name (project-string entry "name" "")
+        declared (project-string entry "path" "")
+        path (project-expand-home allocator declared)]
+    (cond (= (slice-len [u8] name) 0) (project-entry-error allocator "" at "has no name")
+          (not (project-name-valid? name))
+            (project-entry-error allocator
+                                 name
+                                 at
+                                 "has a name outside letters, digits, dash, underscore, and dot")
+          (project-config-has? config name)
+            (project-entry-error allocator name at "is declared more than once")
+          (= (slice-len [u8] declared) 0)
+            (project-entry-error allocator name at "has no path")
+          (not (starts-with path "/"))
+            (project-entry-error allocator
+                                 name
+                                 at
+                                 "names a path that is not absolute; use a full path or one starting with \"~/\"")
+          :else
+            (do
+              (set! (.name project) name)
+              (set! (.path project) path)
+              (set! (.label project) (project-string entry "label" name))
+              (set! (.summary project) (project-string entry "summary" ""))
+              (set! (.default-issue-workflow project)
+                    (project-string entry
+                                    "default_issue_workflow"
+                                    PROJECT_DEFAULT_ISSUE_WORKFLOW))
+              ""))))
+
+(defn project-version-problem [(root Json)] (-> (slice u8))
+  (let [version
+          (if (json-object-has? root "version")
+              (json-number-i64 (json-get root "version"))
+              PROJECT_CONFIG_VERSION)]
+    (if (= version PROJECT_CONFIG_VERSION)
+        ""
+        "projects.json: unsupported version; this harness reads version 1")))
+
+;; Parse an already-read document. Separate from reading the file so the format has
+;; tests that do not need a filesystem.
+(defn project-config-parse [(allocator (ptr Allocator))
+                            (source (slice u8))] (-> ProjectConfigResult)
+  (let [parsed (json-parse allocator source)]
+    (if (not (.ok parsed))
+        (ProjectConfigInvalid "projects.json is not valid JSON")
+        (let [root (.value parsed)
+              version-problem (project-version-problem root)]
+          (if (> (slice-len [u8] version-problem) 0)
+              (ProjectConfigInvalid version-problem)
+              (let [entries (json-get root "projects")
+                    count (json-array-length entries)
+                    (mut config) (project-config-new allocator)
+                    (mut failure) ""
+                    (mut i) 0]
+                (loop (if (or (>= (load i) count) (> (slice-len [u8] (load failure)) 0))
+                          (break)
+                          (let [(mut project) (zeroed ConfiguredProject)
+                                problem
+                                  (project-config-entry allocator
+                                                        (json-array-get entries (load i))
+                                                        (load i)
+                                                        (mut config)
+                                                        (mut project))]
+                            (if (> (slice-len [u8] problem) 0)
+                                (set! failure problem)
+                                (al-push! [ConfiguredProject]
+                                          (mut (.projects config))
+                                          (load project)))
+                            (set! i (+ (load i) 1)))))
+                (if (> (slice-len [u8] (load failure)) 0)
+                    (ProjectConfigInvalid (load failure))
+                    (ProjectConfigLoaded (load config)))))))))
+
+;; Load the operator's projects.
+;;
+;; A missing file yields an empty configuration, because having none is the normal
+;; case and must behave exactly like having an empty one. A file that exists but
+;; cannot be read is a failure: the operator declared projects and the harness
+;; cannot honour them.
+(defn project-config-load [(allocator (ptr Allocator))] (-> ProjectConfigResult)
+  (let [path (project-config-path allocator)]
+    (if (not (path-exists? allocator path))
+        (ProjectConfigLoaded (project-config-new allocator))
+        (match (fs/read-file allocator path)
+          (Err [failure] (ProjectConfigInvalid "projects.json exists but could not be read"))
+          (Ok [bytes] (project-config-parse allocator bytes))))))

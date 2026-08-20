@@ -15,6 +15,8 @@
 (import "harness-filesystem-tools" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
+(import "harness-run-inbox" :use *)
+(import "coil.os" :as os :use *)
 (import "harness-runtime-controller" :use *)
 (import "harness-search-tool" :use *)
 (import "harness-system" :use *)
@@ -149,6 +151,43 @@
                 (set! i (+ (load i) 1))))))
   0)
 
+;; How many times a worker that says "not ready" is sent back in before the run
+;; gives up. A worker reporting what is left is describing work, not failing:
+;; the answer to "not ready" is "carry on", not "stop everything". The bound
+;; exists so a worker that cannot make progress cannot spend forever proving it.
+(const FACTORY_STAGE_ATTEMPTS 5)
+
+;; What to say to a worker that reported it was not done. Its own sentence is the
+;; instruction: it has just written the most accurate description of the
+;; remaining work that anybody has.
+(defn factory-continue-prompt [(allocator (ptr Allocator))
+                               (prompt (slice u8))
+                               (summary (slice u8))
+                               (attempt i64)] (-> (slice u8))
+  (let [(mut out) (sb-new allocator)]
+    (sb-push-str! (mut out) prompt)
+    (sb-push-str! (mut out)
+                  "\n\nYou already worked on this assignment in this same workspace and reported that it was not ready. This is what you said was left:\n\n")
+    (sb-push-str! (mut out) (if (= (slice-len [u8] summary) 0) "(no summary given)" summary))
+    (sb-push-str! (mut out)
+                  "\n\nCarry on from there. The work you already did is on disk -- inspect it rather than starting over. Do the remaining work now; do not hand it back describing it again. Report ready=true when it is genuinely done, and ready=false only if you are blocked on something you cannot do here, saying exactly what blocks you.")
+    (sb-finish! (mut out))))
+
+(defn factory-continue-payload [(allocator (ptr Allocator))
+                                (worker (ref FactoryWorker))
+                                (attempt i64)
+                                (reported bool)
+                                (summary (slice u8))] (-> Json)
+  (let [(mut payload) (json-object allocator)]
+    (json-put-string! (mut payload) "worker" (.file worker))
+    (json-object-put! (mut payload) "attempt" (json-integer allocator attempt))
+    (json-object-put! (mut payload) "attempts" (json-integer allocator FACTORY_STAGE_ATTEMPTS))
+    ;; A worker that finished without reporting at all is treated the same way:
+    ;; it did not say it was done, so it is not done.
+    (json-put-bool! (mut payload) "reported" reported)
+    (json-put-string! (mut payload) "remaining" summary)
+    (load payload)))
+
 (defn factory-stage-prompt [(allocator (ptr Allocator))
                             (definition (ref FactoryDefinition))
                             (worker (ref FactoryWorker))
@@ -177,7 +216,7 @@
           0))
       0)
     (sb-push-str! (mut prompt)
-                  "\nExecute the Markdown assignment in this workspace using the available tools and supplied context. The factory definition above is this run's private copy; you may update its context, goal, tool groups, worker list, or later worker Markdown when that helps subsequent phases. The coordinator reloads it before the next phase. Use inspect_workflow when you need the live ordered topology, current position, or completed history. The workflow continues in order by default; use set_workflow_state to complete early or route to a named worker. Decide what validation the assignment requires and perform it. Before finishing, call report_worker_status with ready=true only if you believe the assignment is complete and validated; otherwise report ready=false and explain what remains.")
+                  "\nA person may be watching this run and can send you a message while it is going. If one arrives it is marked as coming from them; treat it as a change of orders that outranks this assignment, act on it immediately, and say what you changed.\n\nExecute the Markdown assignment in this workspace using the available tools and supplied context. The factory definition above is this run's private copy; you may update its context, goal, tool groups, worker list, or later worker Markdown when that helps subsequent phases. The coordinator reloads it before the next phase. Use inspect_workflow when you need the live ordered topology, current position, or completed history. The workflow continues in order by default; use set_workflow_state to complete early or route to a named worker. Decide what validation the assignment requires and perform it. Before finishing, call report_worker_status with ready=true only if you believe the assignment is complete and validated; otherwise report ready=false and explain what remains.")
     (sb-finish! (mut prompt))))
 
 (defn factory-request [(allocator (ptr Allocator))
@@ -185,7 +224,12 @@
                        (run-id (slice u8))
                        (model (slice u8))
                        (reasoning (slice u8))
-                       (prompt (slice u8))] (-> ModelRequest)
+                       (prompt (slice u8))
+                       ;; Every worker of a factory reads the same inbox, the
+                       ;; factory's own: a person watching a run says something
+                       ;; to "this run", not to whichever step happens to hold
+                       ;; the floor when they hit return.
+                       (inbox (slice u8))] (-> ModelRequest)
   (let [request (alloc/stack ModelRequest)
         messages (box allocator (ArrayList Message) (al-new [Message] allocator))
         message (alloc/stack Message)]
@@ -196,7 +240,7 @@
     (set! (.operation-id request) "model-1")
     (set! (.model request) model)
     (set! (.instructions request)
-          "Complete the assigned work with the available tools and report your worker status before finishing.")
+          "Complete the assigned work with the available tools and report your worker status before finishing. A person may be watching this run and can send a message into it while it is going. Such a message arrives marked as coming from them; it outranks the assignment and whatever you had planned, and must be acted on in the very next thing you do. Say what you are changing, then do it.")
     (set! (.cache-key request) "")
     (set! (.prompt-cache-key request) run-id)
     (set! (.messages request) messages)
@@ -209,11 +253,17 @@
     (set! (.deadline-monotonic-ms request) 0)
     (set! (.cancellation request) (cast (ptr CancellationToken) 0))
     (set! (.run-lifecycle request) (cast (ptr i64) 0))
+    (set! (.inbox request) inbox)
     (set! (.present (.continuation request)) false)
     (set! (.previous-response-id (.continuation request)) "")
     (set! (.provider-session-id (.continuation request)) "")
     (set! (.previous-output (.continuation request)) (JsonNull))
     (set! (.tool-results (.continuation request)) (cast (ptr (ArrayList ToolResult)) 0))
+    ;; A stack slot is not zeroed. Every pointer in the continuation has to be
+    ;; nulled by hand or the runtime reads whatever the last frame left there --
+    ;; which is a transcript pointer into nothing, and a segfault on the turn
+    ;; that first appends to it.
+    (set! (.turns (.continuation request)) (cast (ptr (ArrayList ContinuationTurn)) 0))
     (load request)))
 
 (defn factory-tool-group-enabled? [(definition (ref FactoryDefinition))
@@ -292,33 +342,81 @@
           (factory-register-configured-tools! registry run-allocator workspace definition)
           (register-factory-status-tool! registry run-allocator worker-status)
           (register-factory-workflow-tools! registry run-allocator workflow-state)
-          (set! request (factory-request run-allocator registry run-id model reasoning prompt))
+          (set! request
+                (factory-request run-allocator
+                                 registry
+                                 run-id
+                                 model
+                                 reasoning
+                                 prompt
+                                 (inbox-path run-allocator factory-id)))
           (set! (.max-model-turns policy) 0)
           (set! (.max-parallel-tools policy) 8)
-          (match (run-agent run-allocator provider request emitter (load policy))
-            (ModelErr [failure] (set! result 70))
-            (ModelOk [response]
-                     (let [reported (factory-worker-status-reported? worker-status)
-                           ready (factory-worker-status-ready? worker-status)]
-                       (if (and reported ready)
-                           (do
-                             (factory-workflow-record-completed! workflow-state)
-                             (emit-event emitter
-                                         (now-ms)
-                                         (FactoryStageAccepted)
-                                         factory-id
-                                         (.file worker)
-                                         run-id
-                                         provider-name
-                                         model
-                                         (factory-stage-payload allocator
-                                                                worker
-                                                                provider-name
+          ;; A worker that reports "not ready" has described the work that is
+          ;; left, not failed. Send it back in with its own words until it is
+          ;; done or the attempts run out.
+          (let [(mut attempt) 1
+                (mut settled) false]
+            (loop (if (load settled)
+                      (break)
+                      (match (run-agent run-allocator provider request emitter (load policy))
+                        (ModelErr [failure] (do (set! result 70) (set! settled true)))
+                        (ModelOk [response]
+                                 (let [reported (factory-worker-status-reported? worker-status)
+                                       ready (factory-worker-status-ready? worker-status)
+                                       summary (factory-worker-status-summary worker-status)]
+                                   (cond
+                                     (and reported ready)
+                                       (do
+                                         (factory-workflow-record-completed! workflow-state)
+                                         (emit-event emitter
+                                                     (now-ms)
+                                                     (FactoryStageAccepted)
+                                                     factory-id
+                                                     (.file worker)
+                                                     run-id
+                                                     provider-name
+                                                     model
+                                                     (factory-stage-payload allocator
+                                                                            worker
+                                                                            provider-name
+                                                                            model
+                                                                            reasoning
+                                                                            reported
+                                                                            ready))
+                                         (set! settled true))
+                                     ;; Not ready, and there is another attempt:
+                                     ;; carry on rather than ending the run.
+                                     (< (load attempt) FACTORY_STAGE_ATTEMPTS)
+                                       (do
+                                         (emit-event emitter
+                                                     (now-ms)
+                                                     (FactoryStageContinued)
+                                                     factory-id
+                                                     (.file worker)
+                                                     run-id
+                                                     provider-name
+                                                     model
+                                                     (factory-continue-payload allocator
+                                                                               worker
+                                                                               (load attempt)
+                                                                               reported
+                                                                               summary))
+                                         (set! attempt (+ (load attempt) 1))
+                                         (factory-worker-status-reset! worker-status)
+                                         (set! request
+                                               (factory-request run-allocator
+                                                                registry
+                                                                run-id
                                                                 model
                                                                 reasoning
-                                                                reported
-                                                                ready)))
-                           (set! result 1)))))
+                                                                (factory-continue-prompt run-allocator
+                                                                                         prompt
+                                                                                         summary
+                                                                                         (load attempt))
+                                                                (inbox-path run-allocator factory-id)))
+                                         0)
+                                     :else (do (set! result 1) (set! settled true)))))))))
           (allocation-domain-close! allocator domain)))
     (load result)))
 
@@ -433,6 +531,7 @@
                               (model (slice u8))
                               (emitter (ptr EventEmitter))] (-> i64)
   (let [worker-status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+        status-allocator (store! (field worker-status allocator) allocator)
         provider-factory
           (box allocator
                DefaultRuntimeProviderFactory
@@ -450,6 +549,12 @@
       (json-put-string! (mut created) "factory" (.name definition))
       (json-put-string! (mut created) "workspace" workspace)
       (json-put-string! (mut created) "definition" (.directory definition))
+      ;; The process this run is. A run that dies without writing a terminal
+      ;; record -- killed, crashed, or a laptop closed -- is indistinguishable
+      ;; from a slow one unless somebody can ask whether it is still there.
+      (json-object-put! (mut created)
+                        "pid"
+                        (json-integer allocator (cast i64 (os/getpid))))
       (emit-event emitter
                   (now-ms)
                   (FactoryRunCreated)

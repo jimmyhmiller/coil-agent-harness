@@ -17,6 +17,7 @@
 (import "harness-model" :use *)
 (import "harness-model-catalog" :use *)
 (import "harness-model-router" :use *)
+(import "harness-provider-config" :use *)
 (import "harness-run-service" :use *)
 (import "harness-system" :use *)
 (import "harness-tui-busy-input" :use *)
@@ -213,8 +214,9 @@
 ;; what the router already knows. Validating here means a typo is rejected while the
 ;; old selection still works, instead of being stored and failing on the next turn
 ;; with an error that never names the bad value.
-(defn tui-selectable-provider? [(provider (slice u8))] (-> bool)
-  (or (= provider "auto") (route-known-provider? provider)))
+(defn tui-selectable-provider? [(provider (slice u8))
+                                (config (ptr ProviderConfig))] (-> bool)
+  (or (= provider "auto") (route-known-provider? provider config)))
 
 (defn tui-provider-choices [] (-> (slice u8))
   "auto, openai, deepseek-openai, deepseek-anthropic, codex, claude")
@@ -872,9 +874,10 @@
       provider))
 
 (defn tui-status-model [(provider (slice u8))
-                        (model (slice u8))] (-> (slice u8))
+                        (model (slice u8))
+                        (config (ptr ProviderConfig))] (-> (slice u8))
   (if (or (= (slice-len [u8] model) 0) (= model "auto"))
-      (route-default-model (tui-status-provider provider))
+      (route-default-model (tui-status-provider provider) config)
       model))
 
 (defn tui-read-primary [(allocator (ptr Allocator))
@@ -883,13 +886,14 @@
                         (provider (slice u8))
                         (model (slice u8))
                         (effort (slice u8))
+                        (config (ptr ProviderConfig))
                         (observer (dyn InputIdleObserver))] (-> InputReadResult)
   (if (.interactive profile)
       (do
         (input-editor-set-status! editor
                                   (tui-primary-prompt allocator
                                                       (tui-status-provider provider)
-                                                      (tui-status-model provider model)
+                                                      (tui-status-model provider model config)
                                                       effort
                                                       (.unicode profile)))
         (input-read-primary-observed allocator
@@ -943,6 +947,7 @@
                                        (load provider)
                                        (load model)
                                        (load effort)
+                                       (field service provider-config)
                                        notifications)
                 (InputReadSubmitted [action]
                                     (cond (or (= action "/quit") (= action "/exit")) (store! done true)

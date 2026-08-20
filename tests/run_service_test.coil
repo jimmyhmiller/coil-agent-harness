@@ -9,6 +9,7 @@
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
+(import "harness-provider-config" :use *)
 (import "provider-common" :use *)
 
 (defstruct FakeRunController [(starts i64) (cancels i64)])
@@ -111,6 +112,9 @@
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
            (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
            (let [(mut parent) (run-command allocator "parent-create" "parent")]
              (json-put-string! (mut parent) "conversation_id" "parent-conversation")
              (json-put-string! (mut parent) "prompt" "Use three subagents")
@@ -184,6 +188,9 @@
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
            (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
            (let [created
                    (http-service-call service
                                       "POST"
@@ -265,6 +272,9 @@
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
            (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
            (let [created
                    (http-service-call service
                                       "POST"
@@ -497,6 +507,9 @@
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
            (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
            (let [invalid (http-service-call service "POST" "/v1/runs" "{")
                  dependency-without-workflow
                    (http-service-call service
@@ -533,6 +546,9 @@
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
            (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
            (emit-event emitter
                        1
                        (RunCreated)
@@ -614,6 +630,9 @@
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
            (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
            (assert-eq (response-status (http-service-call service "GET" "/v1/tools" "")) 501)
            (assert-eq (response-status (http-service-call service
                                                           "POST"

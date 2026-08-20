@@ -25,6 +25,16 @@
 ;; Provider-neutral continuation data. `previous-output` is deliberately opaque to
 ;; the runtime: an adapter can preserve reasoning/signature items without projecting
 ;; them into a lossy common message format.
+;; One completed turn: what the model said, and the results of the tools it
+;; called. A wire with no server-side history has to resend every one of these.
+(defstruct ContinuationTurn
+  [(output Json)
+   (results (ptr (ArrayList ToolResult)))
+   ;; What a person said at this point in the conversation, or "". A run that is
+   ;; being watched can be spoken to, and what was said belongs in the transcript
+   ;; where the model reads it -- in order, at the moment it arrived.
+   (user-text (slice u8))])
+
 (defstruct ModelContinuation
   [(present bool)
    (previous-response-id (slice u8))
@@ -33,7 +43,15 @@
    ;; continuation semantics and conflating them silently destroys cache reuse.
    (provider-session-id (slice u8))
    (previous-output Json)
-   (tool-results (ptr (ArrayList ToolResult)))])
+   (tool-results (ptr (ArrayList ToolResult)))
+   ;; Every completed turn, oldest first, including the latest. A provider that
+   ;; continues by response id ignores this; one that must resend the
+   ;; conversation reads it instead of `previous-output`.
+   ;;
+   ;; Without it a model sees only its own last turn and re-derives everything
+   ;; before that, which looks from the outside like an agent reading the same
+   ;; file over and over and never getting anywhere.
+   (turns (ptr (ArrayList ContinuationTurn)))])
 
 (defstruct ModelRequest
   [(run-id (slice u8))
@@ -54,6 +72,9 @@
    (deadline-monotonic-ms i64)
    (cancellation (ptr CancellationToken))
    (run-lifecycle (ptr i64))
+   ;; Where to look for messages from a person while this run is going, or "".
+   ;; See `harness-run-inbox`.
+   (inbox (slice u8))
    (continuation ModelContinuation)])
 
 (defn model-request-cancelled? [(request (ptr ModelRequest))] (-> bool)

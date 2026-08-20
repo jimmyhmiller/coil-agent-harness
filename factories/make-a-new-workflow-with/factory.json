@@ -1,0 +1,7 @@
+{
+  "name": "make-a-new-workflow-with",
+  "goal": "Make a new workflow with three states validate implement verify",
+  "context": [],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "workers": ["01-do.md"]
+}

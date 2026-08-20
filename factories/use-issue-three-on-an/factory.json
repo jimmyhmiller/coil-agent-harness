@@ -1,0 +1,7 @@
+{
+  "name": "use-issue-three-on-an",
+  "goal": "Use issue three on an existing snake project",
+  "context": [],
+  "tools": {"groups": ["filesystem", "bash"]},
+  "workers": ["01-do.md"]
+}

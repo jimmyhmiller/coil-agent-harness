@@ -17,6 +17,7 @@
 (import "claude-agent" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
+(import "openai-chat-wire" :use *)
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 
@@ -379,21 +380,11 @@
                sink (alloc/stack DeltaEventSink)
                sequence (box allocator i64 1)
                emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
-               state (alloc/stack DeepSeekOpenAIStreamState)
+               state (alloc/stack OpenAIChatStreamState)
                decoder (alloc/stack SseDecoder)]
            (store! (field sink deltas) 0)
            (store! (field sink valid) true)
-           (store! (field state allocator) allocator)
-           (store! (field state request) request)
-           (store! (field state emitter) emitter)
-           (store! (field state response-id) "")
-           (store! (field state model) "")
-           (store! (field state content) (sb-new allocator))
-           (store! (field state reasoning) (sb-new allocator))
-           (store! (field state tools) (al-new [DeepSeekStreamTool] allocator))
-           (store! (field state usage) (zeroed ModelUsage))
-           (store! (field state completed) false)
-           (store! (field state failed) false)
+           (openai-chat-stream-state-init! state allocator request emitter "deepseek-openai")
            (store! decoder (sse-decoder-new allocator state 8192))
            (assert (sse-decoder-feed! decoder
                                       "data: {\"id\":\"chat-1\",\"model\":\"deepseek-test\",\"choices\":[{\"delta\":{\"reasoning_content\":\"think \",\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"city_fact\",\"arguments\":\"{\\\"city\\\":\"}}]}}]}\n\n"))
@@ -407,7 +398,7 @@
            (assert (load (field state completed)))
            (assert-eq (load (field sink deltas)) 1)
            (assert (load (field sink valid)))
-           (let [response (deepseek-stream-response state)]
+           (let [response (openai-chat-stream-response state)]
              (assert (= (load (field response output-text)) "hi"))
              (assert-eq (load (field (field response usage) input-tokens)) 7)
              (assert-eq (al-len [ToolCall] (load (field response tool-calls))) 1)
@@ -797,3 +788,154 @@
            (assert-eq (load (field counts total)) 2)
            (assert-eq (load (field counts completed)) 0)
            (assert-eq (load (field counts failed)) 1)))
+
+;; A wire with no server-side history has to carry the whole conversation. When
+;; it carried only the last turn, a model re-decided from the same starting point
+;; every turn: the agent read the same file over and over and never did the work.
+(defn turn-of [(allocator (ptr Allocator))
+               (output (slice u8))
+               (call-id (slice u8))
+               (text (slice u8))] (-> ContinuationTurn)
+  (let [parsed (json-parse allocator output)
+        results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+        result (alloc/stack ToolResult)
+        (mut turn) (zeroed ContinuationTurn)]
+    (store! (field result call-id) call-id)
+    (store! (field result status) (ToolSucceeded))
+    (store! (field result output) (JsonString text))
+    (store! (field result error) "")
+    (al-push! [ToolResult] results (load result))
+    (set! (.output turn) (load (field parsed value)))
+    (set! (.results turn) results)
+    (load turn)))
+
+(deftest chat-completions-resends-every-turn-not-only-the-last
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+           (al-push! [ContinuationTurn]
+                     turns
+                     (turn-of allocator
+                              "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"first\"}}]}"
+                              "call-1"
+                              "one"))
+           (al-push! [ContinuationTurn]
+                     turns
+                     (turn-of allocator
+                              "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"second\"}}]}"
+                              "call-2"
+                              "two"))
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) turns) turns)
+           (let [wire (deepseek-openai-request-json allocator request)
+                 messages (json-get wire "messages")]
+             ;; prompt, assistant, tool, assistant, tool
+             (assert-eq (json-array-length messages) 5)
+             (assert (match (json-string-at (json-array-get messages 1) "content")
+                       (Some [value] (= value "first"))
+                       (None [] false)))
+             (assert (match (json-string-at (json-array-get messages 3) "content")
+                       (Some [value] (= value "second"))
+                       (None [] false))))))
+
+(deftest anthropic-resends-every-turn-not-only-the-last
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+           (al-push! [ContinuationTurn]
+                     turns
+                     (turn-of allocator
+                              "{\"content\":[{\"type\":\"text\",\"text\":\"first\"}]}"
+                              "call-1"
+                              "one"))
+           (al-push! [ContinuationTurn]
+                     turns
+                     (turn-of allocator
+                              "{\"content\":[{\"type\":\"text\",\"text\":\"second\"}]}"
+                              "call-2"
+                              "two"))
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) turns) turns)
+           (let [wire (deepseek-anthropic-request-json allocator request)
+                 messages (json-get wire "messages")]
+             (assert-eq (json-array-length messages) 5)
+             (assert (match (json-string-at (json-array-get (json-get (json-array-get messages 1)
+                                                                     "content")
+                                                            0)
+                                            "text")
+                       (Some [value] (= value "first"))
+                       (None [] false)))
+             (assert (match (json-string-at (json-array-get (json-get (json-array-get messages 3)
+                                                                      "content")
+                                                            0)
+                                            "text")
+                       (Some [value] (= value "second"))
+                       (None [] false))))))
+
+;; A request built by hand, with no transcript, still continues the old way.
+(deftest a-request-without-a-transcript-still-replays-its-one-turn
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               turn (turn-of allocator
+                             "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"only\"}}]}"
+                             "call-1"
+                             "one")]
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) previous-output) (.output turn))
+           (store! (field (field request continuation) tool-results) (.results turn))
+           (let [wire (deepseek-openai-request-json allocator request)
+                 messages (json-get wire "messages")]
+             (assert-eq (json-array-length messages) 3))))
+
+;; A person speaking into a live run must land in the transcript where they spoke,
+;; as their own user message. If it does not reach the wire, the agent carries on
+;; as though nobody said anything -- which is exactly how it looks from outside.
+(deftest an-operator-message-lands-in-the-wire-where-it-was-said
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+           (al-push! [ContinuationTurn]
+                     turns
+                     (turn-of allocator
+                              "{\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}"
+                              "call-1"
+                              "one"))
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) turns) turns)
+           ;; Said while that turn's tool call was out: it rides with the result.
+           (set! (.user-text (al-elem [ContinuationTurn] turns 0)) "stop counting")
+           (let [wire (deepseek-anthropic-request-json allocator request)
+                 messages (json-get wire "messages")
+                 last (json-array-get messages (- (json-array-length messages) 1))
+                 blocks (json-get last "content")]
+             ;; prompt, assistant, then one user turn carrying the tool result and
+             ;; what the person said, in that order.
+             (assert-eq (json-array-length messages) 3)
+             (assert (match (json-string-at last "role")
+                       (Some [value] (= value "user"))
+                       (None [] false)))
+             ;; what the person said, then the tool result it interrupted
+             (assert-eq (json-array-length blocks) 2)
+             (assert (match (json-string-at (json-array-get blocks 0) "text")
+                       (Some [value] (= value "stop counting"))
+                       (None [] false))))))
+
+;; The subscription wire is what the window actually talks to, so the check that
+;; matters is whether a person's words survive all the way into the bytes.
+(deftest an-operator-message-survives-into-the-subscription-wire
+         (let [allocator (malloc-allocator)
+               request (test-request allocator)
+               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+           (al-push! [ContinuationTurn]
+                     turns
+                     (turn-of allocator
+                              "{\"content\":[{\"type\":\"text\",\"text\":\"working\"}]}"
+                              "call-1"
+                              "one"))
+           (set! (.user-text (al-elem [ContinuationTurn] turns 0)) "stop counting and write stopped.txt")
+           (store! (field (field request continuation) present) true)
+           (store! (field (field request continuation) turns) turns)
+           (let [encoded (json-stringify allocator (anthropic-request-json allocator request true))]
+             (assert (match (str-find encoded "stop counting and write stopped.txt")
+                       (Some [at] true)
+                       (None [] false))))))

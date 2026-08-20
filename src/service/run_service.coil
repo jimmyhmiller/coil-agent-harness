@@ -9,6 +9,7 @@
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
 (import "harness-model-router" :use *)
+(import "harness-provider-config" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
@@ -42,7 +43,10 @@
    (journal-path (slice u8))
    (journal (ptr EventJournal))
    (emitter (ptr EventEmitter))
-   (controller (dyn RunController))])
+   (controller (dyn RunController))
+   ;; The operator's declared providers, so routing a submitted command can accept
+   ;; a provider this harness resolves from configuration rather than from code.
+   (provider-config ProviderConfig)])
 
 (defstruct ServiceResponse [(status i64) (body Json)])
 (defstruct ServiceHttpRequest
@@ -553,7 +557,7 @@
                                                       (if (or inherit-provider
                                                               (= requested-provider (command-string parent "provider")))
                                                           (command-string parent "model")
-                                                          (route-default-model requested-provider)))
+                                                          (route-default-model requested-provider (field service provider-config))))
                                     0)
                                   (json-put-string! (mut command)
                                                     "routing_profile"
@@ -586,7 +590,7 @@
     (service-command-actor! (mut owned-command) actor)
     (service-command-agent! allocator (mut owned-command))
     (service-inherit-parent-route! service (mut owned-command))
-    (match (model-route-command! allocator (mut owned-command))
+    (match (model-route-command! allocator (mut owned-command) (field service provider-config))
       (ModelRouteSelected []
                           (do
                             (service-enrich-conversation! service (mut owned-command))

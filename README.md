@@ -20,6 +20,15 @@ The current slice can:
 - use Codex as an external agent through the Codex App Server JSONL protocol;
 - use Claude subscriptions through native Anthropic Messages and OAuth authentication;
 - run CLI, service, and factory work through the first-class `agent-sdk` provider;
+- deliver a message into a run that is already going, which the agent acts on at its
+  next turn and then keeps as a standing instruction (`harness say <run-id> "..."`);
+- send a worker that reports "not ready" back in with its own account of what remains,
+  up to five attempts, instead of ending the run;
+- refuse to start a workflow that declares it needs an issue without one;
+- run any workflow in a named project -- a checkout declared once in `projects.json` --
+  and hand an issue filed in that project to a workflow;
+- reach an operator-declared OpenAI-compatible server -- including one behind SSH,
+  whose tunnel the harness opens, supervises, and tears down itself;
 - advertise provider capabilities and durably resolve explicit `balanced`, `low-cost`,
   `quality`, `subscription`, and `external-agent` routing profiles;
 - assign every event a stable `agent_id` and execute delegated child agents as durable,
@@ -39,6 +48,70 @@ The current slice can:
 - expose bounded `read_text_file`, `write_text_file`, `create_directory`, `delete_file`,
   and empty-only `remove_directory` tools to service runs, with traversal checks,
   effect metadata, deadlines, and cancellation.
+
+
+## Projects
+
+A workflow needs somewhere to work, and until now the only thing a caller could say
+was a path. A project is a name for a checkout, declared once in
+`~/.coil-agent-harness/projects.json`:
+
+```json
+{
+  "projects": [
+    {"name": "snake", "path": "~/Documents/Code/projects/coil-snake"}
+  ]
+}
+```
+
+```sh
+./harness projects
+./harness factory run factories/snake-feature --project snake
+./harness factory issue factories/issues --issue .factory-issues/wrapping.md --project snake
+```
+
+A workflow belongs to no project — it is a reusable definition, and the project is
+chosen when you run it. An issue can name its project in front matter. An unknown
+project stops the run instead of falling back to a scratch directory. See
+[the guide](docs/projects.md).
+
+## Talking to a run
+
+```sh
+./harness say factory-issues-1787199382644 "stop rewriting the tests, just fix the arity"
+```
+
+Every run has an inbox; the agent drains it at its next turn, acts on what it finds, and
+keeps it as a standing instruction for the rest of the run. See
+[the guide](docs/talking-to-a-run.md).
+
+## Declared providers
+
+A model server the harness does not know about is described in
+`~/.coil-agent-harness/providers.json` rather than compiled in. Naming a machine
+is the whole setup -- for one behind SSH the harness reserves a local port, opens
+`ssh -N -L`, proves the forward accepts before sending anything, reconnects it when
+it drops, and releases it on shutdown. Nothing has to be started beforehand.
+
+```json
+{
+  "providers": [
+    {
+      "name": "metaphysics",
+      "default_model": "qwen3.8-27b",
+      "reasoning": { "dialect": "qwen-jinja" },
+      "transport": { "ssh": { "host": "computer.jimmyhmiller.com", "remote_port": 8080 } }
+    }
+  ]
+}
+```
+
+```sh
+./harness run metaphysics qwen3.8-27b "explain this repository"
+```
+
+The name then works anywhere a provider name works, including a `factory.json`
+step. See [the guide](docs/declared-providers.md).
 
 The HTTP listener binds to IPv4 loopback and the CLI exposes a long-running `serve`
 command protected by capability-bearing credentials. Operator credentials can create,
@@ -464,6 +537,8 @@ so deployments that need isolation must place the harness in an OS sandbox or co
 src/core/       Provider-neutral JSON, events, models, tools, schema validation
 src/runtime/    Bounded model/tool loop, background handle, parallel tool executor
 src/providers/  OpenAI Responses, Anthropic Messages, DeepSeek dialects, Codex
+src/config/     Operator-declared providers and projects, read from ~/.coil-agent-harness
+src/factory/    Markdown-defined workflows: manifest, workspace, coordinator, status
 src/infra/      HTTP, synchronization, signals, sockets, and allocation adapters over Coil stdlib APIs
 src/persistence/ Append-only event journal and recovery
 src/service/     Durable run projection, versioned API routing, and HTTP serving

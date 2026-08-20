@@ -86,15 +86,15 @@
           (json-put-string! (mut body)
                             "previous_response_id"
                             (.previous-response-id continuation))
-          (if (= (load (field continuation tool-results))
-                 (cast (ptr (ArrayList ToolResult)) 0))
-              (json-object-put! (mut body)
-                                "input"
-                                (openai-latest-user-input allocator request))
-              (json-object-put! (mut body)
-                                "input"
-                                (openai-tool-results allocator
-                                                     (load (field continuation tool-results))))))
+          (let [(mut input)
+                  (if (= (load (field continuation tool-results))
+                         (cast (ptr (ArrayList ToolResult)) 0))
+                      (openai-latest-user-input allocator request)
+                      (openai-tool-results allocator
+                                           (load (field continuation tool-results))))]
+            ;; Anything a person said since the last turn rides along with it.
+            (push-interjection! allocator (mut input) continuation)
+            (json-object-put! (mut body) "input" (load input))))
         (json-object-put! (mut body)
                           "input"
                           (messages-wire allocator (load (field request messages)))))

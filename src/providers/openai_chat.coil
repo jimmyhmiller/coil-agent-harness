@@ -1,0 +1,375 @@
+;; The adapter for an operator-declared OpenAI-compatible server.
+;;
+;; Everything specific to one deployment -- where it is, how to reach it, whether it
+;; needs a key, how it wants reasoning effort expressed -- comes from a
+;; `ConfiguredProvider` rather than from code, so a new machine is a configuration
+;; entry and not a new module. The wire itself is the shared Chat Completions
+;; implementation every OpenAI-shaped provider uses.
+;;
+;; Transport resolution is the part worth understanding. A direct provider has a URL
+;; before the first request. An ssh provider does not: its URL contains a local port
+;; that exists only once the tunnel is up. So the endpoint is resolved per request
+;; through the supervisor, which reuses a live tunnel and reconnects a dead one. A
+;; tunnel that cannot be established is a configuration failure carrying ssh's own
+;; diagnostic, not a transport error about a refused connection to a port whose
+;; provenance the operator would have no way to guess.
+;;
+;; One context owns one tunnel, so a context must outlive the request. The runtime
+;; factory holds these for the life of the process for exactly that reason -- a
+;; per-request context would spawn and tear down an ssh connection every turn.
+(module openai-chat)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "coil.os" :as os)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-tool" :use *)
+(import "harness-http" :use *)
+(import "harness-sse" :use *)
+(import "harness-system" :use *)
+(import "harness-provider-config" :use *)
+(import "harness-ssh-tunnel" :use *)
+(import "provider-common" :use *)
+(import "openai-chat-wire" :use *)
+
+(defstruct OpenAIChatContext
+  [(config ConfiguredProvider)
+   (tunnel SshTunnel)
+   (transport (dyn StreamingHttpTransport))])
+
+;; Build a context for one configured provider. The tunnel is created but not
+;; opened: nothing connects until a request needs it, so declaring a provider that
+;; is currently unreachable does not prevent the harness from starting.
+(defn openai-chat-context [(allocator (ptr Allocator))
+                           (config ConfiguredProvider)] (-> OpenAIChatContext)
+  (let [context (alloc/stack OpenAIChatContext)]
+    (set! (.config context) config)
+    (set! (.tunnel context)
+          (match (.transport config)
+            (SshTransport [spec] (ssh-tunnel-new spec))
+            (DirectTransport [url] (ssh-tunnel-new (ssh-tunnel-spec "" "" 0)))))
+    (store! (field context transport)
+            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+    (load context)))
+
+(defn openai-chat-name [(context (ptr OpenAIChatContext))] (-> (slice u8))
+  (load (field (field context config) name)))
+
+(defsum ChatEndpoint
+  (ChatEndpointReady [(url (slice u8))])
+  (ChatEndpointUnavailable [(message (slice u8))]))
+
+;; Resolve the URL to POST to, establishing the tunnel first when there is one.
+(defn openai-chat-endpoint [(context (ptr OpenAIChatContext))
+                            (allocator (ptr Allocator))] (-> ChatEndpoint)
+  (let [config (field context config)
+        path (load (field config path))]
+    (match (load (field config transport))
+      (DirectTransport [url]
+                       (ChatEndpointReady (concat-or-empty allocator url path)))
+      (SshTransport [spec]
+                    (match (ssh-tunnel-ensure! (field context tunnel) allocator)
+                      (SshTunnelFailed [message] (ChatEndpointUnavailable message))
+                      (SshTunnelReady [port]
+                                      (ChatEndpointReady
+                                        (concat-or-empty allocator
+                                                         (ssh-tunnel-base-url allocator port)
+                                                         path))))))))
+
+;; Reasoning effort, in the dialect this server actually honours.
+;;
+;; `qwen-jinja` exists because llama.cpp ignores a top-level `reasoning_effort`
+;; outright and only passes the value to the chat template when it is sent as a
+;; template kwarg -- and the Qwen template accepts a narrower ladder than the
+;; harness offers, raising a template exception on anything else. Clamping to what
+;; the template accepts turns a 500 into a slightly coarser effort setting.
+(defn chat-template-effort [(effort (slice u8))] (-> (slice u8))
+  (cond (= effort "low") "low"
+        (= effort "medium") "medium"
+        :else "xhigh"))
+
+(defn openai-chat-effort [(context (ptr OpenAIChatContext))
+                          (request (ptr ModelRequest))] (-> (slice u8))
+  (let [requested (load (field request reasoning))]
+    (if (= (slice-len [u8] requested) 0)
+        (load (field (field context config) default-effort))
+        requested)))
+
+(defn chat-attach-reasoning! [(allocator (ptr Allocator))
+                              (body (mut Json))
+                              (context (ptr OpenAIChatContext))
+                              (request (ptr ModelRequest))] (-> i64)
+  (let [dialect (load (field (field context config) reasoning-dialect))
+        effort (openai-chat-effort context request)
+        disabled (= effort "none")]
+    (cond (= dialect PROVIDER_REASONING_OPENAI)
+            (when (not disabled)
+              (json-put-string! (mut body) "reasoning_effort" effort)
+              0)
+          (= dialect PROVIDER_REASONING_QWEN_JINJA)
+            (let [(mut kwargs) (json-object allocator)]
+              (if disabled
+                  (json-put-bool! (mut kwargs) "enable_thinking" false)
+                  (json-put-string! (mut kwargs)
+                                    "reasoning_effort"
+                                    (chat-template-effort effort)))
+              (json-object-put! (mut body) "chat_template_kwargs" (load kwargs))
+              0)
+          :else 0))
+  0)
+
+;; How long to allow this request on the wire, or 0 for no limit.
+;;
+;; A declared provider runs on hardware whose speed the caller cannot know -- the
+;; factory, for instance, applies one figure to every provider -- and a wall-clock
+;; limit cannot tell a slow answer from a stuck one. So the caller's budget is not
+;; imposed here; only an explicitly declared ceiling is. Runs remain interruptible
+;; through the cancellation token, which is what a supervisor uses to stop work that
+;; has genuinely stalled.
+(defn openai-chat-timeout-ms [(context (ptr OpenAIChatContext))] (-> i64)
+  (load (field (field context config) request-timeout-ms)))
+
+(defn openai-chat-request-json [(allocator (ptr Allocator))
+                                (context (ptr OpenAIChatContext))
+                                (request (ptr ModelRequest))] (-> Json)
+  (let [(mut body) (json-object allocator)]
+    (json-put-string! (mut body) "model" (.model request))
+    (json-object-put! (mut body)
+                      "messages"
+                      (chat-continuation-messages allocator request))
+    (chat-attach-reasoning! allocator (mut body) context request)
+    (when (> (load (field request max-output-tokens)) 0)
+      (json-object-put! (mut body)
+                        "max_tokens"
+                        (json-integer allocator
+                                      (load (field request max-output-tokens))))
+      0)
+    (chat-attach-tools! allocator (mut body) request)
+    (chat-attach-stream-options! allocator (mut body))
+    (load body)))
+
+(defsum ChatCredential
+  (ChatCredentialReady [(header (slice u8))])
+  (ChatCredentialAbsent [])
+  (ChatCredentialMissing [(message (slice u8))]))
+
+;; A provider that named no environment variable needs no key -- which is the normal
+;; case for a server on a machine the operator controls. One that named a variable
+;; must have it: a declared credential that is not set is a configuration error, and
+;; sending the request unauthenticated instead would fail less clearly.
+(defn openai-chat-credential [(allocator (ptr Allocator))
+                              (context (ptr OpenAIChatContext))] (-> ChatCredential)
+  (let [variable (load (field (field context config) api-key-env))]
+    (if (= (slice-len [u8] variable) 0)
+        (ChatCredentialAbsent)
+        (let [value
+                (match (os/env-get allocator variable)
+                  (Ok [found]
+                      (match found
+                        (Some [owned] (os/owned-string-slice owned))
+                        (None [] "")))
+                  (Err [failure] ""))]
+          (if (= (slice-len [u8] value) 0)
+              (ChatCredentialMissing (concat-or-empty allocator
+                                                      "is not set: "
+                                                      variable))
+              (ChatCredentialReady (concat-or-empty allocator
+                                                    "Authorization: Bearer "
+                                                    value)))))))
+
+;; What this request is actually talking to, recorded with the run.
+;;
+;; The endpoint is the resolved one, including the loopback port a tunnel happens to
+;; have been given, because "which machine answered this" is not reconstructable
+;; afterwards otherwise. Nothing secret appears here -- a key is read from the
+;; environment and never travels through configuration or events.
+(defn openai-chat-started-payload [(allocator (ptr Allocator))
+                                   (context (ptr OpenAIChatContext))
+                                   (endpoint (slice u8))] (-> Json)
+  (let [(mut payload) (json-object allocator)
+        config (field context config)]
+    (json-put-string! (mut payload) "endpoint" endpoint)
+    (json-put-string! (mut payload)
+                      "reasoning_dialect"
+                      (load (field config reasoning-dialect)))
+    (match (load (field config transport))
+      (SshTransport [spec]
+                    (let [resolved spec]
+                      (json-put-string! (mut payload) "transport" "ssh")
+                      (json-put-string! (mut payload) "ssh_host" (.host resolved))
+                      (json-object-put! (mut payload)
+                                        "remote_port"
+                                        (json-integer allocator (.remote-port resolved)))
+                      0))
+      (DirectTransport [url]
+                       (do
+                         (json-put-string! (mut payload) "transport" "url")
+                         0)))
+    (load payload)))
+
+(defn openai-chat-event [(context (ptr OpenAIChatContext))
+                         (emitter (ptr EventEmitter))
+                         (request (ptr ModelRequest))
+                         (kind EventKind)
+                         (payload Json)] (-> i64)
+  (chat-event emitter request (openai-chat-name context) kind payload))
+
+(defn openai-chat-fail [(context (ptr OpenAIChatContext))
+                        (emitter (ptr EventEmitter))
+                        (request (ptr ModelRequest))
+                        (status i64)
+                        (message (slice u8))] (-> ModelResult)
+  (openai-chat-event context emitter request (ModelRequestFailed) (JsonString message))
+  (model-failure (openai-chat-name context) status message))
+
+;; A transport that never completed. Naming the budget makes a timeout obvious
+;; rather than leaving it to look like the server rejected the request.
+(defn openai-chat-transport-message [(allocator (ptr Allocator))
+                                     (context (ptr OpenAIChatContext))
+                                     (http (ref HttpResponse))] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)
+        ceiling (openai-chat-timeout-ms context)]
+    (sb-push-str! (mut text) "the request to ")
+    (sb-push-str! (mut text) (openai-chat-name context))
+    (sb-push-str! (mut text) " did not complete")
+    (when (> ceiling 0)
+      (sb-push-str! (mut text) " within ")
+      (sb-push-i64! (mut text) (/ ceiling 1000))
+      (sb-push-str! (mut text) "s")
+      0)
+    (when (> (slice-len [u8] (.error http)) 0)
+      (sb-push-str! (mut text) ": ")
+      (sb-push-str! (mut text) (.error http))
+      0)
+    (sb-str (load text))))
+
+;; A real HTTP error, carrying the code and whatever the server said about it.
+(defn openai-chat-status-message [(allocator (ptr Allocator))
+                                  (status i64)
+                                  (body (slice u8))] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)]
+    (sb-push-str! (mut text) "the provider returned HTTP ")
+    (sb-push-i64! (mut text) status)
+    (when (> (slice-len [u8] body) 0)
+      (sb-push-str! (mut text) ": ")
+      (sb-push-str! (mut text) body)
+      0)
+    (sb-str (load text))))
+
+(defn openai-chat-execute-stream [(context (ptr OpenAIChatContext))
+                                  (request (ptr ModelRequest))
+                                  (emitter (ptr EventEmitter))
+                                  (allocator (ptr Allocator))] (-> ModelResult)
+  (let [credential (openai-chat-credential allocator context)]
+    (match credential
+      (ChatCredentialMissing [problem]
+                             (openai-chat-fail context
+                                               emitter
+                                               request
+                                               0
+                                               (concat-or-empty allocator
+                                                                (openai-chat-name context)
+                                                                (concat-or-empty allocator
+                                                                                 " requires an API key that "
+                                                                                 problem))))
+      (_
+        (match (openai-chat-endpoint context allocator)
+          (ChatEndpointUnavailable [message]
+                                   (openai-chat-fail context emitter request 0 message))
+          (ChatEndpointReady [endpoint]
+            (let [headers
+                    (box allocator
+                         (ArrayList (slice u8))
+                         (al-new [(slice u8)] allocator))
+                  state (alloc/stack OpenAIChatStreamState)
+                  decoder (alloc/stack SseDecoder)
+                  http-request (alloc/stack HttpRequest)]
+              (al-push! [(slice u8)] headers "Content-Type: application/json")
+              (al-push! [(slice u8)] headers "Accept: text/event-stream")
+              (match credential
+                (ChatCredentialReady [header]
+                                     (do
+                                       (al-push! [(slice u8)] headers header)
+                                       0))
+                (_ 0))
+              (openai-chat-stream-state-init! state
+                                              allocator
+                                              request
+                                              emitter
+                                              (openai-chat-name context))
+              (set! decoder (sse-decoder-new allocator state 1048576))
+              (set! (.url http-request) endpoint)
+              (set! (.headers http-request) headers)
+              (set! (.body http-request)
+                    (json-stringify allocator
+                                    (openai-chat-request-json allocator context request)))
+              (set! (.timeout-ms http-request) (openai-chat-timeout-ms context))
+              (set! (.cancellation http-request) (load (field request cancellation)))
+              (set! (.context (.chunks http-request)) (cast (ptr i8) decoder))
+              (set! (.consume (.chunks http-request)) (fnptr-of sse-http-chunk))
+              (openai-chat-event context
+                                 emitter
+                                 request
+                                 (ModelRequestStarted)
+                                 (openai-chat-started-payload allocator context endpoint))
+              (let [http
+                      (streaming-http-send (.transport context)
+                                           allocator
+                                           http-request)
+                    status (.status-code http)]
+                (sse-decoder-free! decoder)
+                (if (or (!= (.transport-code http) 0)
+                        (< status 200)
+                        (>= status 300)
+                        (.failed state)
+                        (not (.completed state)))
+                    ;; Order matters: a transport that aborted has no meaningful
+                    ;; status, and reporting a cancelled or timed-out request as an
+                    ;; HTTP error sends the reader looking at the wrong machine.
+                    (let [message
+                            (cond (!= (.transport-code http) 0)
+                                    (openai-chat-transport-message allocator context http)
+                                  (or (< status 200) (>= status 300))
+                                    (openai-chat-status-message allocator status (.body http))
+                                  (.failed state) "the provider stream could not be parsed"
+                                  :else
+                                    "the provider closed the stream before it completed")]
+                      (openai-chat-fail context emitter request status message))
+                    (let [(mut response) (openai-chat-stream-response state)]
+                      (openai-chat-event context
+                                         emitter
+                                         request
+                                         (ModelRequestCompleted)
+                                         (model-completion-payload allocator request (mut response)))
+                      (ModelOk (load response))))))))))))
+
+;; Release the tunnel. Called when the runtime shuts a provider down; a direct
+;; provider has nothing to release and closing its unopened tunnel is a no-op.
+(defn openai-chat-close! [(context (ptr OpenAIChatContext))] (-> i64)
+  (ssh-tunnel-close! (field context tunnel)))
+
+;; Capabilities are derived from the entry by the configuration module, so routing
+;; and the adapter cannot disagree about what a declared provider can do.
+(defn openai-chat-capabilities [(context (ptr OpenAIChatContext))] (-> ProviderCapabilities)
+  (configured-provider-capabilities (field context config)))
+
+(impl ModelProvider OpenAIChatContext
+  (provider-name [(self (ptr OpenAIChatContext))]
+                 (-> (slice u8))
+                 (openai-chat-name self))
+  (provider-capabilities [(self (ptr OpenAIChatContext))]
+                         (-> ProviderCapabilities)
+                         (openai-chat-capabilities self))
+
+  (execute-model [(self (ptr OpenAIChatContext))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (openai-chat-execute-stream self request emitter allocator)))

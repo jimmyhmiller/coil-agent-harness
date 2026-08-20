@@ -15,6 +15,7 @@
 (import "harness-http-listener" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
+(import "harness-provider-config" :use *)
 (import "harness-service-http-server" :use *)
 (import "harness-shutdown-signal" :use *)
 (import "harness-system" :use *)
@@ -153,6 +154,9 @@
              (store! (field service journal) journal)
              (store! (field service emitter) emitter)
              (store! (field service controller) controller)
+           ;; The service is built in uninitialized stack memory, so every field it
+           ;; reads has to be set: routing walks the declared providers.
+           (store! (field service provider-config) (provider-config-new allocator))
              (match (http-listener-open allocator 0)
                (ListenerOpenFailed [message] (assert false))
                (ListenerOpened [opened] (store! listener opened)))

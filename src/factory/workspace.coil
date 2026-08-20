@@ -87,8 +87,17 @@
                                 (Err [failure]
                                      (FactorySnapshotFailed "could not read factory context.md"))
                                 (Ok [context]
+                                    ;; Everything a run brings with it lives under
+                                    ;; `.factory`. A workspace is usually somebody's
+                                    ;; repository now, and dropping a context.md at
+                                    ;; the top of it is a change they did not ask
+                                    ;; for and would have to explain to git.
                                     (match (fs/write-file allocator
-                                                          (path-join allocator workspace "context.md")
+                                                          (path-join allocator
+                                                                     (path-join allocator
+                                                                                workspace
+                                                                                ".factory")
+                                                                     "context.md")
                                                           context)
                                       (Err [failure]
                                            (FactorySnapshotFailed "could not write workspace context.md"))
@@ -105,8 +114,12 @@
                                                               (mut contexts) (json-array allocator)]
                                                           ;; destination is
                                                           ;; workspace/.factory/definitions/definition-N.
+                                                          ;; Relative to the copied
+                                                          ;; definition:
+                                                          ;; <ws>/.factory/definitions/<d>
+                                                          ;; up two is <ws>/.factory.
                                                           (json-array-push! (mut contexts)
-                                                                            (JsonString "../../../context.md"))
+                                                                            (JsonString "../../context.md"))
                                                           (json-object-put! (mut manifest)
                                                                             "context"
                                                                             (load contexts))

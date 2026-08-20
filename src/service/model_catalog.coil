@@ -17,6 +17,7 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-model" :use *)
+(import "harness-provider-config" :use *)
 
 ;; Whether a model takes a reasoning-effort setting, and what it costs to get it
 ;; wrong. Sending `effort` to a model that does not accept it is an API error on
@@ -219,3 +220,47 @@
 
 (defn effort-from-name [(name (slice u8))] (-> (slice u8))
   (if (= (slice-len [u8] name) 0) "medium" name))
+
+;; ---------------------------------------------------------------------------
+;; Declared providers
+;; ---------------------------------------------------------------------------
+
+;; Append a row for every provider the operator declared.
+;;
+;; They come after the built-ins because the menu is ordered by how often a choice
+;; is wanted, not by where it came from -- but they are in the menu at all, which is
+;; the difference between a provider you can pick and one you have to remember the
+;; name of. A declared provider with no default model is skipped rather than listed:
+;; a row that cannot be selected into a working request is worse than no row.
+(defn model-catalog-add-declared! [(catalog (ptr ModelCatalog))
+                                   (config (ptr ProviderConfig))] (-> i64)
+  (let [count (provider-config-count config)
+        (mut i) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [provider (provider-config-at config (load i))
+                    model (load (field provider default-model))]
+                (when (> (slice-len [u8] model) 0)
+                  (model-catalog-add! catalog
+                                      (model-choice (load (field provider name))
+                                                    model
+                                                    (load (field provider label))
+                                                    (load (field provider summary))
+                                                    ;; Effort is offered only when the
+                                                    ;; entry declared a dialect that can
+                                                    ;; carry it; otherwise the control
+                                                    ;; would do nothing.
+                                                    (not (= (load (field provider reasoning-dialect))
+                                                            PROVIDER_REASONING_NONE))
+                                                    (load (field provider default-effort))))
+                  0)
+                (set! i (+ (load i) 1))))))
+  0)
+
+;; The menu an operator actually sees: the built-in shortlist plus whatever they
+;; declared.
+(defn model-catalog-with-declared [(allocator (ptr Allocator))
+                                   (config (ptr ProviderConfig))] (-> ModelCatalog)
+  (let [(mut catalog) (model-catalog-default allocator)]
+    (model-catalog-add-declared! (mut catalog) config)
+    (load catalog)))

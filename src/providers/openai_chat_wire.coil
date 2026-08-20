@@ -1,0 +1,396 @@
+;; The OpenAI-compatible Chat Completions wire, shared by every provider that
+;; speaks it.
+;;
+;; Request bodies differ between servers -- DeepSeek wants a `thinking` object,
+;; llama.cpp wants template kwargs, hosted OpenAI wants neither -- but the response
+;; side does not. Streaming deltas, incremental `tool_calls` assembly, the
+;; `reasoning_content` channel, terminal usage, and the reconstruction of a
+;; non-streamed response from a stream are identical, and were previously written
+;; once per provider. They live here so a fix to the parser is a fix everywhere, and
+;; so adding a server means describing its request body rather than reimplementing
+;; the protocol.
+;;
+;; The provider name travels through this module rather than being baked in, because
+;; it is what events and parsed responses are attributed to.
+(module openai-chat-wire)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-event" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-sse" :use *)
+(import "harness-system" :use *)
+(import "harness-tool" :use *)
+(import "provider-common" :use *)
+
+(defn chat-tool-result-message [(allocator (ptr Allocator)) (result ToolResult)] (-> Json)
+  (let [(mut message) (json-object allocator)
+        output
+          (match (.status result)
+            (ToolSucceeded [] (json-stringify allocator (.output result)))
+            (ToolErrored [] (.error result))
+            (ToolDenied [] (.error result))
+            (ToolUnknown [] (.error result)))]
+    (json-put-string! (mut message) "role" "tool")
+    (json-put-string! (mut message) "tool_call_id" (.call-id result))
+    (json-put-string! (mut message) "content" output)
+    (load message)))
+
+;; Build the message array. On a tool continuation every prior assistant object is
+;; replayed verbatim rather than reconstructed from parsed fields: that is what
+;; preserves a server's own reasoning channel across turns, including fields this
+;; harness does not model.
+;;
+;; Chat Completions has no server-side history, so the entire conversation is
+;; resent each turn. Replaying only the last one left the model re-deciding from
+;; the same starting point every turn, which is an agent that repeats itself
+;; until its budget runs out.
+(defn chat-turn-messages! [(allocator (ptr Allocator))
+                           (messages (mut Json))
+                           (output Json)
+                           (results (ptr (ArrayList ToolResult)))
+                           (user-text (slice u8))] (-> i64)
+  (when (not (match output (JsonNull [] true) (_ false)))
+    (json-array-push! (mut messages)
+                      (json-get (json-array-get (json-get output "choices") 0) "message"))
+    0)
+  (let [(mut i) 0
+        n (if (= (cast i64 results) 0) 0 (al-len [ToolResult] (load results)))]
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (json-array-push! (mut messages)
+                                  (chat-tool-result-message allocator
+                                                            (al-get [ToolResult] (load results) (load i))))
+                (store! i (+ (load i) 1))))))
+  ;; What a person said, in the place they said it.
+  (when (> (slice-len [u8] user-text) 0)
+    (let [(mut spoken) (json-object allocator)]
+      (json-put-string! (mut spoken) "role" "user")
+      (json-put-string! (mut spoken) "content" user-text)
+      (json-array-push! (mut messages) (load spoken)))
+    0)
+  0)
+
+(defn chat-continuation-messages [(allocator (ptr Allocator))
+                                  (request (ptr ModelRequest))] (-> Json)
+  (let [(mut messages) (messages-wire allocator (load (field request messages)))
+        continuation (field request continuation)
+        turns (load (field continuation turns))]
+    (when (load (field continuation present))
+      (if (= (cast i64 turns) 0)
+          (chat-turn-messages! allocator
+                               (mut messages)
+                               (load (field continuation previous-output))
+                               (load (field continuation tool-results))
+                               "")
+          (let [n (al-len [ContinuationTurn] (load turns))
+                (mut i) 0]
+            (loop (if (>= (load i) n)
+                      (break)
+                      (let [turn (al-get [ContinuationTurn] (load turns) (load i))]
+                        (chat-turn-messages! allocator
+                                             (mut messages)
+                                             (.output turn)
+                                             (.results turn)
+                                             (.user-text turn))
+                        (store! i (+ (load i) 1)))))
+            0))
+      0)
+    (load messages)))
+
+;; Cached-prompt telemetry has two spellings in the wild: DeepSeek reports
+;; `prompt_cache_hit_tokens` at the top of usage, while OpenAI-shaped servers
+;; (including llama.cpp) nest `prompt_tokens_details.cached_tokens`. Both are read
+;; because a provider should not have to declare which dialect of the same number
+;; its server happens to emit.
+(defn chat-cached-input-tokens [(usage Json)] (-> i64)
+  (let [flat (json-number-i64 (json-get usage "prompt_cache_hit_tokens"))]
+    (if (> flat 0)
+        flat
+        (json-number-i64 (json-get (json-get usage "prompt_tokens_details") "cached_tokens")))))
+
+(defn chat-usage [(root Json)] (-> ModelUsage)
+  (let [usage (alloc/stack ModelUsage)
+        wire (json-get root "usage")]
+    (set! (.input-tokens usage) (json-number-i64 (json-get wire "prompt_tokens")))
+    (set! (.output-tokens usage) (json-number-i64 (json-get wire "completion_tokens")))
+    (set! (.reasoning-tokens usage)
+          (json-number-i64 (json-get (json-get wire "completion_tokens_details") "reasoning_tokens")))
+    (set! (.cached-input-tokens usage) (chat-cached-input-tokens wire))
+    (set! (.cache-write-tokens usage) 0)
+    (load usage)))
+
+(defn chat-parse-response [(allocator (ptr Allocator))
+                           (provider (slice u8))
+                           (root Json)] (-> ModelResponse)
+  (let [(mut response) (response-empty allocator)
+        message (json-get (json-array-get (json-get root "choices") 0) "message")
+        calls (json-get message "tool_calls")
+        (mut i) 0
+        count (json-array-length calls)]
+    (set! (.provider response) provider)
+    (set! (.response-id response) (match (json-string-at root "id") (Some [value] value) (None [] "")))
+    (set! (.model response) (match (json-string-at root "model") (Some [value] value) (None [] "")))
+    (set! (.output-text response) (match (json-string-at message "content") (Some [value] value) (None [] "")))
+    (loop (if (>= (load i) count)
+              (break)
+              (let [wire (json-array-get calls (load i))
+                    function (json-get wire "function")
+                    id
+                      (match (json-string-at wire "id")
+                        (Some [value] value)
+                        (None [] ""))
+                    name
+                      (match (json-string-at function "name")
+                        (Some [value] value)
+                        (None [] ""))
+                    arguments
+                      (match (json-string-at function "arguments")
+                        (Some [value] value)
+                        (None [] "{}"))]
+                (al-push! [ToolCall]
+                          (mut (.tool-calls response))
+                          (parsed-tool-call allocator id name arguments))
+                (set! i (+ (load i) 1)))))
+    (set! (.usage response) (chat-usage root))
+    (set! (.raw-output response) root)
+    (load response)))
+
+(defn chat-event [(emitter (ptr EventEmitter))
+                  (request (ptr ModelRequest))
+                  (provider (slice u8))
+                  (kind EventKind)
+                  (payload Json)] (-> i64)
+  (emit-event emitter
+              (now-ms)
+              kind
+              (.run-id request)
+              (.operation-id request)
+              ""
+              provider
+              (.model request)
+              payload))
+
+(defstruct OpenAIChatStreamTool
+  [(id (slice u8))
+   (name (slice u8))
+   (arguments StrBuf)])
+
+(defstruct OpenAIChatStreamState
+  [(allocator (ptr Allocator))
+   (request (ptr ModelRequest))
+   (emitter (ptr EventEmitter))
+   (provider (slice u8))
+   (response-id (slice u8))
+   (model (slice u8))
+   (content StrBuf)
+   (reasoning StrBuf)
+   (tools (ArrayList OpenAIChatStreamTool))
+   (usage ModelUsage)
+   (completed bool)
+   (failed bool)])
+
+;; Initialize a stream state. Every field is set here so a provider cannot forget
+;; one and get a silently empty buffer or an unattributed event.
+(defn openai-chat-stream-state-init! [(state (ptr OpenAIChatStreamState))
+                                      (allocator (ptr Allocator))
+                                      (request (ptr ModelRequest))
+                                      (emitter (ptr EventEmitter))
+                                      (provider (slice u8))] (-> i64)
+  (set! (.allocator state) allocator)
+  (set! (.request state) request)
+  (set! (.emitter state) emitter)
+  (set! (.provider state) provider)
+  (set! (.response-id state) "")
+  (set! (.model state) "")
+  (set! (.content state) (sb-new allocator))
+  (set! (.reasoning state) (sb-new allocator))
+  (set! (.tools state) (al-new [OpenAIChatStreamTool] allocator))
+  (set! (.usage state) (zeroed ModelUsage))
+  (set! (.completed state) false)
+  (set! (.failed state) false)
+  0)
+
+;; Tool call deltas arrive addressed by index and may skip ahead, so slots are
+;; grown to cover the index rather than appended in arrival order.
+(defn chat-stream-tool! [(state (ptr OpenAIChatStreamState))
+                         (index-value i64)] (-> (ptr OpenAIChatStreamTool))
+  (loop (if (> (al-len [OpenAIChatStreamTool] (.tools state)) index-value)
+            (break)
+            (let [tool (alloc/stack OpenAIChatStreamTool)]
+              (set! (.id tool) "")
+              (set! (.name tool) "")
+              (set! (.arguments tool) (sb-new (load (field state allocator))))
+              (al-push! [OpenAIChatStreamTool]
+                        (mut (.tools state))
+                        (load tool)))))
+  (index (load (field (field state tools) data)) index-value))
+
+(defn chat-stream-tool-delta! [(state (ptr OpenAIChatStreamState))
+                               (wire Json)] (-> i64)
+  (let [slot (chat-stream-tool! state (json-number-i64 (json-get wire "index")))
+        function (json-get wire "function")]
+    (match (json-string-at wire "id")
+      (Some [value]
+            (set! (.id slot) (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at function "name")
+      (Some [value]
+            (set! (.name slot) (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at function "arguments")
+      (Some [value] (sb-push-str! (mut (.arguments slot)) value))
+      (None [] 0))))
+
+(defn chat-stream-chunk! [(state (ptr OpenAIChatStreamState))
+                          (wire Json)] (-> bool)
+  (do
+    (match (json-string-at wire "id")
+      (Some [value]
+            (set! (.response-id state) (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (match (json-string-at wire "model")
+      (Some [value]
+            (set! (.model state) (concat-or-empty (load (field state allocator)) "" value)))
+      (None [] 0))
+    (let [choices (json-get wire "choices")]
+      ;; A chunk with no choices is the terminal usage frame that
+      ;; `stream_options.include_usage` asks for.
+      (if (= (json-array-length choices) 0)
+          (let [usage (json-get wire "usage")]
+            (set! (.input-tokens (.usage state)) (json-number-i64 (json-get usage "prompt_tokens")))
+            (set! (.output-tokens (.usage state)) (json-number-i64 (json-get usage "completion_tokens")))
+            (set! (.reasoning-tokens (.usage state))
+                  (json-number-i64 (json-get (json-get usage "completion_tokens_details")
+                                             "reasoning_tokens")))
+            (set! (.cached-input-tokens (.usage state)) (chat-cached-input-tokens usage)))
+          (let [delta (json-get (json-array-get choices 0) "delta")]
+            (match (json-string-at delta "reasoning_content")
+              (Some [value] (sb-push-str! (mut (.reasoning state)) value))
+              (None [] 0))
+            (match (json-string-at delta "content")
+              (Some [value]
+                    (do
+                      (sb-push-str! (mut (.content state)) value)
+                      (chat-event (load (field state emitter))
+                                  (load (field state request))
+                                  (load (field state provider))
+                                  (ModelResponseDelta)
+                                  (JsonString value))))
+              (None [] 0))
+            (let [tool-deltas (json-get delta "tool_calls")
+                  (mut i) 0
+                  n (json-array-length tool-deltas)]
+              (loop (if (>= (load i) n)
+                        (break)
+                        (do
+                          (chat-stream-tool-delta! state
+                                                   (json-array-get tool-deltas (load i)))
+                          (set! i (+ (load i) 1))))))))
+      true)))
+
+(impl SseEventSink OpenAIChatStreamState
+  (consume-sse-event [(self (ptr OpenAIChatStreamState))
+                      (event-name (slice u8))
+                      (data (slice u8))]
+                     (-> bool)
+                     (if (model-request-cancelled? (load (field self request)))
+                         false
+                         (if (str-eq data "[DONE]")
+                             (do (set! (.completed self) true) true)
+                             (let [parsed (json-parse (load (field self allocator)) data)]
+                               (if (.ok parsed)
+                                   (chat-stream-chunk! self (.value parsed))
+                                   (do (set! (.failed self) true) false)))))))
+
+;; Rebuild the non-streamed response document from accumulated deltas, then parse it
+;; with the same code path a non-streamed reply would take. Going through the
+;; document rather than populating a response directly is what lets a continuation
+;; replay the assistant message verbatim.
+(defn openai-chat-stream-response [(state (ptr OpenAIChatStreamState))] (-> ModelResponse)
+  (let [allocator (load (field state allocator))
+        (mut root) (json-object allocator)
+        (mut choices) (json-array allocator)
+        (mut choice) (json-object allocator)
+        (mut message) (json-object allocator)
+        (mut calls) (json-array allocator)
+        count (al-len [OpenAIChatStreamTool] (.tools state))
+        (mut i) 0]
+    (loop (if (>= (load i) count)
+              (break)
+              (let [tool
+                      (al-get [OpenAIChatStreamTool]
+                              (.tools state)
+                              (load i))
+                    (mut wire) (json-object allocator)
+                    (mut function) (json-object allocator)]
+                (json-put-string! (mut wire) "id" (.id tool))
+                (json-put-string! (mut wire) "type" "function")
+                (json-put-string! (mut function) "name" (.name tool))
+                (json-put-string! (mut function)
+                                  "arguments"
+                                  (sb-str (.arguments tool)))
+                (json-object-put! (mut wire) "function" (load function))
+                (json-array-push! (mut calls) (load wire))
+                (set! i (+ (load i) 1)))))
+    (json-put-string! (mut root) "id" (.response-id state))
+    (json-put-string! (mut root) "model" (.model state))
+    (json-put-string! (mut message) "role" "assistant")
+    (json-put-string! (mut message) "content" (sb-str (.content state)))
+    (json-put-string! (mut message)
+                      "reasoning_content"
+                      (sb-str (.reasoning state)))
+    (json-object-put! (mut message) "tool_calls" (load calls))
+    (json-object-put! (mut choice) "message" (load message))
+    (json-array-push! (mut choices) (load choice))
+    (json-object-put! (mut root) "choices" (load choices))
+    (let [(mut usage) (json-object allocator)]
+      (json-object-put! (mut usage)
+                        "prompt_tokens"
+                        (json-integer allocator
+                                      (.input-tokens (.usage state))))
+      (json-object-put! (mut usage)
+                        "completion_tokens"
+                        (json-integer allocator
+                                      (.output-tokens (.usage state))))
+      (json-object-put! (mut usage)
+                        "prompt_cache_hit_tokens"
+                        (json-integer allocator
+                                      (.cached-input-tokens (.usage state))))
+      (json-object-put! (mut root) "usage" (load usage)))
+    (chat-parse-response allocator (load (field state provider)) (load root))))
+
+;; The tools/tool_choice pair, added only when the run actually has tools. Some
+;; servers reject an empty `tools` array outright.
+(defn chat-attach-tools! [(allocator (ptr Allocator))
+                          (body (mut Json))
+                          (request (ptr ModelRequest))] (-> i64)
+  (when (> (al-len [ToolDefinition]
+                   (load (field (load (field request tools)) definitions)))
+           0)
+    (json-object-put! (mut body)
+                      "tools"
+                      (tool-registry-wire allocator
+                                          (load (field request tools))
+                                          TOOL_LAYOUT_CHAT))
+    (json-object-put! (mut body)
+                      "tool_choice"
+                      (tool-choice-chat allocator
+                                        (load (field request tool-choice))))
+    0)
+  0)
+
+;; Streaming is always requested with usage included: without it a run has no token
+;; accounting at all, and every server that streams supports asking for it.
+(defn chat-attach-stream-options! [(allocator (ptr Allocator))
+                                   (body (mut Json))] (-> i64)
+  (json-put-bool! (mut body) "stream" true)
+  (let [(mut stream-options) (json-object allocator)]
+    (json-put-bool! (mut stream-options) "include_usage" true)
+    (json-object-put! (mut body) "stream_options" (load stream-options)))
+  0)

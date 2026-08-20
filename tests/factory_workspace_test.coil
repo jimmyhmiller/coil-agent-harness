@@ -34,7 +34,19 @@
                                        (assert (path-exists? allocator (path-join allocator snapshot "factory.json")))
                                        (assert (path-exists? allocator (path-join allocator workspace ".git")))
                                        (assert (path-exists? allocator (path-join allocator snapshot "worker.md")))
-                                       (assert (path-exists? allocator (path-join allocator workspace "context.md")))
+                                       ;; The run's own copy lives under .factory,
+                                       ;; never at the top of the workspace: a
+                                       ;; workspace is somebody's repository.
+                                       (assert (not (path-exists? allocator
+                                                                  (path-join allocator
+                                                                             workspace
+                                                                             "context.md"))))
+                                       (assert (path-exists? allocator
+                                                             (path-join allocator
+                                                                        (path-join allocator
+                                                                                   workspace
+                                                                                   ".factory")
+                                                                        "context.md")))
                                        (assert (not (path-exists? allocator (path-join allocator snapshot "context.md"))))
                                        (assert (match (load-factory-definition allocator snapshot)
                                                  (FactoryLoaded [definition] true)

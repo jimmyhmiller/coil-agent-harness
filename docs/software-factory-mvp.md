@@ -130,3 +130,16 @@ existing product workspace:
 Runtime context is generic: every additional file after the provider is appended to
 the workflow's common context. The factory itself decides through its Markdown what
 that context means.
+
+## A worker that is not ready
+
+`report_worker_status` with `ready=false` used to end the run. It no longer does.
+
+A worker reporting not-ready has just written the most accurate description anyone
+has of the work that remains, so the coordinator hands that sentence back to the same
+worker and runs it again, in the same workspace, up to `FACTORY_STAGE_ATTEMPTS` times.
+Each attempt is recorded as `factory.stage.continued` with the worker's own summary;
+the run only fails if the attempts run out.
+
+This is the difference between a workflow that stops halfway with a description of
+what it did not do, and one that finishes.

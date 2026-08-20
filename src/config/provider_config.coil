@@ -1,0 +1,387 @@
+;; Operator-declared model providers.
+;;
+;; A provider that is not built into the harness is described here rather than
+;; compiled in: an OpenAI-compatible server on another machine becomes usable by
+;; naming it, and the harness owns everything that follows from that name --
+;; transport setup, capability advertisement, routing, and the model picker.
+;;
+;; The file lives at `$HARNESS_CONFIG_DIR/providers.json`, defaulting to
+;; `~/.coil-agent-harness/providers.json` to match the directory the bus already
+;; establishes. It is machine-specific by design: a personal box behind ssh is not
+;; something to commit to a repository.
+;;
+;;   {
+;;     "version": 1,
+;;     "providers": [
+;;       {
+;;         "name": "metaphysics",
+;;         "kind": "openai-chat",
+;;         "default_model": "qwen3.8-27b",
+;;         "reasoning": { "dialect": "qwen-jinja", "default_effort": "medium" },
+;;         "transport": {
+;;           "ssh": { "host": "computer.jimmyhmiller.com", "remote_port": 8080 }
+;;         }
+;;       }
+;;     ]
+;;   }
+;;
+;; Absence is not an error: most installations have no such file, and the harness
+;; must behave identically when it is missing. Anything else -- unreadable,
+;; unparseable, missing a required field, naming an unsupported kind, or colliding
+;; with a built-in provider -- is a hard failure that names the offending entry.
+;; Silently dropping a malformed provider would send work to a different model than
+;; the operator asked for, which is worse than refusing to start.
+;;
+;; Secrets stay out of this file. A provider that needs a key names the environment
+;; variable holding it (`api_key_env`); the value is never read from configuration.
+(module harness-provider-config)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.fs" :as fs)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+(import "harness-model" :use *)
+(import "harness-ssh-tunnel" :use *)
+
+(const PROVIDER_CONFIG_FILE "providers.json")
+(const PROVIDER_CONFIG_VERSION 1)
+
+;; No wall-clock limit on a request by default.
+;;
+;; A timeout cannot tell a slow answer from a stuck one, so any value picked here
+;; would eventually cut off a legitimate generation: a local model emitting several
+;; thousand tokens at ten to twenty tokens a second can legitimately run for many
+;; minutes, and a request killed mid-file is indistinguishable from a refusal in the
+;; transcript. Liveness belongs to supervision, which can look at whether tokens are
+;; still arriving, rather than to a number chosen in advance.
+;;
+;; Requests remain interruptible: the cancellation token is honoured by the stream
+;; sink, so a cancelled run still stops promptly. An operator who does want a hard
+;; ceiling can set `request_timeout_ms`; 0 means no limit.
+(const PROVIDER_NO_TIMEOUT 0)
+
+;; The only adapter an operator can currently declare. Naming an unsupported kind
+;; is refused outright rather than defaulted, because guessing the wire format of
+;; someone else's server is how you get a run that fails halfway through.
+(const PROVIDER_KIND_OPENAI_CHAT "openai-chat")
+
+;; How a configured provider expresses reasoning effort on the wire. This is a real
+;; incompatibility rather than a preference: llama.cpp ignores a top-level
+;; `reasoning_effort` entirely and only honours the value when it is passed through
+;; to the chat template, while hosted OpenAI-compatible services do the opposite.
+(const PROVIDER_REASONING_QWEN_JINJA "qwen-jinja")
+(const PROVIDER_REASONING_OPENAI "openai")
+(const PROVIDER_REASONING_NONE "none")
+
+;; Where the provider's HTTP endpoint is. Direct is an ordinary base URL; ssh means
+;; the harness runs the forward itself and the base URL is not knowable until it has.
+(defsum ProviderTransport
+  (DirectTransport [(base-url (slice u8))])
+  (SshTransport [(spec SshTunnelSpec)]))
+
+(defstruct ConfiguredProvider
+  [(name (slice u8))
+   (kind (slice u8))
+   (default-model (slice u8))
+   (label (slice u8))
+   (summary (slice u8))
+   (path (slice u8))
+   (api-key-env (slice u8))
+   (reasoning-dialect (slice u8))
+   (default-effort (slice u8))
+   (cost-tier i64)
+   ;; Hard wall-clock ceiling for one request, or 0 for none (the default).
+   ;; Supervision, not a preset number, is what distinguishes a slow generation
+   ;; from a stuck one.
+   (request-timeout-ms i64)
+   (transport ProviderTransport)])
+
+(defstruct ProviderConfig [(providers (ArrayList ConfiguredProvider))])
+
+(defsum ProviderConfigResult
+  (ProviderConfigLoaded [(config ProviderConfig)])
+  (ProviderConfigInvalid [(message (slice u8))]))
+
+(defn provider-config-new [(allocator (ptr Allocator))] (-> ProviderConfig)
+  (let [config (alloc/stack ProviderConfig)]
+    (set! (.providers config) (al-new [ConfiguredProvider] allocator))
+    (load config)))
+
+(defn provider-config-count [(config (ptr ProviderConfig))] (-> i64)
+  (al-len [ConfiguredProvider] (.providers config)))
+
+(defn provider-config-at [(config (ptr ProviderConfig)) (at i64)] (-> (ptr ConfiguredProvider))
+  (al-elem [ConfiguredProvider] (mut (.providers config)) at))
+
+;; Index of the provider with this name, or -1. Callers use the index rather than a
+;; borrowed pointer so a configuration can be consulted without pinning its storage.
+(defn provider-config-find [(config (ptr ProviderConfig)) (name (slice u8))] (-> i64)
+  (let [n (provider-config-count config)
+        (mut i) 0
+        (mut found) -1]
+    (loop (if (or (>= (load i) n) (>= (load found) 0))
+              (break)
+              (do
+                (when (= (load (field (provider-config-at config (load i)) name)) name)
+                  (store! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn provider-config-has? [(config (ptr ProviderConfig)) (name (slice u8))] (-> bool)
+  (>= (provider-config-find config name) 0))
+
+;; Names the harness resolves itself. A configuration may not claim one: routing is
+;; by name, so shadowing a built-in would silently redirect existing work.
+(defn provider-config-reserved-name? [(name (slice u8))] (-> bool)
+  (or (= name "auto")
+      (or (= name "openai")
+          (or (= name "openai-responses")
+              (or (= name "deepseek-openai")
+                  (or (= name "deepseek-anthropic")
+                      (or (= name "codex")
+                          (or (= name "codex-app-server")
+                              (or (= name "claude")
+                                  (or (= name "claude-anthropic")
+                                      (or (= name "agent-sdk")
+                                          (or (= name "tui-fixture")
+                                              (= name "async-tool")))))))))))))
+
+(defn provider-config-root [(allocator (ptr Allocator))] (-> (slice u8))
+  (let [configured (config-env-or allocator "HARNESS_CONFIG_DIR" "")]
+    (if (> (slice-len [u8] configured) 0)
+        configured
+        (path-join allocator
+                   (config-env-or allocator "HOME" "/tmp")
+                   ".coil-agent-harness"))))
+
+(defn config-env-or [(allocator (ptr Allocator))
+                     (name (slice u8))
+                     (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get allocator name)
+    (Ok [found]
+        (match found
+          (Some [owned] (os/owned-string-slice owned))
+          (None [] fallback)))
+    (Err [failure] fallback)))
+
+(defn provider-config-path [(allocator (ptr Allocator))] (-> (slice u8))
+  (path-join allocator (provider-config-root allocator) PROVIDER_CONFIG_FILE))
+
+(defn config-string [(value Json) (key (slice u8)) (fallback (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [found] found)
+    (None [] fallback)))
+
+(defn config-integer [(value Json) (key (slice u8)) (fallback i64)] (-> i64)
+  (if (json-object-has? value key)
+      (json-number-i64 (json-get value key))
+      fallback))
+
+;; Prefix a message with the entry it came from. An operator with several providers
+;; needs to know which one is wrong, and entries are identified by name -- or by
+;; position when the name itself is what is missing.
+(defn config-entry-error [(allocator (ptr Allocator))
+                          (name (slice u8))
+                          (at i64)
+                          (message (slice u8))] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)]
+    (sb-push-str! (mut text) "providers.json: provider ")
+    (if (> (slice-len [u8] name) 0)
+        (do
+          (sb-push-byte! (mut text) 34)
+          (sb-push-str! (mut text) name)
+          (sb-push-byte! (mut text) 34)
+          0)
+        (do
+          (sb-push-str! (mut text) "at index ")
+          (sb-push-i64! (mut text) at)
+          0))
+    (sb-push-str! (mut text) " ")
+    (sb-push-str! (mut text) message)
+    (sb-str (load text))))
+
+;; Parse the `transport` object. Exactly one of `ssh` or `url` must be present:
+;; accepting both would leave which one wins undefined, and accepting neither
+;; leaves nowhere to send the request.
+(defn config-transport [(allocator (ptr Allocator))
+                        (entry Json)
+                        (transport (mut ProviderTransport))] (-> (slice u8))
+  (let [wire (json-get entry "transport")
+        has-ssh (json-object-has? wire "ssh")
+        has-url (json-object-has? wire "url")]
+    (cond (and has-ssh has-url)
+            "declares both an ssh transport and a url; use exactly one"
+          has-ssh
+            (let [ssh (json-get wire "ssh")
+                  (mut spec)
+                    (ssh-tunnel-spec (config-string ssh "host" "")
+                                     (config-string ssh "remote_host" "")
+                                     (config-integer ssh "remote_port" 0))
+                  identity (config-string ssh "identity_file" "")
+                  keepalive (config-integer ssh "keepalive_seconds" 0)
+                  problem (ssh-tunnel-spec-problem (mut spec))]
+              (when (> (slice-len [u8] identity) 0)
+                (set! (.identity-file spec) identity)
+                0)
+              (when (> keepalive 0)
+                (set! (.keepalive-seconds spec) keepalive)
+                0)
+              (if (> (slice-len [u8] problem) 0)
+                  problem
+                  (do
+                    (set! transport (SshTransport (load spec)))
+                    "")))
+          has-url
+            (let [url (config-string wire "url" "")]
+              (if (= (slice-len [u8] url) 0)
+                  "declares an empty transport url"
+                  (do
+                    (set! transport (DirectTransport url))
+                    "")))
+          :else "has no transport; declare either \"ssh\" or \"url\"")))
+
+(defn config-reasoning-dialect [(entry Json)] (-> (slice u8))
+  (let [wire (json-get entry "reasoning")]
+    (config-string wire "dialect" PROVIDER_REASONING_OPENAI)))
+
+(defn config-known-dialect? [(dialect (slice u8))] (-> bool)
+  (or (= dialect PROVIDER_REASONING_QWEN_JINJA)
+      (or (= dialect PROVIDER_REASONING_OPENAI)
+          (= dialect PROVIDER_REASONING_NONE))))
+
+;; Read one entry into `provider`, returning "" or the reason it was rejected.
+(defn config-provider-entry [(allocator (ptr Allocator))
+                             (entry Json)
+                             (at i64)
+                             (config (ptr ProviderConfig))
+                             (provider (mut ConfiguredProvider))] (-> (slice u8))
+  (let [name (config-string entry "name" "")
+        kind (config-string entry "kind" PROVIDER_KIND_OPENAI_CHAT)
+        dialect (config-reasoning-dialect entry)
+        (mut transport) (DirectTransport "")
+        transport-problem (config-transport allocator entry (mut transport))]
+    (cond (= (slice-len [u8] name) 0)
+            (config-entry-error allocator "" at "has no name")
+          (provider-config-reserved-name? name)
+            (config-entry-error allocator
+                                name
+                                at
+                                "uses a name the harness already resolves itself")
+          (provider-config-has? config name)
+            (config-entry-error allocator name at "is declared more than once")
+          (not (= kind PROVIDER_KIND_OPENAI_CHAT))
+            (config-entry-error allocator
+                                name
+                                at
+                                "names an unsupported kind; the only supported kind is \"openai-chat\"")
+          (not (config-known-dialect? dialect))
+            (config-entry-error allocator
+                                name
+                                at
+                                "names an unsupported reasoning dialect; use \"qwen-jinja\", \"openai\", or \"none\"")
+          (> (slice-len [u8] transport-problem) 0)
+            (config-entry-error allocator name at transport-problem)
+          :else
+            (do
+              (set! (.name provider) name)
+              (set! (.kind provider) kind)
+              (set! (.default-model provider) (config-string entry "default_model" ""))
+              (set! (.label provider) (config-string entry "label" name))
+              (set! (.summary provider) (config-string entry "summary" ""))
+              (set! (.path provider) (config-string entry "path" "/v1/chat/completions"))
+              (set! (.api-key-env provider) (config-string entry "api_key_env" ""))
+              (set! (.reasoning-dialect provider) dialect)
+              (set! (.transport provider) (load transport))
+              (set! (.default-effort provider)
+                    (config-string (json-get entry "reasoning") "default_effort" "medium"))
+              ;; Tier 1 is the cheapest routable tier, which is what a machine the
+              ;; operator already owns costs to run. Zero is reserved for "unknown
+              ;; provider" and would make the entry unroutable.
+              (set! (.cost-tier provider) (config-integer entry "cost_tier" 1))
+              (set! (.request-timeout-ms provider)
+                    (config-integer entry "request_timeout_ms" PROVIDER_NO_TIMEOUT))
+              ""))))
+
+(defn config-version-problem [(root Json)] (-> (slice u8))
+  (let [version (config-integer root "version" PROVIDER_CONFIG_VERSION)]
+    (if (= version PROVIDER_CONFIG_VERSION)
+        ""
+        "providers.json: unsupported version; this harness reads version 1")))
+
+;; Parse an already-read document. Separate from reading the file so the format has
+;; tests that do not need a filesystem.
+(defn provider-config-parse [(allocator (ptr Allocator))
+                             (source (slice u8))] (-> ProviderConfigResult)
+  (let [parsed (json-parse allocator source)]
+    (if (not (.ok parsed))
+        (ProviderConfigInvalid "providers.json is not valid JSON")
+        (let [root (.value parsed)
+              version-problem (config-version-problem root)]
+          (if (> (slice-len [u8] version-problem) 0)
+              (ProviderConfigInvalid version-problem)
+              (let [entries (json-get root "providers")
+                    count (json-array-length entries)
+                    (mut config) (provider-config-new allocator)
+                    (mut failure) ""
+                    (mut i) 0]
+                (loop
+                  (if (or (>= (load i) count) (> (slice-len [u8] (load failure)) 0))
+                      (break)
+                      (let [(mut provider) (zeroed ConfiguredProvider)
+                            problem
+                              (config-provider-entry allocator
+                                                     (json-array-get entries (load i))
+                                                     (load i)
+                                                     (mut config)
+                                                     (mut provider))]
+                        (if (> (slice-len [u8] problem) 0)
+                            (set! failure problem)
+                            (al-push! [ConfiguredProvider]
+                                      (mut (.providers config))
+                                      (load provider)))
+                        (set! i (+ (load i) 1)))))
+                (if (> (slice-len [u8] (load failure)) 0)
+                    (ProviderConfigInvalid (load failure))
+                    (ProviderConfigLoaded (load config)))))))))
+
+;; Load the operator's configuration.
+;;
+;; A missing file yields an empty configuration, because having none is the normal
+;; case and must behave exactly like having an empty one. A file that exists but
+;; cannot be read is a failure: the operator declared providers and the harness
+;; cannot honour them.
+(defn provider-config-load [(allocator (ptr Allocator))] (-> ProviderConfigResult)
+  (let [path (provider-config-path allocator)]
+    (if (not (path-exists? allocator path))
+        (ProviderConfigLoaded (provider-config-new allocator))
+        (match (fs/read-file allocator path)
+          (Err [failure] (ProviderConfigInvalid "providers.json exists but could not be read"))
+          (Ok [bytes] (provider-config-parse allocator bytes))))))
+
+;; What a configured provider can do.
+;;
+;; Derived from the entry rather than from a table keyed by provider name, because
+;; the harness cannot know what someone else's server supports. This lives beside
+;; the format rather than in the adapter so routing can ask about a provider without
+;; depending on the code that talks to it.
+(defn configured-provider-capabilities [(provider (ptr ConfiguredProvider))] (-> ProviderCapabilities)
+  (let [capabilities (alloc/stack ProviderCapabilities)]
+    (set! (.streaming capabilities) true)
+    ;; Tools are executed by the harness against the provider-neutral contract, so
+    ;; any server that speaks Chat Completions tool calls supports them.
+    (set! (.harness-tools capabilities) true)
+    (set! (.parallel-tools capabilities) true)
+    (set! (.reasoning capabilities)
+          (not (= (load (field provider reasoning-dialect)) PROVIDER_REASONING_NONE)))
+    ;; A declared provider authenticates with a key or with nothing at all; neither
+    ;; is the subscription auth that routing means by the term.
+    (set! (.subscription-auth capabilities) false)
+    (set! (.cost-tier capabilities) (load (field provider cost-tier)))
+    (load capabilities)))

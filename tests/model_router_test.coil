@@ -5,6 +5,7 @@
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-model-router" :use *)
+(import "harness-provider-config" :use *)
 (import "provider-common" :use *)
 
 (defn routing-command [(allocator (ptr Allocator))
@@ -22,13 +23,14 @@
 
 (deftest selects-and-explains-automatic-routes
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut low-cost) (routing-command allocator "auto" "auto" "low-cost")
                (mut balanced) (routing-command allocator "auto" "auto" "")
                (mut subscription) (routing-command allocator "auto" "auto" "quality")]
-           (assert (match (model-route-command! allocator (mut balanced)) (ModelRouteSelected [] true) (_ false)))
+           (assert (match (model-route-command! allocator (mut balanced) (mut empty-config)) (ModelRouteSelected [] true) (_ false)))
            (assert (= (route-command-string (load balanced) "provider") "codex"))
            (assert (= (route-command-string (load balanced) "model") "gpt-5.6-terra"))
-           (assert (match (model-route-command! allocator (mut low-cost)) (ModelRouteSelected [] true) (_ false)))
+           (assert (match (model-route-command! allocator (mut low-cost) (mut empty-config)) (ModelRouteSelected [] true) (_ false)))
            (assert (= (route-command-string (load low-cost) "provider") "deepseek-openai"))
            (assert (= (route-command-string (load low-cost) "model") "deepseek-v4-flash"))
            (let [routing (json-get (load low-cost) "routing")
@@ -37,17 +39,18 @@
              (assert-eq (json-number-i64 (json-get capabilities "cost_tier")) 1))
            (json-put-bool! (mut subscription) "requires_subscription" true)
            (json-put-bool! (mut subscription) "requires_harness_tools" true)
-           (assert (match (model-route-command! allocator (mut subscription)) (ModelRouteSelected [] true) (_ false)))
+           (assert (match (model-route-command! allocator (mut subscription) (mut empty-config)) (ModelRouteSelected [] true) (_ false)))
            (assert (= (route-command-string (load subscription) "provider") "claude"))))
 
 (deftest preserves-valid-pins-and-routes-external-agents-with-harness-tools
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut pinned) (routing-command allocator "openai" "gpt-test" "")
                (mut incompatible) (routing-command allocator "auto" "auto" "external-agent")
                (mut unknown) (routing-command allocator "unknown" "model" "")]
-           (assert (match (model-route-command! allocator (mut pinned)) (ModelRouteSelected [] true) (_ false)))
+           (assert (match (model-route-command! allocator (mut pinned) (mut empty-config)) (ModelRouteSelected [] true) (_ false)))
            (assert (= (route-command-string (json-get (load pinned) "routing") "policy") "pinned"))
            (json-put-bool! (mut incompatible) "requires_harness_tools" true)
-           (assert (match (model-route-command! allocator (mut incompatible)) (ModelRouteSelected [] true) (_ false)))
+           (assert (match (model-route-command! allocator (mut incompatible) (mut empty-config)) (ModelRouteSelected [] true) (_ false)))
            (assert (= (route-command-string (load incompatible) "provider") "codex"))
-           (assert (match (model-route-command! allocator (mut unknown)) (ModelRouteSelected [] true) (_ false)))))
+           (assert (match (model-route-command! allocator (mut unknown) (mut empty-config)) (ModelRouteSelected [] true) (_ false)))))

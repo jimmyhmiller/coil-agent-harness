@@ -7,11 +7,13 @@
 (import "harness-model" :use *)
 (import "harness-model-catalog" :use *)
 (import "harness-model-router" :use *)
+(import "harness-provider-config" :use *)
 
 ;; The picker cannot offer a pair the router would reject — a menu row that
 ;; fails on submission is worse than no row.
 (deftest every-catalogued-model-is-routable
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut catalog) (model-catalog-default allocator)
                n (model-catalog-count (mut catalog))
                (mut i) 0]
@@ -26,7 +28,7 @@
                            ;; the catalog's own auto row must satisfy that rule.
                            (assert (= model "auto"))
                            (do
-                             (assert (route-known-provider? provider))
+                             (assert (route-known-provider? provider (mut empty-config)))
                              ;; A pinned provider needs a real model, never "auto".
                              (assert (> (slice-len [u8] model) 0))
                              (assert (not (= model "auto")))))
@@ -34,6 +36,7 @@
 
 (deftest catalogued-names-are-unique
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut catalog) (model-catalog-default allocator)
                n (model-catalog-count (mut catalog))
                (mut i) 0]
@@ -50,6 +53,7 @@
 
 (deftest an-uncatalogued-pair-is-not-found
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut catalog) (model-catalog-default allocator)]
            ;; -1, not 0 — the picker opens at the top for a typed-in model rather
            ;; than claiming the first row is already selected.
@@ -59,6 +63,7 @@
 ;; would send a parameter the provider rejects.
 (deftest models-without-effort-default-to-none
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut catalog) (model-catalog-default allocator)
                n (model-catalog-count (mut catalog))
                (mut i) 0
@@ -94,6 +99,7 @@
 ;; The picker's default for each model must be a level the picker can show.
 (deftest default-efforts-are-selectable-levels
          (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
                (mut catalog) (model-catalog-default allocator)
                n (model-catalog-count (mut catalog))
                (mut i) 0]

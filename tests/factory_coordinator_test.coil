@@ -26,9 +26,13 @@
                                     "opaque-reasoning-test"
                                     "future-model"
                                     "provider-future-level"
-                                    "test"))
+                                    "test"
+                                    ".factory-inbox/opaque-reasoning-test.jsonl"))
            (assert-eq (load (field request model)) "future-model")
-           (assert-eq (load (field request reasoning)) "provider-future-level")))
+           (assert-eq (load (field request reasoning)) "provider-future-level")
+           ;; A worker that cannot be spoken to is a worker nobody can correct.
+           (assert-eq (load (field request inbox))
+                      ".factory-inbox/opaque-reasoning-test.jsonl")))
 
 (deftest factory-tool-groups-control-the-registry
          (let [allocator (malloc-allocator)]

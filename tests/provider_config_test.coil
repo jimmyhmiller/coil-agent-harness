@@ -1,0 +1,128 @@
+;; The configuration format is a public contract with the operator, so these tests
+;; assert on what a person writing the file experiences: what a valid document
+;; produces, and what a malformed one says about itself. Parsing is exercised
+;; directly rather than through the filesystem; only the missing-file rule needs a
+;; real path.
+(module harness-provider-config-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-provider-config" :use *)
+(import "harness-ssh-tunnel" :use *)
+
+(defn contains? [(haystack (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find haystack needle)
+    (Some [at] true)
+    (None [] false)))
+
+(defn parse-invalid [(allocator (ptr Allocator)) (source (slice u8))] (-> (slice u8))
+  (match (provider-config-parse allocator source)
+    (ProviderConfigLoaded [config] "")
+    (ProviderConfigInvalid [message] message)))
+
+(const SSH_PROVIDER
+  "{\"version\":1,\"providers\":[{\"name\":\"metaphysics\",\"kind\":\"openai-chat\",\"default_model\":\"qwen3.8-27b\",\"reasoning\":{\"dialect\":\"qwen-jinja\",\"default_effort\":\"medium\"},\"transport\":{\"ssh\":{\"host\":\"box.example\",\"remote_port\":8080}}}]}")
+
+(deftest an-ssh-provider-round-trips-with-its-defaults
+         (let [allocator (malloc-allocator)]
+           (match (provider-config-parse allocator SSH_PROVIDER)
+             (ProviderConfigInvalid [message] (assert false))
+             (ProviderConfigLoaded [loaded]
+               (let [(mut config) loaded
+                     at (provider-config-find (mut config) "metaphysics")]
+                 (assert-eq (provider-config-count (mut config)) 1)
+                 (assert (>= at 0))
+                 (let [provider (provider-config-at (mut config) at)]
+                   (assert (= (load (field provider default-model)) "qwen3.8-27b"))
+                   (assert (= (load (field provider reasoning-dialect)) "qwen-jinja"))
+                   ;; An omitted path still has to produce a working endpoint.
+                   (assert (= (load (field provider path)) "/v1/chat/completions"))
+                   ;; A machine the operator already owns is the cheapest tier that
+                   ;; can still be routed to; zero would mean "unknown provider".
+                   (assert-eq (load (field provider cost-tier)) 1)
+                   ;; Secrets are never configuration: with no key named, none is read.
+                   (assert-eq (slice-len [u8] (load (field provider api-key-env))) 0)
+                   (match (load (field provider transport))
+                     (DirectTransport [url] (assert false))
+                     (SshTransport [spec]
+                                   (let [(mut resolved) spec]
+                                     (assert (= (.host resolved) "box.example"))
+                                     (assert-eq (.remote-port resolved) 8080)
+                                     ;; The far side is loopback unless stated.
+                                     (assert (= (.remote-host resolved) "127.0.0.1")))))))))))
+
+(deftest a-url-provider-needs-no-tunnel
+         (let [allocator (malloc-allocator)]
+           (match (provider-config-parse allocator
+                                         "{\"providers\":[{\"name\":\"nearby\",\"transport\":{\"url\":\"http://127.0.0.1:8080\"}}]}")
+             (ProviderConfigInvalid [message] (assert false))
+             (ProviderConfigLoaded [loaded]
+               (let [(mut config) loaded
+                     provider (provider-config-at (mut config) 0)]
+                 ;; Version and kind are both optional; the common case should be
+                 ;; the shortest thing an operator can write.
+                 (assert (= (load (field provider name)) "nearby"))
+                 (match (load (field provider transport))
+                   (SshTransport [spec] (assert false))
+                   (DirectTransport [url] (assert (= url "http://127.0.0.1:8080")))))))))
+
+(deftest a-missing-configuration-is-an-empty-configuration
+         (let [allocator (malloc-allocator)]
+           ;; Pointing the config root at a directory with no providers.json must
+           ;; behave exactly like having no configuration at all.
+           (match (os/env-set allocator "HARNESS_CONFIG_DIR" "/nonexistent-harness-config" true)
+             (Ok [value] 0)
+             (Err [failure] (assert false)))
+           (match (provider-config-load allocator)
+             (ProviderConfigInvalid [message] (assert false))
+             (ProviderConfigLoaded [loaded]
+               (let [(mut config) loaded]
+                 (assert-eq (provider-config-count (mut config)) 0))))))
+
+(deftest a-malformed-document-is-refused-rather-than-partially-applied
+         (let [allocator (malloc-allocator)]
+           (assert (contains? (parse-invalid allocator "{oops") "valid JSON"))
+           (assert (contains? (parse-invalid allocator "{\"version\":2,\"providers\":[]}")
+                              "version"))))
+
+(deftest every-rejected-entry-names-itself-and-its-problem
+         (let [allocator (malloc-allocator)
+               nameless (parse-invalid allocator
+                                       "{\"providers\":[{\"transport\":{\"url\":\"http://x\"}}]}")
+               reserved (parse-invalid allocator
+                                       "{\"providers\":[{\"name\":\"claude\",\"transport\":{\"url\":\"http://x\"}}]}")
+               duplicated (parse-invalid allocator
+                                         "{\"providers\":[{\"name\":\"a\",\"transport\":{\"url\":\"http://x\"}},{\"name\":\"a\",\"transport\":{\"url\":\"http://y\"}}]}")
+               bad-kind (parse-invalid allocator
+                                       "{\"providers\":[{\"name\":\"a\",\"kind\":\"anthropic\",\"transport\":{\"url\":\"http://x\"}}]}")
+               bad-dialect (parse-invalid allocator
+                                          "{\"providers\":[{\"name\":\"a\",\"reasoning\":{\"dialect\":\"telepathy\"},\"transport\":{\"url\":\"http://x\"}}]}")]
+           ;; Without a name the entry is identified by position instead.
+           (assert (contains? nameless "index 0"))
+           (assert (contains? nameless "no name"))
+           ;; Shadowing a built-in would silently redirect existing work.
+           (assert (contains? reserved "claude"))
+           (assert (contains? reserved "already resolves"))
+           (assert (contains? duplicated "more than once"))
+           ;; An unsupported kind is refused, not guessed at.
+           (assert (contains? bad-kind "openai-chat"))
+           (assert (contains? bad-dialect "qwen-jinja"))))
+
+(deftest a-transport-must-be-exactly-one-thing
+         (let [allocator (malloc-allocator)
+               missing (parse-invalid allocator "{\"providers\":[{\"name\":\"a\"}]}")
+               both (parse-invalid allocator
+                                   "{\"providers\":[{\"name\":\"a\",\"transport\":{\"url\":\"http://x\",\"ssh\":{\"host\":\"h\",\"remote_port\":1}}}]}")
+               portless (parse-invalid allocator
+                                       "{\"providers\":[{\"name\":\"a\",\"transport\":{\"ssh\":{\"host\":\"h\"}}}]}")
+               hostless (parse-invalid allocator
+                                       "{\"providers\":[{\"name\":\"a\",\"transport\":{\"ssh\":{\"remote_port\":22}}}]}")]
+           (assert (contains? missing "no transport"))
+           (assert (contains? both "exactly one"))
+           ;; The tunnel's own validation is what rejects these, so the config
+           ;; format and the supervisor cannot drift apart on what is spawnable.
+           (assert (contains? portless "port"))
+           (assert (contains? hostless "host"))))

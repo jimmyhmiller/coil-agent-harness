@@ -38,6 +38,10 @@
 (import "agent-sdk-provider" :use *)
 (import "deepseek-anthropic" :use *)
 (import "deepseek-openai" :use *)
+(import "openai-chat" :use *)
+(import "harness-provider-config" :use *)
+(import "harness-run-inbox" :use *)
+(import "harness-project-config" :use *)
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
@@ -86,17 +90,27 @@
 
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
-  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude|agent-sdk> <model> <prompt>")
+  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude|agent-sdk|declared provider> <model> <prompt>")
   (write-line 2 "       harness <login|logout> <codex|claude>")
   (write-line 2 "       harness tui [--plain] [journal-path]")
   (write-line 2 "       harness serve <port> <journal-path>")
-  (write-line 2 "       harness factory run <factory-folder> [workspace] [model] [provider] [context-file ...]")
   (write-line 2
-              "       harness factory issue <factory-folder> --workspace <path> --issue <file> [--model <model>] [--provider <provider>]")
+              "       harness factory run <factory-folder> [workspace] [model] [provider] [context-file ...]")
+  (write-line 2
+              "             [--project <name>] [--workspace <path>] [--context <file>] [--model <model>] [--provider <provider>]")
+  (write-line 2
+              "       harness factory issue <factory-folder> --issue <file> [--project <name>] [--workspace <path>] [--model <model>] [--provider <provider>]")
   (write-line 2 "       harness factory new <factory-folder> [step ...]")
+  (write-line 2 "       harness projects")
+  (write-line 2 "       harness say <run-id> <message>")
   (write-line 2 "       harness peers [--all] [--realm <name>]")
   (write-line 2 "       harness send [--realm <name>] <peer> <message>")
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
+  (write-line 2 "  projects lists the checkouts declared in projects.json")
+  (write-line 2 "  say   delivers a message into a run that is already going")
+  (write-line 2 "  --project names a declared project; its checkout becomes the workspace,")
+  (write-line 2 "        so a workflow changes a codebase that already exists instead of")
+  (write-line 2 "        running in a fresh scratch directory")
   (write-line 2 "  tool  requires the model to call the echo tool")
   (write-line 2 "  peers lists reachable Claude Code sessions; --all keeps dead sockets")
   (write-line 2 "  send  delivers a message into a session's prompt queue")
@@ -227,11 +241,189 @@
                                                                                                  (event-journal-close! journal)
                                                                                                  code)))))))))))))))))
 
+;; ---------------------------------------------------------------------------
+;; Projects
+;; ---------------------------------------------------------------------------
+;;
+;; A workflow needs a workspace, and until projects existed the only thing a
+;; caller could say was a path. `--project snake` names a checkout declared once
+;; in projects.json, so the same workflow can be pointed at a real codebase
+;; without a path being retyped at every call site.
+
+;; What a workflow says it needs before it can run, or "".
+(defn cli-factory-input [(allocator (ptr Allocator))
+                         (factory-directory (slice u8))] (-> (slice u8))
+  (match (load-factory-definition allocator factory-directory)
+    (FactoryInvalid [message] "")
+    (FactoryLoaded [loaded] (let [(mut definition) loaded] (.input definition)))))
+
+(defsum CliWorkspaceChoice
+  ;; Nothing named a workspace: a fresh scratch directory, as before.
+  (CliWorkspaceDefault [])
+  (CliWorkspaceDirectory [(path (slice u8))])
+  (CliWorkspaceUnknown [(message (slice u8))]))
+
+(defn cli-project-error [(allocator (ptr Allocator))
+                         (name (slice u8))
+                         (message (slice u8))] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)]
+    (sb-push-str! (mut text) "project \"")
+    (sb-push-str! (mut text) name)
+    (sb-push-str! (mut text) "\" ")
+    (sb-push-str! (mut text) message)
+    (sb-str (load text))))
+
+;; A named project becomes the checkout it stands for. An unknown name, or one
+;; whose checkout is not there, stops the run: the alternative is an agent working
+;; in an empty directory and truthfully reporting that it found nothing to change.
+(defn cli-project-workspace [(allocator (ptr Allocator))
+                             (name (slice u8))] (-> CliWorkspaceChoice)
+  (match (project-config-load allocator)
+    (ProjectConfigInvalid [message] (CliWorkspaceUnknown message))
+    (ProjectConfigLoaded [loaded]
+                         (let [(mut config) loaded
+                               path (project-config-resolve (mut config) name)]
+                           (cond (= (slice-len [u8] path) 0)
+                                   (CliWorkspaceUnknown
+                                     (cli-project-error allocator
+                                                        name
+                                                        "is not declared in projects.json"))
+                                 (not (path-exists? allocator path))
+                                   (CliWorkspaceUnknown
+                                     (cli-project-error allocator
+                                                        name
+                                                        "names a checkout that is not there"))
+                                 :else (CliWorkspaceDirectory path))))))
+
+;; The project an issue file names in its front matter:
+;;
+;;   ---
+;;   project: snake
+;;   ---
+;;
+;; An issue is always filed against a codebase, so the file is allowed to record
+;; which one and the caller does not have to repeat it.
+(defn cli-issue-declared-project [(allocator (ptr Allocator))
+                                  (issue (slice u8))] (-> (slice u8))
+  (match (fs/read-file allocator issue)
+    (Err [failure] "")
+    (Ok [text]
+        (if (not (starts-with text "---"))
+            ""
+            (let [lines (str-split allocator text "\n")
+                  n (al-len [(slice u8)] lines)
+                  (mut i) 1
+                  (mut value) ""]
+              (loop (if (>= (load i) n)
+                        (break)
+                        (let [line (str-trim (al-get [(slice u8)] lines (load i)))]
+                          (cond (starts-with line "---") (break)
+                                (starts-with line "project:")
+                                  (do
+                                    (store! value
+                                            (str-trim (substr line 8 (slice-len [u8] line))))
+                                    (break))
+                                :else (set! i (+ (load i) 1))))))
+              (load value))))))
+
+;; Where a run should happen, in the order a person means it: what they said on
+;; the command line, then the project they named, and only then a scratch
+;; directory. A workflow is a reusable thing that runs *in* a project; it does
+;; not belong to one, so a manifest has no say here.
+(defn cli-workspace-choice [(allocator (ptr Allocator))
+                            (requested-workspace (slice u8))
+                            (project-name (slice u8))] (-> CliWorkspaceChoice)
+  (if (> (slice-len [u8] requested-workspace) 0)
+      (CliWorkspaceDirectory requested-workspace)
+      (if (> (slice-len [u8] project-name) 0)
+          (cli-project-workspace allocator project-name)
+          (CliWorkspaceDefault))))
+
+(defn cli-positional-or [(count i64)
+                         (argv (ptr (ptr i8)))
+                         (wanted i64)
+                         (fallback (slice u8))] (-> (slice u8))
+  (let [found (cli-positional count argv wanted)]
+    (if (= (slice-len [u8] found) 0) fallback found)))
+
+(defn cli-projects-owned [(allocator (ptr Allocator))] (-> i64)
+  (match (project-config-load allocator)
+    (ProjectConfigInvalid [message] (do (write-line 2 message) 65))
+    (ProjectConfigLoaded [loaded]
+                         (let [(mut config) loaded
+                               n (project-config-count (mut config))]
+                           (if (= n 0)
+                               (do
+                                 (write-line 1
+                                             (concat-or-empty allocator
+                                                              "no projects declared in "
+                                                              (project-config-path allocator)))
+                                 0)
+                               (let [(mut i) 0]
+                                 (loop (if (>= (load i) n)
+                                           (break)
+                                           (let [project (project-config-at (mut config) (load i))
+                                                 (mut line) (sb-new allocator)]
+                                             (sb-push-str! (mut line) (load (field project name)))
+                                             (sb-push-str! (mut line) "  ")
+                                             (sb-push-str! (mut line) (load (field project path)))
+                                             ;; A checkout that has moved is worth
+                                             ;; seeing here rather than at the
+                                             ;; moment a run refuses to start.
+                                             (when (not (path-exists? allocator
+                                                                      (load (field project path))))
+                                               (sb-push-str! (mut line) "  (missing)")
+                                               0)
+                                             (write-line 1 (sb-str (load line)))
+                                             (set! i (+ (load i) 1)))))
+                                 0))))))
+
+;; Speak into a run that is already going. The run may have been started by a
+;; terminal, by the window, or by something else entirely: the inbox is a file,
+;; so none of them have to know about each other.
+(defn cli-say [(run-id (slice u8)) (message (slice u8))] (-> i64)
+  (let [owner (malloc-allocator)
+        process-region (alloc/stack region/Region)]
+    (region/region-init process-region owner)
+    (let [allocator (region/region-allocator process-region)
+          path (inbox-path allocator run-id)
+          sent (inbox-send! allocator path message)
+          result
+            (if sent
+                (do (write-line 1 (concat-or-empty allocator "delivered to " path)) 0)
+                (do (write-line 2 "could not write the message") 74))]
+      (region/region-close! process-region)
+      result)))
+
+(defn cli-projects [] (-> i64)
+  (let [owner (malloc-allocator)
+        process-region (alloc/stack region/Region)]
+    (region/region-init process-region owner)
+    (let [result (cli-projects-owned (region/region-allocator process-region))]
+      (region/region-close! process-region)
+      result)))
+
+(defn cli-factory-run-resolved [(factory-directory (slice u8))
+                                (workspace (slice u8))
+                                (model (slice u8))
+                                (provider-name (slice u8))
+                                (runtime-contexts (ArrayList (slice u8)))
+                                (process-allocator (ptr Allocator))] (-> i64)
+  (let [factory-domain (allocation-domain-open process-allocator)
+        (mut result) 70]
+    (when (allocation-domain-valid? factory-domain)
+      (store! result
+              (cli-factory-run-owned factory-directory
+                                     workspace
+                                     model
+                                     provider-name
+                                     runtime-contexts
+                                     (allocation-domain-allocator factory-domain)))
+      0)
+    (allocation-domain-close! process-allocator factory-domain)
+    (load result)))
+
 (defn cli-factory-run [(factory-directory (slice u8))
-                       (workspace (slice u8))
-                       (model (slice u8))
-                       (provider-name (slice u8))
-                       (context-start i64)
                        (count i64)
                        (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
@@ -239,31 +431,79 @@
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
+          ;; workspace, model, provider, then context files -- the positional
+          ;; shape this command has always had, counted past any flags mixed in.
+          ;; Position 0 is "run" and position 1 is the factory folder.
+          flagged-workspace (cli-option count argv "--workspace")
+          requested-workspace
+            (if (> (slice-len [u8] flagged-workspace) 0)
+                flagged-workspace
+                (cli-positional count argv 2))
+          ;; Flags win over position, and both are accepted: `factory issue`
+          ;; has always taken --provider and --model, and a command that
+          ;; silently ignores the flag its sibling honours sends work to a
+          ;; different model than the one you named.
+          model
+            (let [flagged (cli-option count argv "--model")]
+              (if (> (slice-len [u8] flagged) 0)
+                  flagged
+                  (cli-positional-or count argv 3 "gpt-5.6-luna")))
+          provider-name
+            (let [flagged (cli-option count argv "--provider")]
+              (if (> (slice-len [u8] flagged) 0)
+                  flagged
+                  (cli-positional-or count argv 4 "codex")))
           (mut runtime-contexts) (al-new [(slice u8)] process-allocator)
-          (mut context-index) context-start
-          factory-domain (allocation-domain-open process-allocator)]
-      (loop (if (>= (load context-index) count)
-                (break)
-                (do
-                  (al-push! [(slice u8)]
-                            (mut runtime-contexts)
-                            (cstr->str (load (index argv (load context-index)))))
-                  (set! context-index (+ (load context-index) 1)))))
-      (when (allocation-domain-valid? factory-domain)
-        (store! result
-                (cli-factory-run-owned factory-directory
-                                       workspace
-                                       model
-                                       provider-name
-                                       (load runtime-contexts)
-                                       (allocation-domain-allocator factory-domain)))
+          (mut context-index) 5
+          (mut workspace) ""
+          (mut resolved) true]
+      (loop (let [context (cli-positional count argv (load context-index))]
+              (if (= (slice-len [u8] context) 0)
+                  (break)
+                  (do
+                    (al-push! [(slice u8)] (mut runtime-contexts) context)
+                    (set! context-index (+ (load context-index) 1))))))
+      ;; A context named by flag rather than by position. A bare path after the
+      ;; folder is the workspace, so anything that wants to hand a file to a run
+      ;; without also choosing where it runs has to say which it means.
+      (let [flagged (cli-option count argv "--context")]
+        (when (> (slice-len [u8] flagged) 0)
+          (al-push! [(slice u8)] (mut runtime-contexts) flagged)
+          0)
         0)
-      (allocation-domain-close! process-allocator factory-domain)
+      ;; A workflow that needs something to work on cannot be started with
+      ;; nothing: `factory issue` is the verb that carries one.
+      (when (and (> (slice-len [u8] (cli-factory-input process-allocator factory-directory)) 0)
+                 (= (al-len [(slice u8)] (load runtime-contexts)) 0))
+        (write-line 2
+                    "this workflow needs an issue to work on: run it with `harness factory issue <folder> --issue <file>`")
+        (store! resolved false)
+        0)
+      (match (cli-workspace-choice process-allocator
+                                   requested-workspace
+                                   (cli-option count argv "--project"))
+        (CliWorkspaceUnknown [message]
+                             (do (write-line 2 message) (store! resolved false) 0))
+        ;; No project anywhere: the historical behaviour, a fresh workspace.
+        (CliWorkspaceDefault [] 0)
+        (CliWorkspaceDirectory [path] (do (store! workspace path) 0)))
+      (if (not (load resolved))
+          (do (store! result 65) 0)
+          (do
+            (store! result
+                    (cli-factory-run-resolved factory-directory
+                                              (load workspace)
+                                              model
+                                              provider-name
+                                              (load runtime-contexts)
+                                              process-allocator))
+            0))
       (region/region-close! process-region)
       (load result))))
 
 (defn cli-factory-issue [(factory-directory (slice u8))
                          (workspace (slice u8))
+                         (project-name (slice u8))
                          (issue (slice u8))
                          (model (slice u8))
                          (provider-name (slice u8))] (-> i64)
@@ -273,18 +513,39 @@
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
           (mut runtime-contexts) (al-new [(slice u8)] process-allocator)
-          factory-domain (allocation-domain-open process-allocator)]
+          ;; An issue file may name its own project, so filing one and running it
+          ;; need not repeat the codebase it was filed against.
+          named-project
+            (if (> (slice-len [u8] project-name) 0)
+                project-name
+                (cli-issue-declared-project process-allocator issue))
+          (mut resolved-workspace) ""
+          (mut resolved) true]
       (al-push! [(slice u8)] (mut runtime-contexts) issue)
-      (when (allocation-domain-valid? factory-domain)
-        (store! result
-                (cli-factory-run-owned factory-directory
-                                       workspace
-                                       model
-                                       provider-name
-                                       (load runtime-contexts)
-                                       (allocation-domain-allocator factory-domain)))
-        0)
-      (allocation-domain-close! process-allocator factory-domain)
+      (match (cli-workspace-choice process-allocator workspace named-project)
+        (CliWorkspaceUnknown [message]
+                             (do (write-line 2 message) (store! resolved false) 0))
+        ;; An issue is a change to something that exists. Resolving one in an
+        ;; empty scratch directory would produce a confident report about a
+        ;; codebase that was never there, so this refuses instead.
+        (CliWorkspaceDefault []
+                             (do
+                               (write-line 2
+                                           "factory issue needs an existing workspace: pass --project <name>, --workspace <path>, or file the issue with a \"project:\" front matter key")
+                               (store! resolved false)
+                               0))
+        (CliWorkspaceDirectory [path] (do (store! resolved-workspace path) 0)))
+      (if (not (load resolved))
+          (do (store! result 65) 0)
+          (do
+            (store! result
+                    (cli-factory-run-resolved factory-directory
+                                              (load resolved-workspace)
+                                              model
+                                              provider-name
+                                              (load runtime-contexts)
+                                              process-allocator))
+            0))
       (region/region-close! process-region)
       (load result))))
 
@@ -456,6 +717,7 @@
                      (force-tool bool)
                      (process-allocator (ptr Allocator))
                      (run-allocator (ptr Allocator))] (-> i64)
+  (block :cli-run
   (let [allocator run-allocator
         registry
           (box process-allocator
@@ -473,9 +735,22 @@
         codex-strategy (default-codex-strategy allocator cwd)
         codex-context-value (box allocator CodexProvider (zeroed CodexProvider))
         claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))
-        agent-sdk-context-value (box allocator AgentSdkContext (agent-sdk-context allocator cwd))]
+        agent-sdk-context-value (box allocator AgentSdkContext (agent-sdk-context allocator cwd))
+        config-result (provider-config-load allocator)
+        (mut declared)
+          (match config-result
+            (ProviderConfigLoaded [loaded] loaded)
+            (ProviderConfigInvalid [message] (provider-config-new allocator)))
+        config-problem
+          (match config-result
+            (ProviderConfigLoaded [loaded] "")
+            (ProviderConfigInvalid [message] message))
+        declared-index (provider-config-find (mut declared) provider-name)]
     (set! (.strategy codex-context-value) codex-strategy)
     (tool-register! registry (echo-definition process-allocator))
+    (when (> (slice-len [u8] config-problem) 0)
+      (write-line 2 config-problem)
+      (return-from :cli-run 78))
     (let [result
             (cond (= provider-name "openai")
                     (cli-run-provider allocator registry openai-context model prompt force-tool)
@@ -491,9 +766,21 @@
                     (cli-run-provider allocator registry claude-context-value model prompt force-tool)
                   (= provider-name "agent-sdk")
                     (cli-run-provider allocator registry agent-sdk-context-value model prompt force-tool)
+                  (>= declared-index 0)
+                    (let [context
+                            (box allocator
+                                 OpenAIChatContext
+                                 (openai-chat-context allocator
+                                                      (load (provider-config-at (mut declared)
+                                                                                declared-index))))
+                          outcome (cli-run-provider allocator registry context model prompt force-tool)]
+                      ;; One-shot CLI run: release the ssh child before exiting rather
+                      ;; than relying on process teardown to reap it.
+                      (openai-chat-close! context)
+                      outcome)
                   :else (do (write-line 2 "unknown provider") 64))]
       (codex-strategy-close! (load codex-strategy))
-      result)))
+      result))))
 
 (defn cli-run [(provider-name (slice u8))
                (model (slice u8))
@@ -610,8 +897,14 @@
                                                     journal-path))
                      service (box allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
+                 (store! (field service provider-config)
+                         (load (default-runtime-provider-factory-config provider-factory)))
                  (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
-                   (write-line 2 "could not initialize runtime provider factory")
+                   (write-line 2
+                               (let [reason (default-runtime-provider-factory-error provider-factory)]
+                                 (if (> (slice-len [u8] reason) 0)
+                                     reason
+                                     "could not initialize runtime provider factory")))
                    (event-journal-close! journal)
                    (return-from :tui 70))
                  (store! (field provider-factory tui-fixture)
@@ -786,8 +1079,14 @@
                                                     journal-path))
                      service (box allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
+                 (store! (field service provider-config)
+                         (load (default-runtime-provider-factory-config provider-factory)))
                  (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
-                   (write-line 2 "could not initialize runtime provider factory")
+                   (write-line 2
+                               (let [reason (default-runtime-provider-factory-error provider-factory)]
+                                 (if (> (slice-len [u8] reason) 0)
+                                     reason
+                                     "could not initialize runtime provider factory")))
                    (event-journal-close! journal)
                    (return-from :serve 70))
                  (store! (field provider-factory tui-fixture)
@@ -899,7 +1198,9 @@
   (or (= name "--realm")
       (or (= name "--workspace")
           (or (= name "--issue")
-              (or (= name "--model") (= name "--provider"))))))
+              (or (= name "--project")
+                  (or (= name "--context")
+                      (or (= name "--model") (= name "--provider"))))))))
 
 (defn cli-factory-issue-arguments-valid? [(count i64)
                                           (argv (ptr (ptr i8)))] (-> bool)
@@ -910,16 +1211,19 @@
               (let [argument (cstr->str (load (index argv (load i))))]
                 (if (and (or (= argument "--workspace")
                              (or (= argument "--issue")
-                                 (or (= argument "--model")
-                                     (= argument "--provider"))))
+                                 (or (= argument "--project")
+                                     (or (= argument "--model")
+                                         (= argument "--provider")))))
                          (< (+ (load i) 1) count)
                          (not (starts-with (cstr->str (load (index argv (+ (load i) 1))))
                                            "--")))
                     (set! i (+ (load i) 2))
                     (set! valid false)))))
-    (and (load valid)
-         (and (> (slice-len [u8] (cli-option count argv "--workspace")) 0)
-              (> (slice-len [u8] (cli-option count argv "--issue")) 0)))))
+    ;; Only the issue itself is required here. Where the work happens can come
+    ;; from --workspace, from --project, from the issue's own front matter, or
+    ;; from the workflow's project, and which of those is missing is a better
+    ;; message than usage text.
+    (and (load valid) (> (slice-len [u8] (cli-option count argv "--issue")) 0))))
 
 (defn cli-flag? [(count i64) (argv (ptr (ptr i8))) (name (slice u8))] (-> bool)
   (let [(mut found) false
@@ -1099,6 +1403,7 @@
                           (if (cli-factory-issue-arguments-valid? count argv)
                               (cli-factory-issue (cstr->str (load (index argv 3)))
                                                  (cli-option count argv "--workspace")
+                                                 (cli-option count argv "--project")
                                                  (cli-option count argv "--issue")
                                                  (let [selected (cli-option count argv "--model")]
                                                    (if (> (slice-len [u8] selected) 0)
@@ -1111,17 +1416,7 @@
                               (cli-usage))
                         (and (>= count 4)
                              (= (cstr->str (load (index argv 2))) "run"))
-                          (cli-factory-run (cstr->str (load (index argv 3)))
-                                           (if (>= count 5) (cstr->str (load (index argv 4))) "")
-                                           (if (>= count 6)
-                                               (cstr->str (load (index argv 5)))
-                                               "gpt-5.6-luna")
-                                           (if (>= count 7)
-                                               (cstr->str (load (index argv 6)))
-                                               "codex")
-                                           7
-                                           count
-                                           argv)
+                          (cli-factory-run (cstr->str (load (index argv 3))) count argv)
                         :else (cli-usage))
                   (if (= command "tui")
                       (cond (= count 2) (cli-tui-default false)
@@ -1135,6 +1430,13 @@
                                   (cli-tui (cstr->str (load (index argv 3))) true)
                                   (cli-usage))
                             :else (cli-usage))
+                      (if (= command "say")
+                          (if (= count 4)
+                              (cli-say (cstr->str (load (index argv 2)))
+                                       (cstr->str (load (index argv 3))))
+                              (cli-usage))
+                      (if (= command "projects")
+                          (if (= count 2) (cli-projects) (cli-usage))
                       (if (= command "peers")
                           (if (> (slice-len [u8] (cli-unknown-flag count argv)) 0)
                               (cli-usage)
@@ -1162,4 +1464,4 @@
                                             prompt (cstr->str (load (index argv 4)))]
                                         (cond (= command "run") (cli-run provider model prompt false)
                                               (= command "tool") (cli-run provider model prompt true)
-                                              :else (cli-usage))))))))))))))
+                                              :else (cli-usage))))))))))))))))

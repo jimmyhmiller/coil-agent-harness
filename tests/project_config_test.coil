@@ -1,0 +1,138 @@
+;; The projects file is a contract with the operator, so these tests assert on what
+;; a person writing it experiences: what a valid document resolves to, and what a
+;; malformed one says about itself. Parsing is exercised directly; only the
+;; missing-file rule needs a real path.
+(module harness-project-config-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-project-config" :use *)
+
+(defn contains? [(haystack (slice u8)) (needle (slice u8))] (-> bool)
+  (match (str-find haystack needle)
+    (Some [at] true)
+    (None [] false)))
+
+(defn parse-invalid [(allocator (ptr Allocator)) (source (slice u8))] (-> (slice u8))
+  (match (project-config-parse allocator source)
+    (ProjectConfigLoaded [config] "")
+    (ProjectConfigInvalid [message] message)))
+
+(const TWO_PROJECTS
+  "{\"version\":1,\"projects\":[{\"name\":\"snake\",\"path\":\"/tmp/coil-snake\",\"label\":\"Coil Snake\",\"default_issue_workflow\":\"snake-issue\"},{\"name\":\"harness\",\"path\":\"/tmp/coil-agent-harness\"}]}")
+
+(deftest projects-resolve-to-their-checkouts
+         (let [allocator (malloc-allocator)]
+           (match (project-config-parse allocator TWO_PROJECTS)
+             (ProjectConfigInvalid [message] (assert false))
+             (ProjectConfigLoaded [loaded]
+                                  (let [(mut config) loaded]
+                                    (assert-eq (project-config-count (mut config)) 2)
+                                    (assert (= (project-config-resolve (mut config) "snake")
+                                               "/tmp/coil-snake"))
+                                    (assert (= (project-config-resolve (mut config) "harness")
+                                               "/tmp/coil-agent-harness"))
+                                    (assert (project-config-has? (mut config) "snake")))))))
+
+(deftest an-unknown-project-resolves-to-nothing
+         (let [allocator (malloc-allocator)]
+           (match (project-config-parse allocator TWO_PROJECTS)
+             (ProjectConfigInvalid [message] (assert false))
+             (ProjectConfigLoaded [loaded]
+                                  (let [(mut config) loaded]
+                                    (assert-eq (project-config-find (mut config) "nope") -1)
+                                    (assert (= (project-config-resolve (mut config) "nope") "")))))))
+
+;; The issue workflow is the one piece of policy a project carries, so a project
+;; that does not state it must still answer with the generic workflow rather than
+;; with nothing: an issue always has somewhere to go.
+(deftest a-project-without-an-issue-workflow-uses-the-generic-one
+         (let [allocator (malloc-allocator)]
+           (match (project-config-parse allocator TWO_PROJECTS)
+             (ProjectConfigInvalid [message] (assert false))
+             (ProjectConfigLoaded [loaded]
+                                  (let [(mut config) loaded]
+                                    (assert (= (project-config-issue-workflow (mut config) "snake")
+                                               "snake-issue"))
+                                    (assert (= (project-config-issue-workflow (mut config) "harness")
+                                               "issues"))
+                                    (assert (= (project-config-issue-workflow (mut config) "nope")
+                                               "issues")))))))
+
+(deftest a-home-relative-path-is-expanded
+         (let [allocator (malloc-allocator)]
+           (match (project-config-parse allocator
+                                        "{\"projects\":[{\"name\":\"snake\",\"path\":\"~/code/snake\"}]}")
+             (ProjectConfigInvalid [message] (assert false))
+             (ProjectConfigLoaded [loaded]
+                                  (let [(mut config) loaded
+                                        resolved (project-config-resolve (mut config) "snake")]
+                                    (assert (starts-with resolved "/"))
+                                    (assert (contains? resolved "/code/snake"))
+                                    (assert (not (contains? resolved "~"))))))))
+
+(deftest a-relative-path-is-refused-by-name
+         (let [allocator (malloc-allocator)
+               message
+                 (parse-invalid allocator
+                                "{\"projects\":[{\"name\":\"snake\",\"path\":\"code/snake\"}]}")]
+           (assert (contains? message "snake"))
+           (assert (contains? message "absolute"))))
+
+(deftest a-project-without-a-path-is-refused-by-name
+         (let [allocator (malloc-allocator)
+               message (parse-invalid allocator "{\"projects\":[{\"name\":\"snake\"}]}")]
+           (assert (contains? message "snake"))
+           (assert (contains? message "has no path"))))
+
+(deftest a-project-without-a-name-is-refused-by-position
+         (let [allocator (malloc-allocator)
+               message (parse-invalid allocator "{\"projects\":[{\"path\":\"/tmp/x\"}]}")]
+           (assert (contains? message "index 0"))
+           (assert (contains? message "has no name"))))
+
+;; A duplicate name is refused rather than resolved to the first or last entry:
+;; either choice would send an agent into a checkout the operator did not mean.
+(deftest a-duplicate-name-is-refused
+         (let [allocator (malloc-allocator)
+               message
+                 (parse-invalid allocator
+                                "{\"projects\":[{\"name\":\"snake\",\"path\":\"/tmp/a\"},{\"name\":\"snake\",\"path\":\"/tmp/b\"}]}")]
+           (assert (contains? message "snake"))
+           (assert (contains? message "more than once"))))
+
+(deftest a-name-that-is-not-a-path-component-is-refused
+         (let [allocator (malloc-allocator)
+               message
+                 (parse-invalid allocator
+                                "{\"projects\":[{\"name\":\"my/snake\",\"path\":\"/tmp/a\"}]}")]
+           (assert (contains? message "my/snake"))))
+
+(deftest a-future-version-is-refused
+         (let [allocator (malloc-allocator)
+               message (parse-invalid allocator "{\"version\":2,\"projects\":[]}")]
+           (assert (contains? message "version 1"))))
+
+(deftest malformed-json-is-refused
+         (let [allocator (malloc-allocator)
+               message (parse-invalid allocator "{\"projects\":")]
+           (assert (contains? message "not valid JSON"))))
+
+;; Having no projects file at all is the normal case and must behave exactly like
+;; having an empty one.
+(deftest a-missing-file-loads-an-empty-configuration
+         (let [allocator (malloc-allocator)]
+           (match (os/env-set allocator
+                              "HARNESS_CONFIG_DIR"
+                              "/nonexistent-harness-config"
+                              true)
+             (Ok [value] 0)
+             (Err [failure] (assert false)))
+           (match (project-config-load allocator)
+             (ProjectConfigInvalid [message] (assert false))
+             (ProjectConfigLoaded [loaded]
+                                  (let [(mut config) loaded]
+                                    (assert-eq (project-config-count (mut config)) 0))))))

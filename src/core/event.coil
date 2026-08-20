@@ -16,6 +16,8 @@
   (AgentCreated [])
   (AgentDelegated [])
   (AgentMessageReceived [])
+  ;; A person said something into a run that was already going.
+  (OperatorMessageDelivered [])
   (WorkflowNodeCreated [])
   (WorkflowNodeReady [])
   (WorkflowNodeSkipped [])
@@ -26,6 +28,8 @@
   (FactoryCommandFailed [])
   (FactoryStageStarted [])
   (FactoryStageAccepted [])
+  ;; A worker said it was not done; the coordinator sent it back in.
+  (FactoryStageContinued [])
   (FactoryRunCompleted [])
   (FactoryRunFailed [])
   (SupervisorAssessmentRecorded [])
@@ -177,6 +181,7 @@
     (AgentCreated [] "agent.created")
     (AgentDelegated [] "agent.delegated")
     (AgentMessageReceived [] "agent.message.received")
+    (OperatorMessageDelivered [] "operator.message.delivered")
     (WorkflowNodeCreated [] "workflow.node.created")
     (WorkflowNodeReady [] "workflow.node.ready")
     (WorkflowNodeSkipped [] "workflow.node.skipped")
@@ -187,6 +192,7 @@
     (FactoryCommandFailed [] "factory.command.failed")
     (FactoryStageStarted [] "factory.stage.started")
     (FactoryStageAccepted [] "factory.stage.accepted")
+    (FactoryStageContinued [] "factory.stage.continued")
     (FactoryRunCompleted [] "factory.run.completed")
     (FactoryRunFailed [] "factory.run.failed")
     (SupervisorAssessmentRecorded [] "supervisor.assessment.recorded")

@@ -106,6 +106,37 @@
                 (set! i (+ (load i) 1)))))
     (load result)))
 
+;; What a person said, as one more input item.
+;;
+;; A wire that continues by response id sends only what is new each turn, so an
+;; interjection has to travel with the tool results rather than in a replayed
+;; transcript -- otherwise the run keeps going as though nobody spoke, which is
+;; exactly how it looked before this existed.
+(defn continuation-interjection [(continuation (ptr ModelContinuation))] (-> (slice u8))
+  (let [turns (load (field continuation turns))]
+    (if (= (cast i64 turns) 0)
+        ""
+        (let [n (al-len [ContinuationTurn] (load turns))]
+          (if (= n 0)
+              ""
+              (let [turn (al-elem [ContinuationTurn] turns (- n 1))]
+                (load (field turn user-text))))))))
+
+(defn user-input-item [(allocator (ptr Allocator)) (text (slice u8))] (-> Json)
+  (let [(mut object) (json-object allocator)]
+    (json-put-string! (mut object) "role" "user")
+    (json-put-string! (mut object) "content" text)
+    (load object)))
+
+(defn push-interjection! [(allocator (ptr Allocator))
+                          (input (mut Json))
+                          (continuation (ptr ModelContinuation))] (-> i64)
+  (let [text (continuation-interjection continuation)]
+    (when (> (slice-len [u8] text) 0)
+      (json-array-push! (mut input) (user-input-item allocator text))
+      0)
+    0))
+
 (defn tool-choice-responses [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
   (match choice
     (ToolsAuto [] (JsonString "auto"))
@@ -142,13 +173,6 @@
                     (json-put-string! (mut value) "name" name))))
     (load value)))
 
-(defn json-number-i64 [(value Json)] (-> i64)
-  (match value
-         (JsonNumber [raw]
-                     (match (str-parse-int raw)
-                       (Some [number] number)
-                       (None [] 0)))
-         (_ 0)))
 
 (defn usage-empty [] (-> ModelUsage)
   (zeroed ModelUsage))

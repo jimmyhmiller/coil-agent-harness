@@ -549,3 +549,13 @@
   (let [(mut buffer) (sb-new allocator)]
     (json-write! (mut buffer) value)
     (sb-finish! (mut buffer))))
+
+;; A JSON number as an integer, or 0 when the value is not a number. Callers that
+;; must distinguish "absent" from "zero" test for the key first.
+(defn json-number-i64 [(value Json)] (-> i64)
+  (match value
+    (JsonNumber [raw]
+                (match (str-parse-int raw)
+                  (Some [number] number)
+                  (None [] 0)))
+    (_ 0)))

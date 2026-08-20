@@ -1,0 +1,95 @@
+;; The inbox is how a person gets a word in edgeways while a run is going, so
+;; these tests are about what a writer and a reader see, not about the format.
+(module harness-run-inbox-test)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-run-inbox" :use *)
+
+(defn scratch [(allocator (ptr Allocator)) (name (slice u8))] (-> (slice u8))
+  (let [root (path-join allocator "/tmp" "harness-inbox-test")]
+    (directory-create-all allocator root 448)
+    (path-remove allocator (path-join allocator root name))
+    (path-join allocator root name)))
+
+(deftest a-message-written-is-a-message-read
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "one.jsonl")
+               inbox (alloc/stack RunInbox)]
+           (store! inbox (inbox-open path))
+           (assert (inbox-send! allocator path "stop rewriting the tests"))
+           (let [messages (inbox-drain! allocator inbox)]
+             (assert-eq (al-len [(slice u8)] messages) 1)
+             (assert-eq (al-get [(slice u8)] messages 0) "stop rewriting the tests"))))
+
+;; A drained message must not come back on the next turn, or an agent would be
+;; told the same thing forever.
+(deftest a-message-is-delivered-once
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "two.jsonl")
+               inbox (alloc/stack RunInbox)]
+           (store! inbox (inbox-open path))
+           (assert (inbox-send! allocator path "first"))
+           (assert-eq (al-len [(slice u8)] (inbox-drain! allocator inbox)) 1)
+           (assert-eq (al-len [(slice u8)] (inbox-drain! allocator inbox)) 0)
+           (assert (inbox-send! allocator path "second"))
+           (let [messages (inbox-drain! allocator inbox)]
+             (assert-eq (al-len [(slice u8)] messages) 1)
+             (assert-eq (al-get [(slice u8)] messages 0) "second"))))
+
+(deftest an-inbox-nobody-wrote-to-is-empty-not-an-error
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "empty.jsonl")
+               inbox (alloc/stack RunInbox)]
+           (store! inbox (inbox-open path))
+           (assert-eq (al-len [(slice u8)] (inbox-drain! allocator inbox)) 0)))
+
+;; Two messages in one drain arrive in the order they were said.
+(deftest messages-keep-the-order-they-were-said-in
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "order.jsonl")
+               inbox (alloc/stack RunInbox)]
+           (store! inbox (inbox-open path))
+           (assert (inbox-send! allocator path "one"))
+           (assert (inbox-send! allocator path "two"))
+           (let [messages (inbox-drain! allocator inbox)]
+             (assert-eq (al-len [(slice u8)] messages) 2)
+             (assert-eq (al-get [(slice u8)] messages 0) "one")
+             (assert-eq (al-get [(slice u8)] messages 1) "two"))))
+
+;; A line still being written must wait rather than arrive in half.
+(deftest a-half-written-line-waits-for-the-rest
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "torn.jsonl")
+               inbox (alloc/stack RunInbox)]
+           (store! inbox (inbox-open path))
+           (match (fs/write-file allocator path "{\"version\":1,\"text\":\"whole\"}\n{\"version\":1,\"te")
+             (Ok [written] 0)
+             (Err [failure] (assert false)))
+           (let [messages (inbox-drain! allocator inbox)]
+             (assert-eq (al-len [(slice u8)] messages) 1)
+             (assert-eq (al-get [(slice u8)] messages 0) "whole"))))
+
+;; Nonsense in the mailbox must not take the run down with it.
+(deftest a-line-that-is-not-a-message-is-skipped
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "junk.jsonl")
+               inbox (alloc/stack RunInbox)]
+           (store! inbox (inbox-open path))
+           (match (fs/write-file allocator path "not json at all\n{\"version\":1,\"text\":\"real\"}\n")
+             (Ok [written] 0)
+             (Err [failure] (assert false)))
+           (let [messages (inbox-drain! allocator inbox)]
+             (assert-eq (al-len [(slice u8)] messages) 1)
+             (assert-eq (al-get [(slice u8)] messages 0) "real"))))
+
+(deftest an-empty-message-is-not-a-message
+         (let [allocator (malloc-allocator)
+               path (scratch allocator "blank.jsonl")]
+           (assert (not (inbox-send! allocator path "")))))

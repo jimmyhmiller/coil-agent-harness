@@ -1,0 +1,411 @@
+;; SSH port-forward supervision.
+;;
+;; A provider that lives behind SSH declares only the destination. This module owns
+;; everything else: reserving a free loopback port, spawning `ssh -N -L`, waiting
+;; until the forwarded port actually accepts, noticing when the child dies, and
+;; restarting it under backoff. Nothing outside this file spawns ssh or reasons
+;; about local port numbers.
+;;
+;; The supervisor is deliberately synchronous and demand-driven. `ssh-tunnel-ensure!`
+;; runs on the request path, so a caller never observes a half-open tunnel, and there
+;; is no background thread whose failure could be swallowed. The cost is that the
+;; first request after a dropped connection pays the reconnect; that is the right
+;; trade for a transport whose failures must be attributable to a run.
+;;
+;; Readiness is proved by connecting to the local port, not by assuming the spawn
+;; worked. `ssh` binds a `-L` listener only after authentication succeeds, so a
+;; successful connect is evidence the remote end is reachable and the forward is
+;; established -- which is exactly the class of failure (bad host, refused key,
+;; port already taken) that would otherwise surface as an unreadable HTTP error.
+(module harness-ssh-tunnel)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.arraylist" :use *)
+(import "coil.io" :as io)
+(import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.socket" :as socket)
+(import "coil.str" :use *)
+(import "coil.subprocess" :as subprocess)
+(import "harness-system" :use *)
+
+;; How long a freshly spawned tunnel has to start accepting connections before it
+;; is declared failed. Authentication plus forward setup over a normal link is well
+;; under a second; this bound exists for the case where it never happens at all.
+(const SSH_TUNNEL_READY_TIMEOUT_MS 15000)
+
+;; Gap between readiness probes. Short enough that a healthy tunnel adds no
+;; noticeable latency to the first request.
+(const SSH_TUNNEL_PROBE_INTERVAL_MS 50)
+
+;; Keepalive probes let a tunnel over a dead network die promptly instead of
+;; hanging a request until the HTTP timeout.
+(const SSH_TUNNEL_KEEPALIVE_SECONDS 15)
+
+(const SSH_TUNNEL_BACKOFF_BASE_MS 500)
+(const SSH_TUNNEL_BACKOFF_CEILING_MS 30000)
+
+;; Bounded capture of the child's stderr, read only once the child is known dead.
+;; ssh's own diagnostic ("Permission denied (publickey)", "cannot listen to port")
+;; is the difference between a ten-second and a ten-minute diagnosis.
+(const SSH_TUNNEL_STDERR_LIMIT 2048)
+
+;; A tunnel destination. `host` is an ssh destination exactly as ssh would take it
+;; (`host`, `user@host`, or a `Host` alias from ssh_config), so an operator's
+;; existing ssh configuration keeps working without being re-declared here.
+;;
+;; `remote-host` is resolved on the far side of the connection: the default
+;; 127.0.0.1 means "loopback as the remote machine sees it", which is the whole
+;; point of forwarding to a service that refuses to bind a public interface.
+(defstruct SshTunnelSpec
+  [(host (slice u8))
+   (remote-host (slice u8))
+   (remote-port i64)
+   (identity-file (slice u8))
+   (ssh-binary (slice u8))
+   (ready-timeout-ms i64)
+   (keepalive-seconds i64)])
+
+;; Build a spec, filling defaults for every field an operator may omit. Empty is
+;; the only "unset" marker, so a caller that parsed a config file can pass what it
+;; found without deciding policy.
+(defn ssh-tunnel-spec [(host (slice u8))
+                       (remote-host (slice u8))
+                       (remote-port i64)] (-> SshTunnelSpec)
+  (let [spec (alloc/stack SshTunnelSpec)]
+    (set! (.host spec) host)
+    (set! (.remote-host spec)
+          (if (= (slice-len [u8] remote-host) 0) "127.0.0.1" remote-host))
+    (set! (.remote-port spec) remote-port)
+    (set! (.identity-file spec) "")
+    (set! (.ssh-binary spec) "ssh")
+    (set! (.ready-timeout-ms spec) SSH_TUNNEL_READY_TIMEOUT_MS)
+    (set! (.keepalive-seconds spec) SSH_TUNNEL_KEEPALIVE_SECONDS)
+    (load spec)))
+
+;; A spec is valid only if it names a destination and a port that could exist.
+;; Validating here rather than at spawn time means a malformed config is rejected
+;; with the offending value, not as an ssh usage error.
+(defn ssh-tunnel-spec-problem [(spec (ptr SshTunnelSpec))] (-> (slice u8))
+  (cond (= (slice-len [u8] (load (field spec host))) 0)
+          "ssh transport requires a host"
+        (< (load (field spec remote-port)) 1) "ssh transport requires a remote port above 0"
+        (> (load (field spec remote-port)) 65535)
+          "ssh transport requires a remote port at or below 65535"
+        :else ""))
+
+(defsum SshTunnelResult
+  (SshTunnelReady [(local-port i64)])
+  (SshTunnelFailed [(message (slice u8))]))
+
+(defstruct SshTunnel
+  [(spec SshTunnelSpec)
+   (local-port i64)
+   (child subprocess/Child)
+   (running bool)
+   (failures i64)
+   (retry-after-monotonic-ms i64)
+   (last-error (slice u8))])
+
+(defn ssh-tunnel-new [(spec SshTunnelSpec)] (-> SshTunnel)
+  (let [tunnel (alloc/stack SshTunnel)]
+    (set! (.spec tunnel) spec)
+    (set! (.local-port tunnel) 0)
+    (set! (.child tunnel) (zeroed subprocess/Child))
+    (set! (.running tunnel) false)
+    (set! (.failures tunnel) 0)
+    (set! (.retry-after-monotonic-ms tunnel) 0)
+    (set! (.last-error tunnel) "")
+    (load tunnel)))
+
+;; Exponential backoff capped so a permanently broken destination is retried
+;; occasionally rather than on every single request.
+(defn ssh-tunnel-backoff-ms [(failures i64)] (-> i64)
+  (let [(mut delay) SSH_TUNNEL_BACKOFF_BASE_MS
+        (mut i) 1]
+    (loop (if (or (>= (load i) failures) (>= (load delay) SSH_TUNNEL_BACKOFF_CEILING_MS))
+              (break)
+              (do
+                (set! delay (* (load delay) 2))
+                (set! i (+ (load i) 1)))))
+    (if (> (load delay) SSH_TUNNEL_BACKOFF_CEILING_MS)
+        SSH_TUNNEL_BACKOFF_CEILING_MS
+        (load delay))))
+
+;; Ask the kernel for a free loopback port by binding port 0 and reading back the
+;; assignment, then release it for ssh to claim.
+;;
+;; The gap between release and ssh's bind is a real race, but it is a race we can
+;; detect: ssh runs with ExitOnForwardFailure, so losing it is a clean child exit
+;; with a diagnostic rather than a tunnel that silently forwards nothing.
+(defn ssh-reserve-local-port [(allocator (ptr Allocator))] (-> i64)
+  (let [listener (alloc/stack socket/TcpListener)]
+    (match (socket/tcp-listen allocator listener "127.0.0.1" 0 false 1)
+      (Ok [opened]
+          (let [port
+                  (match (socket/tcp-listener-port opened)
+                    (Ok [value] value)
+                    (Err [failure] -1))]
+            (socket/tcp-listener-close! opened)
+            port))
+      (Err [failure] -1))))
+
+;; True while the child is still running. A probe error is treated as death: a
+;; child we can no longer ask about is not one we can keep routing requests through.
+(defn ssh-tunnel-child-alive? [(tunnel (ptr SshTunnel))] (-> bool)
+  (if (not (load (field tunnel running)))
+      false
+      (match (subprocess/child-try-wait (field tunnel child))
+        (Ok [status]
+            (match status
+              (Some [finished] false)
+              (None [] true)))
+        (Err [failure] false))))
+
+(defn ssh-tunnel-port-accepting? [(allocator (ptr Allocator)) (port i64)] (-> bool)
+  (let [connection (alloc/stack socket/TcpConnection)]
+    (match (socket/tcp-connect allocator connection "127.0.0.1" port)
+      (Ok [opened]
+          (do
+            (socket/tcp-connection-close! opened)
+            true))
+      (Err [failure] false))))
+
+;; `-L 127.0.0.1:<local>:<remote-host>:<remote-port>`. The local bind address is
+;; explicit rather than left to ssh's default so the forwarded service is never
+;; exposed beyond this machine.
+(defn ssh-forward-argument [(allocator (ptr Allocator))
+                            (local-port i64)
+                            (spec (ptr SshTunnelSpec))] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) "127.0.0.1:")
+    (sb-push-i64! (mut buffer) local-port)
+    (sb-push-byte! (mut buffer) 58)
+    (sb-push-str! (mut buffer) (load (field spec remote-host)))
+    (sb-push-byte! (mut buffer) 58)
+    (sb-push-i64! (mut buffer) (load (field spec remote-port)))
+    (sb-str (load buffer))))
+
+(defn ssh-option-argument [(allocator (ptr Allocator))
+                           (name (slice u8))
+                           (value i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) name)
+    (sb-push-i64! (mut buffer) value)
+    (sb-str (load buffer))))
+
+;; The argument vector. Every option here is load-bearing:
+;;
+;;   -N                        no remote command; this process exists to forward
+;;   BatchMode=yes             never prompt -- a hung password prompt in a headless
+;;                             run is indistinguishable from a hang
+;;   ExitOnForwardFailure=yes  a forward that could not bind must kill the child,
+;;                             not leave a connection that forwards nothing
+;;   ServerAliveInterval/Count a dead network is detected in ~45s instead of
+;;                             hanging requests until the HTTP timeout
+;;   StrictHostKeyChecking     accept-new trusts first contact but still refuses a
+;;                             changed key, so a rotated host is a loud failure
+(defn ssh-tunnel-arguments [(allocator (ptr Allocator))
+                            (local-port i64)
+                            (spec (ptr SshTunnelSpec))] (-> (slice (slice u8)))
+  (let [(mut args) (al-new [(slice u8)] allocator)]
+    (al-push! [(slice u8)] (mut args) "-N")
+    (al-push! [(slice u8)] (mut args) "-o")
+    (al-push! [(slice u8)] (mut args) "BatchMode=yes")
+    (al-push! [(slice u8)] (mut args) "-o")
+    (al-push! [(slice u8)] (mut args) "ExitOnForwardFailure=yes")
+    (al-push! [(slice u8)] (mut args) "-o")
+    (al-push! [(slice u8)] (mut args) "StrictHostKeyChecking=accept-new")
+    (al-push! [(slice u8)] (mut args) "-o")
+    (al-push! [(slice u8)] (mut args)
+              (ssh-option-argument allocator
+                                   "ServerAliveInterval="
+                                   (load (field spec keepalive-seconds))))
+    (al-push! [(slice u8)] (mut args) "-o")
+    (al-push! [(slice u8)] (mut args) "ServerAliveCountMax=3")
+    (when (> (slice-len [u8] (load (field spec identity-file))) 0)
+      (al-push! [(slice u8)] (mut args) "-i")
+      (al-push! [(slice u8)] (mut args) (load (field spec identity-file)))
+      0)
+    (al-push! [(slice u8)] (mut args) "-L")
+    (al-push! [(slice u8)] (mut args)
+              (ssh-forward-argument allocator local-port spec))
+    (al-push! [(slice u8)] (mut args) (load (field spec host)))
+    (al-into-slice [(slice u8)] (mut args))))
+
+;; Read what ssh said, once it is known dead.
+;;
+;; Only ever called after the child has exited or been killed, so the write end is
+;; closed and this cannot block. The pipe is left undrained while the tunnel is
+;; healthy; `ssh -N` in batch mode emits nothing on a working connection, so the
+;; pipe buffer is not a practical bound on tunnel lifetime.
+(defn ssh-tunnel-stderr-text [(allocator (ptr Allocator))
+                              (tunnel (ptr SshTunnel))] (-> (slice u8))
+  (let [reader (alloc/stack io/Reader)
+        (mut captured) (al-new [u8] allocator)
+        chunk (alloc/stack (array u8 256))]
+    (match (subprocess/child-stderr-reader reader (field tunnel child))
+      (Some [stream]
+            (loop
+              (if (>= (al-len [u8] (load captured)) SSH_TUNNEL_STDERR_LIMIT)
+                  (break)
+                  (match (io/read-some stream
+                                       (cast (ptr i8) (index chunk 0))
+                                       256)
+                    (Ok [count]
+                        (if (<= count 0)
+                            (break)
+                            (al-extend! [u8]
+                                        (mut captured)
+                                        (index chunk 0)
+                                        count)))
+                    (Err [failure] (break))))))
+      (None [] 0))
+    (str-trim (al-into-slice [u8] (mut captured)))))
+
+;; Stop the child and forget the port. Idempotent: closing an already-closed
+;; tunnel is how every teardown path is allowed to behave.
+(defn ssh-tunnel-close! [(tunnel (ptr SshTunnel))] (-> i64)
+  (when (load (field tunnel running))
+    (match (subprocess/child-try-wait (field tunnel child))
+      (Ok [status]
+          (match status
+            (Some [finished] 0)
+            (None []
+                  (do
+                    (subprocess/child-terminate (field tunnel child))
+                    (subprocess/child-wait (field tunnel child))
+                    0))))
+      (Err [failure]
+           (do
+             (subprocess/child-kill-and-wait (field tunnel child))
+             0)))
+    (subprocess/child-close (field tunnel child))
+    (set! (.running tunnel) false)
+    (set! (.local-port tunnel) 0)
+    0)
+  0)
+
+(defn ssh-tunnel-fail! [(tunnel (ptr SshTunnel))
+                        (allocator (ptr Allocator))
+                        (message (slice u8))] (-> SshTunnelResult)
+  (ssh-tunnel-close! tunnel)
+  (set! (.failures tunnel) (+ (load (field tunnel failures)) 1))
+  (set! (.last-error tunnel) message)
+  (set! (.retry-after-monotonic-ms tunnel)
+        (+ (monotonic-now-ms)
+           (ssh-tunnel-backoff-ms (load (field tunnel failures)))))
+  (SshTunnelFailed message))
+
+;; Describe a dead child in terms an operator can act on, preferring ssh's own
+;; words over our summary of them.
+(defn ssh-tunnel-spawn-failure-text [(allocator (ptr Allocator))
+                                     (tunnel (ptr SshTunnel))
+                                     (reason (slice u8))] (-> (slice u8))
+  (let [detail (ssh-tunnel-stderr-text allocator tunnel)
+        (mut message) (sb-new allocator)]
+    (sb-push-str! (mut message) "ssh tunnel to ")
+    (sb-push-str! (mut message) (load (field (field tunnel spec) host)))
+    (sb-push-str! (mut message) " ")
+    (sb-push-str! (mut message) reason)
+    (when (> (slice-len [u8] detail) 0)
+      (sb-push-str! (mut message) ": ")
+      (sb-push-str! (mut message) detail)
+      0)
+    (sb-str (load message))))
+
+;; Spawn and block until the forwarded port accepts, the child dies, or the
+;; readiness budget runs out. Every exit from this function leaves the tunnel
+;; either genuinely usable or fully torn down -- there is no third state.
+(defn ssh-tunnel-open! [(tunnel (ptr SshTunnel))
+                        (allocator (ptr Allocator))] (-> SshTunnelResult)
+  (let [problem (ssh-tunnel-spec-problem (field tunnel spec))]
+    (if (> (slice-len [u8] problem) 0)
+        (ssh-tunnel-fail! tunnel allocator problem)
+        (let [port (ssh-reserve-local-port allocator)]
+          (if (< port 0)
+              (ssh-tunnel-fail! tunnel
+                                allocator
+                                "could not reserve a local port for an ssh tunnel")
+              (let [arguments (ssh-tunnel-arguments allocator port (field tunnel spec))
+                    spawned
+                      (subprocess/spawn allocator
+                                        (field tunnel child)
+                                        (load (field (field tunnel spec) ssh-binary))
+                                        arguments
+                                        (subprocess/null-stdio)
+                                        (subprocess/null-stdio)
+                                        (subprocess/pipe-stdio))]
+                (match spawned
+                  (Err [failure]
+                       (ssh-tunnel-fail! tunnel
+                                         allocator
+                                         "could not spawn ssh for a tunnelled provider"))
+                  (Ok [started]
+                      (do
+                        (set! (.running tunnel) true)
+                        (set! (.local-port tunnel) port)
+                        (let [deadline
+                                (+ (monotonic-now-ms)
+                                   (load (field (field tunnel spec) ready-timeout-ms)))
+                              (mut outcome)
+                                (SshTunnelFailed "ssh tunnel readiness was never decided")]
+                          (loop
+                            (cond (ssh-tunnel-port-accepting? allocator port)
+                                    (do
+                                      (set! outcome (SshTunnelReady port))
+                                      (break))
+                                  (not (ssh-tunnel-child-alive? tunnel))
+                                    (do
+                                      (set! outcome
+                                            (SshTunnelFailed
+                                              (ssh-tunnel-spawn-failure-text allocator
+                                                                             tunnel
+                                                                             "exited before the forwarded port accepted connections")))
+                                      (break))
+                                  (> (monotonic-now-ms) deadline)
+                                    (do
+                                      (set! outcome
+                                            (SshTunnelFailed
+                                              (ssh-tunnel-spawn-failure-text allocator
+                                                                             tunnel
+                                                                             "did not start forwarding before the readiness timeout")))
+                                      (break))
+                                  :else (sleep-ms SSH_TUNNEL_PROBE_INTERVAL_MS)))
+                          (match (load outcome)
+                            (SshTunnelReady [ready-port]
+                                            (do
+                                              (set! (.failures tunnel) 0)
+                                              (set! (.last-error tunnel) "")
+                                              (set! (.retry-after-monotonic-ms tunnel) 0)
+                                              (SshTunnelReady ready-port)))
+                            (SshTunnelFailed [message]
+                                             (ssh-tunnel-fail! tunnel allocator message)))))))))))))
+
+;; The request-path entry point: return a ready tunnel, reusing the live one when
+;; there is one and reconnecting when there is not.
+;;
+;; A destination that keeps failing is not retried on every request -- until the
+;; backoff expires the previous error is returned verbatim, so a caller sees the
+;; original cause rather than a fresh timeout each time.
+(defn ssh-tunnel-ensure! [(tunnel (ptr SshTunnel))
+                          (allocator (ptr Allocator))] (-> SshTunnelResult)
+  (if (and (ssh-tunnel-child-alive? tunnel)
+           (ssh-tunnel-port-accepting? allocator (load (field tunnel local-port))))
+      (SshTunnelReady (load (field tunnel local-port)))
+      (do
+        (ssh-tunnel-close! tunnel)
+        (if (and (> (load (field tunnel failures)) 0)
+                 (< (monotonic-now-ms) (load (field tunnel retry-after-monotonic-ms))))
+            (SshTunnelFailed (load (field tunnel last-error)))
+            (ssh-tunnel-open! tunnel allocator)))))
+
+;; Loopback base URL for a ready tunnel, for a provider that builds request URLs.
+(defn ssh-tunnel-base-url [(allocator (ptr Allocator))
+                           (local-port i64)] (-> (slice u8))
+  (let [(mut buffer) (sb-new allocator)]
+    (sb-push-str! (mut buffer) "http://127.0.0.1:")
+    (sb-push-i64! (mut buffer) local-port)
+    (sb-str (load buffer))))

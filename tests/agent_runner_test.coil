@@ -12,6 +12,8 @@
 (import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
 (import "harness-system" :use *)
+(import "harness-directory" :use *)
+(import "harness-run-inbox" :use *)
 
 (defstruct FakeProviderState
   [(calls (ptr i64))
@@ -396,3 +398,105 @@
                                    (match (load (field failed kind)) (TimeoutFailure [] true) (_ false))))))
              (assert-eq (atomic-load events) 2)
              (assert-eq (atomic-load terminals) 1))))
+
+;; Talking to a run that is already going.
+;;
+;; The provider speaks into its own inbox on the first turn, the way a person
+;; would while watching, and checks on the second turn that what it said arrived
+;; in the conversation. Nothing here goes near a model: this is about whether the
+;; loop looks, and whether what it finds reaches the request the provider sees.
+(defstruct SpeakingProvider
+  [(calls (ptr i64))
+   (heard (ptr i64))
+   (inbox (slice u8))])
+
+(defn turn-carries? [(request (ptr ModelRequest)) (needle (slice u8))] (-> bool)
+  (let [turns (load (field (field request continuation) turns))]
+    (if (= (cast i64 turns) 0)
+        false
+        (let [n (al-len [ContinuationTurn] (load turns))
+              (mut i) 0
+              (mut found) false]
+          (loop (if (or (>= (load i) n) (load found))
+                    (break)
+                    (let [turn (al-get [ContinuationTurn] (load turns) (load i))]
+                      (match (str-find (.user-text turn) needle)
+                        (Some [at] (store! found true))
+                        (None [] 0))
+                      (set! i (+ (load i) 1)))))
+          (load found)))))
+
+(impl ModelProvider SpeakingProvider
+  (provider-name [(self (ptr SpeakingProvider))] (-> (slice u8)) "speaking")
+  (provider-capabilities [(self (ptr SpeakingProvider))]
+                         (-> ProviderCapabilities)
+                         (provider-capabilities-for "speaking"))
+  (execute-model [(self (ptr SpeakingProvider))
+                  (request (ptr ModelRequest))
+                  (emitter (ptr EventEmitter))
+                  (allocator (ptr Allocator))]
+                 (-> ModelResult)
+                 (let [call (+ (atomic-add (load (field self calls)) 1) 1)
+                       (mut response) (response-empty allocator)]
+                   (set! (.provider response) "speaking")
+                   (set! (.model response) "fake-model")
+                   (if (= call 1)
+                       (do
+                         ;; A person says something while the first turn is out.
+                         (inbox-send! allocator (.inbox self) "change of plan")
+                         (set! (.response-id response) "first")
+                         (set! (.raw-output response) (JsonString "opaque"))
+                         (al-push! [ToolCall]
+                                   (mut (.tool-calls response))
+                                   (fake-call allocator "call-a")))
+                       (do
+                         (when (turn-carries? request "change of plan")
+                           (atomic-store (load (field self heard)) 1)
+                           0)
+                         (set! (.response-id response) "final")
+                         (set! (.output-text response) (json-copy-string allocator "done"))))
+                   (ModelOk (load response)))))
+
+(deftest a-message-sent-mid-run-reaches-the-next-turn
+         (let [allocator (malloc-allocator)
+               calls (box allocator i64 0)
+               heard (box allocator i64 0)
+               events (box allocator i64 0)
+               terminals (box allocator i64 0)
+               sequence (box allocator i64 1)
+               provider (box allocator SpeakingProvider (zeroed SpeakingProvider))
+               registry (box allocator ToolRegistry (tool-registry-new allocator))
+               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+               request (box allocator ModelRequest (zeroed ModelRequest))
+               sink (alloc/stack TerminalEventSink)
+               emitter (box allocator EventEmitter (zeroed EventEmitter))
+               policy (alloc/stack AgentRunPolicy)
+               inbox "/tmp/harness-inbox-test/mid-run.jsonl"]
+           (path-remove allocator inbox)
+           (store! (field provider calls) calls)
+           (store! (field provider heard) heard)
+           (store! (field provider inbox) inbox)
+           (tool-register! registry (fake-definition allocator))
+           (store! (field request run-id) "speak-test")
+           (store! (field request operation-id) "model")
+           (store! (field request model) "fake-model")
+           (store! (field request instructions) "")
+           (store! (field request messages) messages)
+           (store! (field request tools) registry)
+           (store! (field request tool-choice) (ToolsAuto))
+           (store! (field request parallel-tool-calls) true)
+           (store! (field request reasoning) "none")
+           (store! (field request timeout-ms) 1000)
+           (store! (field request inbox) inbox)
+           (store! (field sink count) events)
+           (store! (field sink terminal-count) terminals)
+           (store! (field emitter sink) (box allocator (dyn EventSink) sink))
+           (store! (field emitter next-sequence) sequence)
+           (store! (field policy max-model-turns) 0)
+           (store! (field policy max-parallel-tools) 2)
+           (let [(mut handle) (run-agent-background allocator provider request emitter (load policy))
+                 result (agent-run-join (mut handle))]
+             (assert (agent-run-finished? (mut handle)))
+             (assert-eq (atomic-load calls) 2)
+             ;; The second turn carried what was said during the first.
+             (assert-eq (atomic-load heard) 1))))

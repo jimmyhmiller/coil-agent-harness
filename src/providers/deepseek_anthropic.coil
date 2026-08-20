@@ -76,33 +76,79 @@
     (json-put-string! (mut block) "content" output)
     (load block)))
 
-;; Preserve the previous Anthropic content block array verbatim. This retains
-;; thinking blocks and signatures while adding all parallel tool results together.
+;; Preserve every prior Anthropic content block array verbatim. This retains
+;; thinking blocks and signatures while adding each turn's tool results together.
+;;
+;; The whole transcript is resent because Anthropic Messages has no server-side
+;; history: a request carries the conversation or the model does not have one. A
+;; continuation that replayed only the last turn made the model re-derive
+;; everything before it, which is an agent that reads the same file forever and
+;; never gets to the work.
+(defn anthropic-turn-messages! [(allocator (ptr Allocator))
+                                (messages (mut Json))
+                                (output Json)
+                                (results (ptr (ArrayList ToolResult)))
+                                (user-text (slice u8))] (-> i64)
+  (when (not (match output (JsonNull [] true) (_ false)))
+    (let [(mut assistant) (json-object allocator)]
+      (json-put-string! (mut assistant) "role" "assistant")
+      (json-object-put! (mut assistant) "content" (json-get output "content"))
+      (json-array-push! (mut messages) (load assistant)))
+    0)
+  (let [(mut content) (json-array allocator)
+        (mut i) 0
+        n (if (= (cast i64 results) 0) 0 (al-len [ToolResult] (load results)))]
+    ;; What a person said rides in the same user turn as the tool results it
+    ;; interrupted, and comes first in it. Anthropic pairs a tool_use turn with
+    ;; exactly one user turn carrying its results, so this is where a person's
+    ;; words have to go -- and last place, after a block of machine output, is
+    ;; where a sentence goes to be skimmed past.
+    (when (> (slice-len [u8] user-text) 0)
+      (let [(mut spoken) (json-object allocator)]
+        (json-put-string! (mut spoken) "type" "text")
+        (json-put-string! (mut spoken) "text" user-text)
+        (json-array-push! (mut content) (load spoken)))
+      0)
+    (loop (if (>= (load i) n)
+              (break)
+              (do
+                (json-array-push! (mut content)
+                                  (anthropic-tool-result-block allocator
+                                                               (al-get [ToolResult] (load results) (load i))))
+                (store! i (+ (load i) 1)))))
+    (when (> (json-array-length (load content)) 0)
+      (let [(mut user) (json-object allocator)]
+        (json-put-string! (mut user) "role" "user")
+        (json-object-put! (mut user) "content" (load content))
+        (json-array-push! (mut messages) (load user)))
+      0))
+  0)
+
 (defn anthropic-messages [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
   (let [(mut messages) (anthropic-base-messages allocator (load (field request messages)))
-        continuation (field request continuation)]
+        continuation (field request continuation)
+        turns (load (field continuation turns))]
     (when (load (field continuation present))
-      (let [(mut assistant) (json-object allocator)]
-        (json-put-string! (mut assistant) "role" "assistant")
-        (json-object-put! (mut assistant)
-                          "content"
-                          (json-get (load (field continuation previous-output)) "content"))
-        (json-array-push! (mut messages) (load assistant)))
-      (let [(mut content) (json-array allocator)
-            results (load (field continuation tool-results))
-            (mut i) 0
-            n (al-len [ToolResult] (load results))]
-        (loop (if (>= (load i) n)
-                  (break)
-                  (do
-                    (json-array-push! (mut content)
-                                      (anthropic-tool-result-block allocator
-                                                                   (al-get [ToolResult] (load results) (load i))))
-                    (store! i (+ (load i) 1)))))
-        (let [(mut user) (json-object allocator)]
-          (json-put-string! (mut user) "role" "user")
-          (json-object-put! (mut user) "content" (load content))
-          (json-array-push! (mut messages) (load user))))
+      (if (= (cast i64 turns) 0)
+          ;; No transcript recorded: one turn, the way a directly-constructed
+          ;; request supplies it.
+          (anthropic-turn-messages! allocator
+                                    (mut messages)
+                                    (load (field continuation previous-output))
+                                    (load (field continuation tool-results))
+                                    "")
+          (let [n (al-len [ContinuationTurn] (load turns))
+                (mut i) 0]
+            (loop (if (>= (load i) n)
+                      (break)
+                      (let [turn (al-get [ContinuationTurn] (load turns) (load i))]
+                        (anthropic-turn-messages! allocator
+                                                  (mut messages)
+                                                  (.output turn)
+                                                  (.results turn)
+                                                  (.user-text turn))
+                        (store! i (+ (load i) 1)))))
+            0))
       0)
     (load messages)))
 
