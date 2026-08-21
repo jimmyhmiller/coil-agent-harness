@@ -3,6 +3,7 @@
 ;; was built in. These drive the real renderer twice and count what the second
 ;; plan costs.
 (module harness-tui-render-diff-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -20,7 +21,7 @@
     (al-push! [FrameSpan] (mut spans) (frame-span text (str-len text) (RolePrimary)))
     (frame-push-spans! frame (load spans))))
 
-(defn build-live [(allocator (ptr Allocator))
+(defn build-live [(allocator (dyn Allocator))
                   (slot (ptr Frame))
                   (rows i64)
                   (changed-row i64)] (-> i64)
@@ -63,9 +64,9 @@
 ;; identical, must not. The contrast between the two numbers is the whole claim.
 (deftest a-second-identical-frame-costs-nothing-to-repaint
          (let [allocator (malloc-allocator)
-               renderer (alloc/stack InlineRenderer)
-               committed (alloc/stack Frame)
-               live (alloc/stack Frame)]
+               renderer (primitive/alloc-stack InlineRenderer)
+               committed (primitive/alloc-stack Frame)
+               live (primitive/alloc-stack Frame)]
            (store! renderer (inline-renderer-new-retaining allocator))
            (store! committed (frame-new allocator))
            (build-live allocator live 20 -1)
@@ -77,7 +78,7 @@
              (assert (= (count-writes first-plan) 20)))
 
            ;; A fresh frame with identical content, as a re-render would build.
-           (let [again (alloc/stack Frame)]
+           (let [again (primitive/alloc-stack Frame)]
              (build-live allocator again 20 -1)
              (let [second-plan (inline-renderer-plan-with! renderer allocator committed again)]
                (assert (= (count-erases second-plan) 0))
@@ -87,15 +88,15 @@
 
 (deftest a-later-frame-repaints-only-the-row-that-changed
          (let [allocator (malloc-allocator)
-               renderer (alloc/stack InlineRenderer)
-               committed (alloc/stack Frame)
-               live (alloc/stack Frame)]
+               renderer (primitive/alloc-stack InlineRenderer)
+               committed (primitive/alloc-stack Frame)
+               live (primitive/alloc-stack Frame)]
            (store! renderer (inline-renderer-new-retaining allocator))
            (store! committed (frame-new allocator))
            (build-live allocator live 20 -1)
            (inline-renderer-plan-with! renderer allocator committed live)
 
-           (let [changed (alloc/stack Frame)]
+           (let [changed (primitive/alloc-stack Frame)]
              (build-live allocator changed 20 11)
              (let [plan (inline-renderer-plan-with! renderer allocator committed changed)]
                (assert (= (count-erases plan) 1))))
@@ -106,14 +107,14 @@
 ;; caller's arena this would read freed memory rather than diffing.
 (deftest retention-holds-across-many-frames
          (let [allocator (malloc-allocator)
-               renderer (alloc/stack InlineRenderer)
-               committed (alloc/stack Frame)]
+               renderer (primitive/alloc-stack InlineRenderer)
+               committed (primitive/alloc-stack Frame)]
            (store! renderer (inline-renderer-new-retaining allocator))
            (store! committed (frame-new allocator))
            (let [(mut i) 0]
              (loop (if (>= (load i) 50)
                        (break)
-                       (let [live (alloc/stack Frame)]
+                       (let [live (primitive/alloc-stack Frame)]
                          (build-live allocator live 8 -1)
                          (let [plan (inline-renderer-plan-with! renderer allocator committed live)]
                            ;; Every frame after the first is identical, so only
@@ -127,16 +128,16 @@
 ;; though the live frame itself is unchanged.
 (deftest committed-output-forces-a-repaint
          (let [allocator (malloc-allocator)
-               renderer (alloc/stack InlineRenderer)
-               committed (alloc/stack Frame)
-               live (alloc/stack Frame)]
+               renderer (primitive/alloc-stack InlineRenderer)
+               committed (primitive/alloc-stack Frame)
+               live (primitive/alloc-stack Frame)]
            (store! renderer (inline-renderer-new-retaining allocator))
            (store! committed (frame-new allocator))
            (build-live allocator live 6 -1)
            (inline-renderer-plan-with! renderer allocator committed live)
 
-           (let [again (alloc/stack Frame)
-                 with-commit (alloc/stack Frame)]
+           (let [again (primitive/alloc-stack Frame)
+                 with-commit (primitive/alloc-stack Frame)]
              (build-live allocator again 6 -1)
              (store! with-commit (frame-new allocator))
              (push-row! with-commit "a committed line")
@@ -148,10 +149,10 @@
 ;; The original constructor must keep its original behaviour: always repaint.
 (deftest a-non-retaining-renderer-still-repaints
          (let [allocator (malloc-allocator)
-               renderer (alloc/stack InlineRenderer)
-               committed (alloc/stack Frame)
-               live (alloc/stack Frame)
-               again (alloc/stack Frame)]
+               renderer (primitive/alloc-stack InlineRenderer)
+               committed (primitive/alloc-stack Frame)
+               live (primitive/alloc-stack Frame)
+               again (primitive/alloc-stack Frame)]
            (store! renderer (inline-renderer-new))
            (store! committed (frame-new allocator))
            (build-live allocator live 10 -1)

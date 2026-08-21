@@ -1,4 +1,5 @@
 (module harness-sse-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.str" :use *)
@@ -31,10 +32,10 @@
 
 (deftest decodes-frames-across-arbitrary-chunk-boundaries
          (let [allocator (malloc-allocator)
-               count (box allocator i64 0)
-               valid (box allocator i64 1)
-               sink (alloc/stack RecordingSseSink)
-               decoder (alloc/stack SseDecoder)]
+               count (box! allocator i64 0)
+               valid (box! allocator i64 1)
+               sink (primitive/alloc-stack RecordingSseSink)
+               decoder (primitive/alloc-stack SseDecoder)]
            (store! (field sink count) count)
            (store! (field sink valid) valid)
            (store! (field sink reject-after) -1)
@@ -52,11 +53,11 @@
 
 (deftest applies-bounded-buffer-and-synchronous-backpressure
          (let [allocator (malloc-allocator)
-               count (box allocator i64 0)
-               valid (box allocator i64 1)
-               sink (alloc/stack RecordingSseSink)
-               bounded (alloc/stack SseDecoder)
-               rejected (alloc/stack SseDecoder)]
+               count (box! allocator i64 0)
+               valid (box! allocator i64 1)
+               sink (primitive/alloc-stack RecordingSseSink)
+               bounded (primitive/alloc-stack SseDecoder)
+               rejected (primitive/alloc-stack SseDecoder)]
            (store! (field sink count) count)
            (store! (field sink valid) valid)
            (store! (field sink reject-after) -1)

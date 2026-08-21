@@ -1,4 +1,5 @@
 (module harness-tui-cells)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc)
 (import "coil.slice" :use *)
@@ -10,14 +11,14 @@
    (length i64)])
 
 (defn utf8-invalid [] (-> Utf8Scalar)
-  (let [scalar (alloc/stack Utf8Scalar)]
+  (let [scalar (primitive/alloc-stack Utf8Scalar)]
     (set! (.valid scalar) false)
     (set! (.codepoint scalar) 65533)
     (set! (.length scalar) 1)
     (load scalar)))
 
 (defn utf8-value [(codepoint i64) (length i64)] (-> Utf8Scalar)
-  (let [scalar (alloc/stack Utf8Scalar)]
+  (let [scalar (primitive/alloc-stack Utf8Scalar)]
     (set! (.valid scalar) true)
     (set! (.codepoint scalar) codepoint)
     (set! (.length scalar) length)

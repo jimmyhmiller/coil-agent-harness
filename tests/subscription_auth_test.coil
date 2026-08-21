@@ -1,4 +1,5 @@
 (module harness-subscription-auth-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :use * :as alloc)
 (import "coil.match" :use *)
@@ -16,7 +17,7 @@
 (extern close :cc c [i32] (-> i32))
 
 (defstruct OAuthTokenServerJob
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (listener (ptr HttpListener))
    (body (ptr (slice u8)))])
 
@@ -39,7 +40,7 @@
       0)
     (cast (ptr i8) 0)))
 
-(defn test-jwt [(allocator (ptr Allocator)) (expires-seconds i64)] (-> (slice u8))
+(defn test-jwt [(allocator (dyn Allocator)) (expires-seconds i64)] (-> (slice u8))
   (let [(mut claims) (json-object allocator)]
     (json-object-put! (mut claims) "exp" (json-integer allocator expires-seconds))
     (json-put-string! (mut claims) "chatgpt_account_id" "account-test")
@@ -118,10 +119,10 @@
 
 (deftest native-token-exchange-posts-and-parses-json-without-a-helper-process
          (let [allocator (malloc-allocator)
-               listener (box allocator HttpListener (zeroed HttpListener))
-               received (box allocator (slice u8) "")
-               job (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
-               worker (alloc/stack Thread)]
+               listener (box! allocator HttpListener (zeroed HttpListener))
+               received (box! allocator (slice u8) "")
+               job (box! allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
+               worker (primitive/alloc-stack Thread)]
            (match (http-listener-open allocator 0)
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
@@ -187,10 +188,10 @@
 
 (deftest native-provider-refreshes-use-the-shared-token-transport
          (let [allocator (malloc-allocator)
-               listener (box allocator HttpListener (zeroed HttpListener))
-               received (box allocator (slice u8) "")
-               job (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
-               worker (alloc/stack Thread)]
+               listener (box! allocator HttpListener (zeroed HttpListener))
+               received (box! allocator (slice u8) "")
+               job (box! allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
+               worker (primitive/alloc-stack Thread)]
            (match (http-listener-open allocator 0)
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
@@ -217,10 +218,10 @@
                             (Some [value] value)
                             (None [] ""))
                           "native-refresh")))
-           (let [listener-two (box allocator HttpListener (zeroed HttpListener))
-                 received-two (box allocator (slice u8) "")
-                 job-two (box allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
-                 worker-two (alloc/stack Thread)]
+           (let [listener-two (box! allocator HttpListener (zeroed HttpListener))
+                 received-two (box! allocator (slice u8) "")
+                 job-two (box! allocator OAuthTokenServerJob (zeroed OAuthTokenServerJob))
+                 worker-two (primitive/alloc-stack Thread)]
              (match (http-listener-open allocator 0)
                (ListenerOpenFailed [message] (assert false))
                (ListenerOpened [opened] (store! listener-two opened)))

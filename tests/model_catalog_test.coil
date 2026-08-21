@@ -1,4 +1,5 @@
 (module harness-model-catalog-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
@@ -78,7 +79,7 @@
          (let [(mut i) 0]
            (loop (if (>= (load i) EFFORT_CHOICE_COUNT)
                      (break)
-                     (let [choice (alloc/stack EffortChoice)]
+                     (let [choice (primitive/alloc-stack EffortChoice)]
                        (store! choice (effort-choice-at (load i)))
                        (assert-eq (effort-index (load (field choice effort))) (load i))
                        (assert (= (load (field choice effort)) (load (field choice label))))
@@ -102,7 +103,7 @@
                      (let [choice (model-catalog-at (mut catalog) (load i))]
                        (when (load (field choice effort))
                          (let [at (effort-index (load (field choice default-effort)))
-                               shown (alloc/stack EffortChoice)]
+                               shown (primitive/alloc-stack EffortChoice)]
                            (assert (and (>= at 0) (< at EFFORT_CHOICE_COUNT)))
                            (store! shown (effort-choice-at at))
                            (assert (= (load (field shown effort)) (load (field choice default-effort)))))

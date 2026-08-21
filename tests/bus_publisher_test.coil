@@ -1,4 +1,5 @@
 (module harness-bus-publisher-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -31,8 +32,8 @@
 ;; it, without the run knowing they exist.
 (deftest every-observer-of-a-run-receives-its-events
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)
-               envelope (alloc/stack Envelope)]
+               router (primitive/alloc-stack Router)
+               envelope (primitive/alloc-stack Envelope)]
            (store! router (router-new allocator))
            (let [topic (run-topic allocator "chat-1")
                  first-tui (router-attach! router (Agent "tui-1"))
@@ -49,8 +50,8 @@
 ;; to care whether anyone is listening.
 (deftest publishing-to-a-run-nobody-watches-is-not-an-error
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)
-               envelope (alloc/stack Envelope)]
+               router (primitive/alloc-stack Router)
+               envelope (primitive/alloc-stack Envelope)]
            (store! router (router-new allocator))
            (let [(mut out) (al-new [i64] allocator)]
              (store! envelope
@@ -59,7 +60,7 @@
 
 (deftest a-published-event-comes-from-the-service
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack Envelope)]
+               envelope (primitive/alloc-stack Envelope)]
            (store! envelope
                    (event-envelope "e-1" (run-topic allocator "chat-1") "{}"))
            (assert (address-eq (load (field envelope from)) (Service)))

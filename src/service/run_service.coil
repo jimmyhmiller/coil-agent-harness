@@ -1,4 +1,5 @@
 (module harness-run-service)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -26,19 +27,19 @@
   (request-cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> i64))
   (cancel-durable-run [(self (ptr Self)) (command (ptr Json))] (-> RunCancellationResult))
   (describe-tools [(self (ptr Self))
-                   (allocator (ptr Allocator))
+                   (allocator (dyn Allocator))
                    (out (ptr Json))] (-> i64))
   (authorize-tool-call [(self (ptr Self))
                         (command (ptr Json))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (out (ptr Json))] (-> i64))
   (invoke-tool [(self (ptr Self))
                 (command (ptr Json))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (out (ptr Json))] (-> i64)))
 
 (defstruct RunService
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (journal-path (slice u8))
    (journal (ptr EventJournal))
    (emitter (ptr EventEmitter))
@@ -60,29 +61,29 @@
 ;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
 ;; by value through a trait object is not ABI-stable across Coil backends.
 (defn service-start-durable-run [(service (ptr RunService)) (command Json)] (-> i64)
-  (let [command-ref (alloc/stack Json)]
+  (let [command-ref (primitive/alloc-stack Json)]
     (set! command-ref command)
     (start-durable-run (.controller service) command-ref)))
 
 (defn service-cancel-durable-run [(service (ptr RunService))
                                   (command Json)] (-> RunCancellationResult)
-  (let [command-ref (alloc/stack Json)]
+  (let [command-ref (primitive/alloc-stack Json)]
     (set! command-ref command)
     (cancel-durable-run (.controller service) command-ref)))
 
 (defn service-request-cancel-durable-run [(service (ptr RunService))
                                           (command Json)] (-> i64)
-  (let [command-ref (alloc/stack Json)]
+  (let [command-ref (primitive/alloc-stack Json)]
     (set! command-ref command)
     (request-cancel-durable-run (.controller service) command-ref)))
 
 (defn service-response [(status i64) (body Json)] (-> ServiceResponse)
-  (let [response (alloc/stack ServiceResponse)]
+  (let [response (primitive/alloc-stack ServiceResponse)]
     (set! (.status response) status)
     (set! (.body response) body)
     (load response)))
 
-(defn service-error [(allocator (ptr Allocator))
+(defn service-error [(allocator (dyn Allocator))
                      (status i64)
                      (code (slice u8))
                      (message (slice u8))] (-> ServiceResponse)
@@ -92,7 +93,7 @@
     (json-put-string! (mut body) "message" message)
     (service-response status (load body))))
 
-(defn service-forbidden [(allocator (ptr Allocator))] (-> ServiceResponse)
+(defn service-forbidden [(allocator (dyn Allocator))] (-> ServiceResponse)
   (service-error allocator
                  403
                  "forbidden"
@@ -102,7 +103,7 @@
                               (principal (slice u8))] (-> i64)
   (if (json-put-string! (mut command) "actor" principal) 0 -1))
 
-(defn service-command-agent! [(allocator (ptr Allocator))
+(defn service-command-agent! [(allocator (dyn Allocator))
                               (command (mut Json))] (-> i64)
   ;; Snapshot every borrowed command string before mutating the object. JSON
   ;; strings are slices, so retaining views into a mutable aggregate across
@@ -213,7 +214,7 @@
                   (workflow-dependencies-valid? events command workflow-id))))))
 
 (defn service-recover-into [(service (ptr RunService))
-                            (allocator (ptr Allocator))] (-> JournalRecovery)
+                            (allocator (dyn Allocator))] (-> JournalRecovery)
   (event-journal-recover-synchronized (load (field service journal))
                                       allocator
                                       (.journal-path service)))
@@ -1352,21 +1353,21 @@
 
 ;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
 ;; request into this value and serialize the returned status/body.
-(defn service-tool-plane-unavailable [(allocator (ptr Allocator))] (-> ServiceResponse)
+(defn service-tool-plane-unavailable [(allocator (dyn Allocator))] (-> ServiceResponse)
   (service-error allocator 501 "tool_plane_unavailable"
                  "this service is not backed by a tool registry"))
 
 (defn service-list-tools [(service (ptr RunService))] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        out (alloc/stack Json)]
+        out (primitive/alloc-stack Json)]
     (if (< (describe-tools (.controller service) allocator out) 0)
         (service-tool-plane-unavailable allocator)
         (service-response 200 (load out)))))
 
 (defn service-authorize-tool [(service (ptr RunService)) (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        command-ref (alloc/stack Json)
-        out (alloc/stack Json)]
+        command-ref (primitive/alloc-stack Json)
+        out (primitive/alloc-stack Json)]
     (set! command-ref command)
     (if (= (slice-len [u8] (command-string command "name")) 0)
         (service-error allocator 400 "invalid_command" "a tool name is required")
@@ -1376,8 +1377,8 @@
 
 (defn service-call-tool [(service (ptr RunService)) (command Json)] (-> ServiceResponse)
   (let [allocator (load (field service allocator))
-        command-ref (alloc/stack Json)
-        out (alloc/stack Json)]
+        command-ref (primitive/alloc-stack Json)
+        out (primitive/alloc-stack Json)]
     (set! command-ref command)
     (if (= (slice-len [u8] (command-string command "name")) 0)
         (service-error allocator 400 "invalid_command" "a tool name is required")

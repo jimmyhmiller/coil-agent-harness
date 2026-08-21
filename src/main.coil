@@ -1,4 +1,5 @@
 (module harness-main)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -52,7 +53,7 @@
 (import "harness-bus-cc-realm" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
-  (let [writer (alloc/stack io/Writer)]
+  (let [writer (primitive/alloc-stack io/Writer)]
     (match (io/write-all (io/fd-writer writer fd)
                          (cast (ptr i8) (slice-data [u8] value))
                          (slice-len [u8] value))
@@ -61,14 +62,14 @@
 
 (defn write-line [(fd i64) (value (slice u8))] (-> i64)
   (write-slice fd value)
-  (let [newline (alloc/stack (array u8 1))]
+  (let [newline (primitive/alloc-stack (array u8 1))]
     (set! (index newline 0) (cast u8 10))
     (write-slice fd (slice-new [u8] (index newline 0) 1))))
 
 ;; Tool groups are a deliberately small runtime configuration seam. An absent
 ;; variable preserves the interactive harness defaults; factories can expose a
 ;; narrower registry without requiring a different binary.
-(defn tool-group-enabled? [(allocator (ptr Allocator))
+(defn tool-group-enabled? [(allocator (dyn Allocator))
                            (name (slice u8))] (-> bool)
   (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
     (Err [failure] true)
@@ -112,7 +113,7 @@
                              (model (slice u8))
                              (provider-name (slice u8))
                              (runtime-contexts (ArrayList (slice u8)))
-                             (allocator (ptr Allocator))] (-> i64)
+                             (allocator (dyn Allocator))] (-> i64)
   (match (load-factory-definition allocator factory-directory)
     (FactoryInvalid [message] (do (write-line 2 message) 65))
     (FactoryLoaded [definition-value]
@@ -201,15 +202,15 @@
                                                                                                    74))
                                                                               (JournalOpened [opened]
                                                                                              (let [sequence
-                                                                                                     (box allocator
+                                                                                                     (box! allocator
                                                                                                           i64
                                                                                                           1)
                                                                                                    emitter
-                                                                                                     (box allocator
+                                                                                                     (box! allocator
                                                                                                           EventEmitter
                                                                                                           (zeroed EventEmitter))]
                                                                                                (store! journal
-                                                                                                       (box allocator
+                                                                                                       (box! allocator
                                                                                                             EventJournal
                                                                                                             opened))
                                                                                                (event-emitter-init! emitter
@@ -235,7 +236,7 @@
                        (count i64)
                        (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -268,7 +269,7 @@
                          (model (slice u8))
                          (provider-name (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -293,7 +294,7 @@
                        (count i64)
                        (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           (mut steps) (al-new [(slice u8)] allocator)
@@ -319,10 +320,10 @@
         (region/region-close! process-region)
         result))))
 
-(defstruct CliEventSink [(allocator (ptr Allocator))])
+(defstruct CliEventSink [(allocator (dyn Allocator))])
 
 (defn publish-cli-event [(self (ptr CliEventSink)) (event (ptr Event))] (-> i64)
-  (let [scratch-region (alloc/stack region/Region)]
+  (let [scratch-region (primitive/alloc-stack region/Region)]
     (region/region-init scratch-region (load (field self allocator)))
     (let [scratch (region/region-allocator scratch-region)
           record (event-to-json scratch event)
@@ -339,7 +340,7 @@
 
 (defn execute-echo [(self (ptr EchoTool))
                     (call (ptr ToolCall))
-                    (allocator (ptr Allocator))] (-> ToolResult)
+                    (allocator (dyn Allocator))] (-> ToolResult)
   (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
     (set! (.output result) (.arguments call))
     (load result)))
@@ -348,11 +349,11 @@
   (execute-tool [(self (ptr EchoTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-echo self call allocator)))
 
-(defn echo-schema [(allocator (ptr Allocator))] (-> Json)
+(defn echo-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut text) (json-object allocator)
         (mut properties) (json-object allocator)
         (mut required) (json-array allocator)
@@ -366,9 +367,9 @@
     (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
     (load schema)))
 
-(defn echo-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator EchoTool (zeroed EchoTool))]
+(defn echo-definition [(allocator (dyn Allocator))] (-> ToolDefinition)
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator EchoTool (zeroed EchoTool))]
     (set! (.name (.spec definition)) "echo")
     (set! (.description (.spec definition)) "Return the supplied text. Multiple calls may run in parallel.")
     (set! (.input-schema (.spec definition)) (echo-schema allocator))
@@ -379,14 +380,14 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn make-request [(allocator (ptr Allocator))
+(defn make-request [(allocator (dyn Allocator))
                     (model (slice u8))
                     (prompt (slice u8))
                     (force-tool bool)
                     (registry (ptr ToolRegistry))] (-> ModelRequest)
-  (let [request (alloc/stack ModelRequest)
-        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        message (alloc/stack Message)]
+  (let [request (primitive/alloc-stack ModelRequest)
+        messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+        message (primitive/alloc-stack Message)]
     ;; Keep future ModelRequest fields safe by default; explicit stores below
     ;; document the CLI contract and override this complete initialization.
     (set! request (zeroed ModelRequest))
@@ -418,21 +419,21 @@
     (set! (.tool-results (.continuation request)) (cast (ptr (ArrayList ToolResult)) 0))
     (load request)))
 
-(defn cli-run-provider [(allocator (ptr Allocator))
+(defn cli-run-provider [(allocator (dyn Allocator))
                         (registry (ptr ToolRegistry))
                         (provider (dyn ModelProvider))
                         (model (slice u8))
                         (prompt (slice u8))
                         (force-tool bool)] (-> i64)
   (let [request
-          (box allocator
+          (box! allocator
                ModelRequest
                (make-request allocator model prompt force-tool registry))
-        sequence (box allocator i64 1)
-        sink (alloc/stack CliEventSink)
-        policy (alloc/stack AgentRunPolicy)]
+        sequence (box! allocator i64 1)
+        sink (primitive/alloc-stack CliEventSink)
+        policy (primitive/alloc-stack AgentRunPolicy)]
     (set! (.allocator sink) allocator)
-    (let [emitter (box allocator EventEmitter (zeroed EventEmitter))]
+    (let [emitter (box! allocator EventEmitter (zeroed EventEmitter))]
       (event-emitter-init! emitter allocator sink sequence)
       (set! (.max-model-turns policy) 0)
       (set! (.max-parallel-tools policy) 8)
@@ -454,26 +455,26 @@
                      (model (slice u8))
                      (prompt (slice u8))
                      (force-tool bool)
-                     (process-allocator (ptr Allocator))
-                     (run-allocator (ptr Allocator))] (-> i64)
+                     (process-allocator (dyn Allocator))
+                     (run-allocator (dyn Allocator))] (-> i64)
   (let [allocator run-allocator
         registry
-          (box process-allocator
+          (box! process-allocator
                ToolRegistry
                (tool-registry-new process-allocator))
-        openai-context (box allocator OpenAIResponsesContext (openai-context-default allocator))
-        deepseek-openai-context (box allocator DeepSeekOpenAIContext (deepseek-openai-context-default allocator))
+        openai-context (box! allocator OpenAIResponsesContext (openai-context-default allocator))
+        deepseek-openai-context (box! allocator DeepSeekOpenAIContext (deepseek-openai-context-default allocator))
         deepseek-anthropic-context
-          (box allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default allocator))
+          (box! allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default allocator))
         cwd-result (os/current-dir allocator)
         cwd
           (match cwd-result
             (Ok [owned] (os/owned-string-slice owned))
             (Err [failure] "."))
         codex-strategy (default-codex-strategy allocator cwd)
-        codex-context-value (box allocator CodexProvider (zeroed CodexProvider))
-        claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))
-        agent-sdk-context-value (box allocator AgentSdkContext (agent-sdk-context allocator cwd))]
+        codex-context-value (box! allocator CodexProvider (zeroed CodexProvider))
+        claude-context-value (box! allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))
+        agent-sdk-context-value (box! allocator AgentSdkContext (agent-sdk-context allocator cwd))]
     (set! (.strategy codex-context-value) codex-strategy)
     (tool-register! registry (echo-definition process-allocator))
     (let [result
@@ -500,7 +501,7 @@
                (prompt (slice u8))
                (force-tool bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -518,7 +519,7 @@
       (region/region-close! process-region)
       (load result))))
 
-(defn cli-auth-token [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cli-auth-token [(allocator (dyn Allocator))] (-> (slice u8))
   (match (os/env-get allocator "HARNESS_OPERATOR_TOKEN")
     (Ok [found]
         (match found
@@ -532,7 +533,7 @@
                   (Err [failure] "")))))
     (Err [failure] "")))
 
-(defn cli-observer-token [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cli-observer-token [(allocator (dyn Allocator))] (-> (slice u8))
   (match (os/env-get allocator "HARNESS_OBSERVER_TOKEN")
     (Ok [found]
         (match found
@@ -542,7 +543,7 @@
 
 (defn cli-claude-auth [(login bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           result
@@ -554,7 +555,7 @@
 
 (defn cli-codex-auth [(login bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           result
@@ -566,9 +567,9 @@
 
 (defn cli-tui-owned [(journal-path (slice u8))
                      (force-plain bool)
-                     (process-allocator (ptr Allocator))
-                     (service-allocator (ptr Allocator))
-                     (session-allocator (ptr Allocator))] (-> i64)
+                     (process-allocator (dyn Allocator))
+                     (service-allocator (dyn Allocator))
+                     (session-allocator (dyn Allocator))] (-> i64)
   (let [allocator service-allocator
         (mut journal) (cast (ptr EventJournal) 0)
         (mut overrides) (terminal-overrides-from-env process-allocator)]
@@ -583,24 +584,24 @@
                                     (write-line 2 message)
                                     (return-from :tui 74)))
                (JournalOpened [opened]
-                              (store! journal (box allocator EventJournal opened))))
+                              (store! journal (box! allocator EventJournal opened))))
              (let [recovery (event-journal-recover allocator journal-path)]
                (when (not (load (field recovery ok)))
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :tui 65))
-               (let [sequence (box allocator i64 (+ (load (field recovery last-sequence)) 1))
-                     emitter (box allocator EventEmitter (zeroed EventEmitter))
+               (let [sequence (box! allocator i64 (+ (load (field recovery last-sequence)) 1))
+                     emitter (box! allocator EventEmitter (zeroed EventEmitter))
                      registry
-                       (box process-allocator
+                       (box! process-allocator
                             ToolRegistry
                             (tool-registry-new process-allocator))
                      provider-factory
-                       (box allocator
+                       (box! allocator
                             DefaultRuntimeProviderFactory
                             (zeroed DefaultRuntimeProviderFactory))
                      controller
-                       (box allocator
+                       (box! allocator
                             RuntimeRunController
                             (runtime-controller-new allocator
                                                     registry
@@ -608,14 +609,14 @@
                                                     emitter
                                                     journal
                                                     journal-path))
-                     service (box allocator RunService (zeroed RunService))]
+                     service (box! allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
                  (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
                    (write-line 2 "could not initialize runtime provider factory")
                    (event-journal-close! journal)
                    (return-from :tui 70))
                  (store! (field provider-factory tui-fixture)
-                         (box process-allocator
+                         (box! process-allocator
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
                  (when (tool-group-enabled? allocator "filesystem")
@@ -648,8 +649,8 @@
 
 (defn cli-tui [(journal-path (slice u8)) (force-plain bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
-        session-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
+        session-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -672,7 +673,7 @@
 
 (defn cli-tui-default [(force-plain bool)] (-> i64)
   (let [owner (malloc-allocator)
-        scratch-region (alloc/stack region/Region)]
+        scratch-region (primitive/alloc-stack region/Region)]
     (region/region-init scratch-region owner)
     (let [allocator (region/region-allocator scratch-region)
           state-root
@@ -726,14 +727,14 @@
 
 (defn cli-serve-owned [(port-text (slice u8))
                        (journal-path (slice u8))
-                       (process-allocator (ptr Allocator))
-                       (service-allocator (ptr Allocator))] (-> i64)
+                       (process-allocator (dyn Allocator))
+                       (service-allocator (dyn Allocator))] (-> i64)
   (let [allocator service-allocator
         auth-token (cli-auth-token process-allocator)
         observer-token (cli-observer-token process-allocator)
-        service-auth (alloc/stack ServiceAuth)
+        service-auth (primitive/alloc-stack ServiceAuth)
         (mut journal) (cast (ptr EventJournal) 0)
-        listener (alloc/stack HttpListener)]
+        listener (primitive/alloc-stack HttpListener)]
     (block :serve
            (when (= (slice-len [u8] auth-token) 0)
              (write-line 2 "HARNESS_OPERATOR_TOKEN or HARNESS_AUTH_TOKEN must be set and non-empty")
@@ -756,27 +757,27 @@
                                     (write-line 2 message)
                                     (return-from :serve 74)))
                (JournalOpened [opened]
-                              (store! journal (box allocator EventJournal opened))))
+                              (store! journal (box! allocator EventJournal opened))))
              (let [recovery (event-journal-recover allocator journal-path)]
                (when (not (load (field recovery ok)))
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :serve 65))
                (let [sequence
-                       (box allocator
+                       (box! allocator
                             i64
                             (+ (load (field recovery last-sequence)) 1))
-                     emitter (box allocator EventEmitter (zeroed EventEmitter))
+                     emitter (box! allocator EventEmitter (zeroed EventEmitter))
                      registry
-                       (box process-allocator
+                       (box! process-allocator
                             ToolRegistry
                             (tool-registry-new process-allocator))
                      provider-factory
-                       (box allocator
+                       (box! allocator
                             DefaultRuntimeProviderFactory
                             (zeroed DefaultRuntimeProviderFactory))
                      controller
-                       (box allocator
+                       (box! allocator
                             RuntimeRunController
                             (runtime-controller-new allocator
                                                     registry
@@ -784,14 +785,14 @@
                                                     emitter
                                                     journal
                                                     journal-path))
-                     service (box allocator RunService (zeroed RunService))]
+                     service (box! allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
                  (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
                    (write-line 2 "could not initialize runtime provider factory")
                    (event-journal-close! journal)
                    (return-from :serve 70))
                  (store! (field provider-factory tui-fixture)
-                         (box process-allocator
+                         (box! process-allocator
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
                  (tool-register! registry (echo-definition process-allocator))
@@ -831,7 +832,7 @@
                                               (json-stringify allocator
                                                               (json-integer allocator
                                                                             (load (field listener port))))))
-                 (let [shutdown (alloc/stack ShutdownSignal)
+                 (let [shutdown (primitive/alloc-stack ShutdownSignal)
                        (mut server-code) 0]
                    (store! shutdown (shutdown-signal-new))
                    (if (or (not (shutdown-signal-valid? shutdown))
@@ -855,7 +856,7 @@
 (defn cli-serve [(port-text (slice u8))
                  (journal-path (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -995,7 +996,7 @@
 ;; rather than being hidden: they are reachable, and a listing that omitted them
 ;; would misrepresent who is actually out there.
 (defn cli-peers-in [(realm (ptr CcRealm))
-                    (allocator (ptr Allocator))
+                    (allocator (dyn Allocator))
                     (include-dead bool)] (-> i64)
   (let [(mut peers) (cc-discover realm allocator include-dead)
         n (al-len [CcPeer] peers)
@@ -1043,10 +1044,10 @@
 
 (defn cli-peers [(realm-name (slice u8)) (include-dead bool)] (-> i64)
   (let [owner (malloc-allocator)
-        region (alloc/stack region/Region)]
+        region (primitive/alloc-stack region/Region)]
     (region/region-init region owner)
     (let [allocator (region/region-allocator region)
-          realm (alloc/stack CcRealm)]
+          realm (primitive/alloc-stack CcRealm)]
       (cc-realm-init! realm allocator realm-name)
       (cli-peers-in realm allocator include-dead)
       (region/region-close! region)
@@ -1056,11 +1057,11 @@
                      (target (slice u8))
                      (message (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        region (alloc/stack region/Region)]
+        region (primitive/alloc-stack region/Region)]
     (region/region-init region owner)
     (let [allocator (region/region-allocator region)
-          realm (alloc/stack CcRealm)
-          identity (alloc/stack CcIdentity)]
+          realm (primitive/alloc-stack CcRealm)
+          identity (primitive/alloc-stack CcIdentity)]
       (cc-realm-init! realm allocator realm-name)
       ;; No reply address: this process does not bind a socket, so a reply has
       ;; nowhere to go. The message still delivers -- reachability never

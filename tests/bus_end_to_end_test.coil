@@ -12,6 +12,7 @@
 ;;   * a subscriber that stops reading cannot stall the run -- it loses events
 ;;     instead, and the loss is counted.
 (module harness-bus-end-to-end-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -52,7 +53,7 @@
                 (match (time/duration-seconds 2)
                   (Err [_] false)
                   (Ok [duration]
-                      (let [accepted (alloc/stack socket/UnixConnection)]
+                      (let [accepted (primitive/alloc-stack socket/UnixConnection)]
                         (match (socket/unix-accept-for listener accepted duration)
                           (Err [_] false)
                           (Ok [_]
@@ -66,7 +67,7 @@
 (defn drain-to-subscriber! [(sink (ptr BusObserverSink))
                             (router (ptr Router))
                             (codec (dyn Codec))
-                            (allocator (ptr Allocator))
+                            (allocator (dyn Allocator))
                             (transport (ptr UnixTransport))
                             (handle i64)] (-> i64)
   (let [pending (bus-observer-pending sink)
@@ -98,16 +99,16 @@
 ;; Read one envelope back off the wire and report the `event` field of its body.
 (defn receive-event-kind [(transport (ptr UnixTransport))
                           (codec (dyn Codec))
-                          (allocator (ptr Allocator))] (-> (slice u8))
-  (let [out (alloc/stack (slice u8))
-        envelope (alloc/stack Envelope)]
+                          (allocator (dyn Allocator))] (-> (slice u8))
+  (let [out (primitive/alloc-stack (slice u8))
+        envelope (primitive/alloc-stack Envelope)]
     (if (!= (frame-read transport allocator out) FRAME_OK)
         ""
         (try (let [_ (try-or! (codec-decode codec allocator (load out) envelope)
                               "")]
                   ;; The body is the journal's own canonical event JSON, so a
                   ;; subscriber reads exactly what the journal recorded.
-                  (let [parsed (alloc/stack JsonParseResult)]
+                  (let [parsed (primitive/alloc-stack JsonParseResult)]
                     (store! parsed (json-parse allocator (load (field envelope body))))
                     (if (not (load (field parsed ok)))
                         ""
@@ -120,16 +121,16 @@
 
 (deftest a-subscriber-receives-real-emitted-events-over-a-socket
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               client (alloc/stack UnixTransport)
-               server (alloc/stack UnixTransport)
-               codec (alloc/stack MessagePackCodec)
-               journal (alloc/stack EventJournal)
-               observer (alloc/stack BusObserverSink)
-               tee (alloc/stack TeeEventSink)
-               emitter (alloc/stack EventEmitter)
-               router (alloc/stack Router)
-               sequence (alloc/stack i64)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               client (primitive/alloc-stack UnixTransport)
+               server (primitive/alloc-stack UnixTransport)
+               codec (primitive/alloc-stack MessagePackCodec)
+               journal (primitive/alloc-stack EventJournal)
+               observer (primitive/alloc-stack BusObserverSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               router (primitive/alloc-stack Router)
+               sequence (primitive/alloc-stack i64)]
            (remove-path JOURNAL_PATH)
            (assert (connect-pair listener client server))
            (match (event-journal-open allocator JOURNAL_PATH true)
@@ -166,7 +167,7 @@
            (event-journal-close! journal)
 
            ;; Observing must not have cost the durable record anything.
-           (let [recovery (alloc/stack JournalRecovery)]
+           (let [recovery (primitive/alloc-stack JournalRecovery)]
              (store! recovery (event-journal-recover allocator JOURNAL_PATH))
              (assert (load (field recovery ok)))
              (assert (= (al-len [Json] (load (field recovery events))) 3))
@@ -182,11 +183,11 @@
 ;; events, and the run keeps going.
 (deftest a-subscriber-that-stops-reading-cannot-stall-the-run
          (let [allocator (malloc-allocator)
-               journal (alloc/stack EventJournal)
-               observer (alloc/stack BusObserverSink)
-               tee (alloc/stack TeeEventSink)
-               emitter (alloc/stack EventEmitter)
-               sequence (alloc/stack i64)]
+               journal (primitive/alloc-stack EventJournal)
+               observer (primitive/alloc-stack BusObserverSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               sequence (primitive/alloc-stack i64)]
            (remove-path JOURNAL_PATH)
            (match (event-journal-open allocator JOURNAL_PATH true)
              (JournalOpenFailed [message] (assert false))
@@ -214,7 +215,7 @@
 
            ;; Crucially, the DURABLE record is complete. Only the observer lost
            ;; events; the journal is the source of truth and is untouched.
-           (let [recovery (alloc/stack JournalRecovery)]
+           (let [recovery (primitive/alloc-stack JournalRecovery)]
              (store! recovery (event-journal-recover allocator JOURNAL_PATH))
              (assert (load (field recovery ok)))
              (assert (= (al-len [Json] (load (field recovery events))) 20)))

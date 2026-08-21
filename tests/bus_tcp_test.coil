@@ -4,6 +4,7 @@
 ;; or a mishandled clean close -- so this exercises the one layer that talks to
 ;; the kernel.
 (module harness-bus-tcp-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
@@ -18,7 +19,7 @@
 
 ;; Bring up a connected pair on the loopback interface. Port 0 lets the kernel
 ;; pick, so the test never collides with a real service or another test run.
-(defn connect-pair [(allocator (ptr Allocator))
+(defn connect-pair [(allocator (dyn Allocator))
                     (listener (ptr socket/TcpListener))
                     (client (ptr TcpTransport))
                     (server (ptr TcpTransport))] (-> bool)
@@ -31,7 +32,7 @@
                       (match (time/duration-seconds 2)
                         (Err [_] false)
                         (Ok [duration]
-                            (let [accepted (alloc/stack socket/TcpConnection)]
+                            (let [accepted (primitive/alloc-stack socket/TcpConnection)]
                               (match (socket/tcp-accept-for listener accepted duration)
                                 (Err [_] false)
                                 (Ok [_]
@@ -41,13 +42,13 @@
 
 (deftest an-envelope-crosses-a-real-socket
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/TcpListener)
-               client (alloc/stack TcpTransport)
-               server (alloc/stack TcpTransport)
-               codec (alloc/stack MessagePackCodec)
-               original (alloc/stack Envelope)
-               decoded (alloc/stack Envelope)
-               out (alloc/stack (slice u8))]
+               listener (primitive/alloc-stack socket/TcpListener)
+               client (primitive/alloc-stack TcpTransport)
+               server (primitive/alloc-stack TcpTransport)
+               codec (primitive/alloc-stack MessagePackCodec)
+               original (primitive/alloc-stack Envelope)
+               decoded (primitive/alloc-stack Envelope)
+               out (primitive/alloc-stack (slice u8))]
            (assert (connect-pair allocator listener client server))
            (store! original
                    (envelope-new "msg-1"
@@ -77,12 +78,12 @@
 ;; what the length prefix buys, and a socket delivers them coalesced.
 (deftest back-to-back-frames-stay-separate-on-one-connection
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/TcpListener)
-               client (alloc/stack TcpTransport)
-               server (alloc/stack TcpTransport)
-               first-out (alloc/stack (slice u8))
-               second-out (alloc/stack (slice u8))
-               third-out (alloc/stack (slice u8))]
+               listener (primitive/alloc-stack socket/TcpListener)
+               client (primitive/alloc-stack TcpTransport)
+               server (primitive/alloc-stack TcpTransport)
+               first-out (primitive/alloc-stack (slice u8))
+               second-out (primitive/alloc-stack (slice u8))
+               third-out (primitive/alloc-stack (slice u8))]
            (assert (connect-pair allocator listener client server))
            (assert (= (frame-write! client "one") FRAME_OK))
            (assert (= (frame-write! client "") FRAME_OK))
@@ -101,10 +102,10 @@
 ;; rather than as a transport failure.
 (deftest a-closed-peer-reports-eof-not-failure
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/TcpListener)
-               client (alloc/stack TcpTransport)
-               server (alloc/stack TcpTransport)
-               out (alloc/stack (slice u8))]
+               listener (primitive/alloc-stack socket/TcpListener)
+               client (primitive/alloc-stack TcpTransport)
+               server (primitive/alloc-stack TcpTransport)
+               out (primitive/alloc-stack (slice u8))]
            (assert (connect-pair allocator listener client server))
            (transport-close! client)
            (assert (= (frame-read server allocator out) FRAME_EOF))

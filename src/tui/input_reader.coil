@@ -1,4 +1,5 @@
 (module harness-tui-input-reader)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -53,15 +54,15 @@
    (signals-open bool)])
 
 (defn input-reader-lifecycle-new [] (-> InputReaderLifecycle)
-  (let [lifecycle (alloc/stack InputReaderLifecycle)]
+  (let [lifecycle (primitive/alloc-stack InputReaderLifecycle)]
     (set! (.terminal lifecycle) (terminal-session-new))
     (set! (.signals-open lifecycle) false)
     (load lifecycle)))
 
-(defn input-reader-lifecycle-enter! [(allocator (ptr Allocator))
+(defn input-reader-lifecycle-enter! [(allocator (dyn Allocator))
                                      (lifecycle (ptr InputReaderLifecycle))
                                      (profile (ref TerminalProfile))] (-> bool)
-  (let [numbers (alloc/stack (array i32 2))]
+  (let [numbers (primitive/alloc-stack (array i32 2))]
     (set! (index numbers 0) (cast i32 2))
     (set! (index numbers 1) (cast i32 15))
     (match (signals/signal-subscribe (field lifecycle signals)
@@ -84,7 +85,7 @@
 ;; than the conversation does.
 (const INPUT_MENU_MAX_ROWS 8)
 
-(defn input-reader-menu [(allocator (ptr Allocator))
+(defn input-reader-menu [(allocator (dyn Allocator))
                          (editor (ptr InputEditor))
                          (overflow (ptr i64))] (-> (ptr (ArrayList ViewMenuEntry)))
   (set! overflow 0)
@@ -100,7 +101,7 @@
               (if (>= selected shown)
                   (- (+ selected 1) shown)
                   0)
-            entries (box allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] allocator))
+            entries (box! allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] allocator))
             (mut at) 0]
         (set! overflow (- count shown))
         (loop (if (>= (load at) shown)
@@ -126,7 +127,7 @@
 
 ;; While reverse search is active the composer shows the query and the matched
 ;; line instead of the ordinary prompt, so the mode is never ambiguous.
-(defn input-reader-prompt [(allocator (ptr Allocator))
+(defn input-reader-prompt [(allocator (dyn Allocator))
                            (editor (ptr InputEditor))
                            (prompt (slice u8))] (-> (slice u8))
   (if (not (input-editor-search-active? editor))
@@ -137,7 +138,7 @@
                                         (input-editor-search-text editor)
                                         "': "))))
 
-(defn input-reader-redraw-with! [(allocator (ptr Allocator))
+(defn input-reader-redraw-with! [(allocator (dyn Allocator))
                                  (editor (ptr InputEditor))
                                  (renderer (ptr InputRenderer))
                                  (profile (ref TerminalProfile))
@@ -145,10 +146,10 @@
                                  (height i64)
                                  (prompt (slice u8))
                                  (hint (slice u8))] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle allocator)
     (let [cycle-allocator (region/region-allocator cycle)
-          overflow (box cycle-allocator i64 0)
+          overflow (box! cycle-allocator i64 0)
           menu (input-reader-menu cycle-allocator editor overflow)
           ;; A hint replaces the completion menu rather than stacking with it:
           ;; the menu is only open mid-command and Ctrl-C clears the line first,
@@ -157,7 +158,7 @@
             (if (= (slice-len [u8] hint) 0)
                 menu
                 (let [only
-                        (box cycle-allocator
+                        (box! cycle-allocator
                              (ArrayList ViewMenuEntry)
                              (al-new [ViewMenuEntry] cycle-allocator))]
                   (al-push! [ViewMenuEntry] only (view-menu-entry hint "" false))
@@ -175,7 +176,7 @@
                 rows
                 (let [owned
                         (if (= rows (cast (ptr (ArrayList ViewMenuEntry)) 0))
-                            (box cycle-allocator
+                            (box! cycle-allocator
                                  (ArrayList ViewMenuEntry)
                                  (al-new [ViewMenuEntry] cycle-allocator))
                             rows)]
@@ -208,7 +209,7 @@
       (region/region-close! cycle)
       0)))
 
-(defn input-reader-redraw! [(allocator (ptr Allocator))
+(defn input-reader-redraw! [(allocator (dyn Allocator))
                             (editor (ptr InputEditor))
                             (renderer (ptr InputRenderer))
                             (profile (ref TerminalProfile))
@@ -217,13 +218,13 @@
                             (prompt (slice u8))] (-> i64)
   (input-reader-redraw-with! allocator editor renderer profile width height prompt ""))
 
-(defn input-reader-clear! [(allocator (ptr Allocator))
+(defn input-reader-clear! [(allocator (dyn Allocator))
                            (renderer (ptr InputRenderer))
                            (profile (ref TerminalProfile))] (-> i64)
   (let [(mut operations) (input-renderer-clear-plan! renderer allocator)]
     (tui-output-execute-plan! allocator profile (mut operations))))
 
-(defn input-reader-commit! [(allocator (ptr Allocator))
+(defn input-reader-commit! [(allocator (dyn Allocator))
                             (renderer (ptr InputRenderer))
                             (profile (ref TerminalProfile))] (-> i64)
   (let [(mut operations) (input-renderer-commit-plan! renderer allocator)]
@@ -239,7 +240,7 @@
           (Ok [ready] true)
           (Err [failure] false)))))
 
-(defn input-reader-byte [(allocator (ptr Allocator))
+(defn input-reader-byte [(allocator (dyn Allocator))
                          (decoder (ptr InputDecoder))
                          (lifecycle (ptr InputReaderLifecycle))
                          (idle-timeout i64)] (-> i64)
@@ -261,7 +262,7 @@
                0)
              0)
            (when (input-reader-ready? (cast i32 0) wait-ms)
-             (let [byte (alloc/stack (array u8 1))
+             (let [byte (primitive/alloc-stack (array u8 1))
                    count
                      (cast i64
                            (io/read (cast i32 0)
@@ -281,7 +282,7 @@
              0)
            -2)))
 
-(defn input-reader-finish! [(allocator (ptr Allocator))
+(defn input-reader-finish! [(allocator (dyn Allocator))
                             (lifecycle (ptr InputReaderLifecycle))
                             (profile (ref TerminalProfile))] (-> i64)
   (terminal-session-restore! allocator
@@ -315,12 +316,12 @@
 (defstruct ChoiceEntry [(label (slice u8)) (detail (slice u8))])
 
 (defn choice-entry [(label (slice u8)) (detail (slice u8))] (-> ChoiceEntry)
-  (let [entry (alloc/stack ChoiceEntry)]
+  (let [entry (primitive/alloc-stack ChoiceEntry)]
     (set! (.label entry) label)
     (set! (.detail entry) detail)
     (load entry)))
 
-(defn input-choice-redraw! [(allocator (ptr Allocator))
+(defn input-choice-redraw! [(allocator (dyn Allocator))
                             (renderer (ptr InputRenderer))
                             (profile (ref TerminalProfile))
                             (width i64)
@@ -330,14 +331,14 @@
                             (filtered (ptr (ArrayList i64)))
                             (query (slice u8))
                             (selected i64)] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle allocator)
     (let [cycle-allocator (region/region-allocator cycle)
           count (al-len [i64] (load filtered))
           shown (if (> count INPUT_MENU_MAX_ROWS) INPUT_MENU_MAX_ROWS count)
           start (if (>= selected shown) (- (+ selected 1) shown) 0)
           overflow (- count shown)
-          rows (box cycle-allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] cycle-allocator))
+          rows (box! cycle-allocator (ArrayList ViewMenuEntry) (al-new [ViewMenuEntry] cycle-allocator))
           (mut at) 0]
       (loop (if (>= (load at) shown)
                 (break)
@@ -483,7 +484,7 @@
 ;; numbered list: with a dozen models, `sol` gets you there in three keystrokes
 ;; and no reading. A query that matches nothing leaves the previous list on
 ;; screen rather than blanking it, so a typo is recoverable with one backspace.
-(defn input-read-choice [(allocator (ptr Allocator))
+(defn input-read-choice [(allocator (dyn Allocator))
                          (profile (ref TerminalProfile))
                          (prompt (slice u8))
                          (entries (ptr (ArrayList ChoiceEntry)))
@@ -594,7 +595,7 @@
                                                   :else (ChoiceClosed))))
                            0)))))))
 
-(defn input-read-interactive-with [(allocator (ptr Allocator))
+(defn input-read-interactive-with [(allocator (dyn Allocator))
                                    (editor (ptr InputEditor))
                                    (profile (ref TerminalProfile))
                                    (prompt (slice u8))
@@ -832,21 +833,21 @@
 
 ;; A secondary prompt cancels on Ctrl-C; only the main composer offers to quit,
 ;; because quitting out of "which run id?" is never what was meant.
-(defn input-read-interactive [(allocator (ptr Allocator))
+(defn input-read-interactive [(allocator (dyn Allocator))
                               (editor (ptr InputEditor))
                               (profile (ref TerminalProfile))
                               (prompt (slice u8))] (-> InputReadResult)
-  (let [observer (alloc/stack NoopInputIdleObserver)]
+  (let [observer (primitive/alloc-stack NoopInputIdleObserver)]
     (input-read-interactive-with allocator editor profile prompt false observer)))
 
-(defn input-read-primary [(allocator (ptr Allocator))
+(defn input-read-primary [(allocator (dyn Allocator))
                           (editor (ptr InputEditor))
                           (profile (ref TerminalProfile))
                           (prompt (slice u8))] (-> InputReadResult)
-  (let [observer (alloc/stack NoopInputIdleObserver)]
+  (let [observer (primitive/alloc-stack NoopInputIdleObserver)]
     (input-read-interactive-with allocator editor profile prompt true observer)))
 
-(defn input-read-primary-observed [(allocator (ptr Allocator))
+(defn input-read-primary-observed [(allocator (dyn Allocator))
                                    (editor (ptr InputEditor))
                                    (profile (ref TerminalProfile))
                                    (prompt (slice u8))

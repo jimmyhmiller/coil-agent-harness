@@ -1,4 +1,5 @@
 (module harness-tui-app)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -46,7 +47,7 @@
 
 (defstruct TuiNotificationSource
   [(service (ptr RunService))
-   (allocator (ptr Allocator))
+   (allocator (dyn Allocator))
    (conversation-id (slice u8))
    (cursor i64)
    (pending (ArrayList (slice u8)))
@@ -98,15 +99,15 @@
   (set! (.pending-next source) (+ (.pending-next source) 1))
   0)
 
-(defn tui-read [(allocator (ptr Allocator))
+(defn tui-read [(allocator (dyn Allocator))
                 (prompt (slice u8))] (-> (slice u8))
   (tui-output-write-slice 1 prompt)
-  (let [reader (alloc/stack io/Reader)]
+  (let [reader (primitive/alloc-stack io/Reader)]
     (match (io/read-line-alloc allocator (io/fd-reader reader 0) 65536)
       (Ok [owned] (io/owned-bytes-slice owned))
       (Err [failure] ""))))
 
-(defn tui-command [(allocator (ptr Allocator))
+(defn tui-command [(allocator (dyn Allocator))
                    (run-id (slice u8))
                    (provider (slice u8))
                    (model (slice u8))
@@ -132,7 +133,7 @@
     (json-put-string! (mut command) "prompt" prompt)
     (load command)))
 
-(defn tui-dependencies [(allocator (ptr Allocator))
+(defn tui-dependencies [(allocator (dyn Allocator))
                         (source (slice u8))] (-> Json)
   (let [(mut result) (json-array allocator)
         (mut remaining) source
@@ -162,7 +163,7 @@
                                         (slice-len [u8] (load remaining)))))))))
     (load result)))
 
-(defn tui-print-response [(allocator (ptr Allocator))
+(defn tui-print-response [(allocator (dyn Allocator))
                           (response ServiceResponse)
                           (profile (ref TerminalProfile))] (-> i64)
   (tui-render-view allocator
@@ -172,7 +173,7 @@
                                          (.body response)
                                          (.unicode profile))))
 
-(defn tui-print-run-response [(allocator (ptr Allocator))
+(defn tui-print-run-response [(allocator (dyn Allocator))
                               (response ServiceResponse)
                               (profile (ref TerminalProfile))] (-> i64)
   (tui-render-view allocator
@@ -182,7 +183,7 @@
                                      (.body response)
                                      (.unicode profile))))
 
-(defn tui-print-workflow-response [(allocator (ptr Allocator))
+(defn tui-print-workflow-response [(allocator (dyn Allocator))
                                    (response ServiceResponse)
                                    (profile (ref TerminalProfile))] (-> i64)
   (tui-render-view allocator
@@ -192,7 +193,7 @@
                                           (.body response)
                                           (.unicode profile))))
 
-(defn tui-read-secondary [(allocator (ptr Allocator))
+(defn tui-read-secondary [(allocator (dyn Allocator))
                           (profile (ref TerminalProfile))
                           (prompt (slice u8))] (-> (slice u8))
   (if (.interactive profile)
@@ -224,13 +225,13 @@
 (defn tui-entered-or [(entered (slice u8)) (current (slice u8))] (-> (slice u8))
   (if (= (slice-len [u8] entered) 0) current entered))
 
-(defn tui-model-prompt [(allocator (ptr Allocator))
+(defn tui-model-prompt [(allocator (dyn Allocator))
                         (default-model (slice u8))] (-> (slice u8))
   (concat-or-empty allocator
                    "  model ["
                    (concat-or-empty allocator default-model "]: ")))
 
-(defn tui-report-selection [(allocator (ptr Allocator))
+(defn tui-report-selection [(allocator (dyn Allocator))
                             (profile (ref TerminalProfile))
                             (provider (slice u8))
                             (model (slice u8))
@@ -261,9 +262,9 @@
 ;; effort parameter, so the menu never offers a control that does nothing.
 ;; ---------------------------------------------------------------------------
 
-(defn tui-model-entries [(allocator (ptr Allocator))
+(defn tui-model-entries [(allocator (dyn Allocator))
                          (catalog (ptr ModelCatalog))] (-> (ptr (ArrayList ChoiceEntry)))
-  (let [entries (box allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+  (let [entries (box! allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
         n (model-catalog-count catalog)
         (mut i) 0]
     (loop (if (>= (load i) n)
@@ -276,12 +277,12 @@
                 (set! i (+ (load i) 1)))))
     entries))
 
-(defn tui-effort-entries [(allocator (ptr Allocator))] (-> (ptr (ArrayList ChoiceEntry)))
-  (let [entries (box allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+(defn tui-effort-entries [(allocator (dyn Allocator))] (-> (ptr (ArrayList ChoiceEntry)))
+  (let [entries (box! allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
         (mut i) 0]
     (loop (if (>= (load i) EFFORT_CHOICE_COUNT)
               (break)
-              (let [choice (alloc/stack EffortChoice)]
+              (let [choice (primitive/alloc-stack EffortChoice)]
                 (set! choice (effort-choice-at (load i)))
                 (al-push! [ChoiceEntry]
                           entries
@@ -291,7 +292,7 @@
     entries))
 
 (defn tui-create [(service (ptr RunService))
-                  (allocator (ptr Allocator))
+                  (allocator (dyn Allocator))
                   (mode (slice u8))
                   (profile (ref TerminalProfile))] (-> i64)
   (let [run-id (tui-read-secondary allocator profile "Run ID: ")
@@ -323,10 +324,10 @@
                         (service-submit-run service (mut command) "tui-operator")
                         profile)))
 
-(defn tui-render-view [(session-allocator (ptr Allocator))
+(defn tui-render-view [(session-allocator (dyn Allocator))
                        (profile (ref TerminalProfile))
                        (root ViewNode)] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle session-allocator)
     (let [scratch (region/region-allocator cycle)
           view (terminal-view root)
@@ -338,7 +339,7 @@
       (region/region-close! cycle)
       result)))
 
-(defn tui-header [(allocator (ptr Allocator))
+(defn tui-header [(allocator (dyn Allocator))
                   (profile (ref TerminalProfile))] (-> i64)
   (let [(mut root) (view-stack allocator 0)]
     (view-stack-push! (mut root)
@@ -351,7 +352,7 @@
     (view-stack-push! (mut root) (view-spacer 1))
     (tui-render-view allocator profile (load root))))
 
-(defn tui-help [(allocator (ptr Allocator))
+(defn tui-help [(allocator (dyn Allocator))
                 (registry (ptr CommandRegistry))
                 (profile (ref TerminalProfile))] (-> i64)
   (let [(mut root) (view-stack allocator 0)
@@ -395,7 +396,7 @@
     (or (= event-run-id run-id)
         (>= (presentation-block-index model event-run-id (AgentBlock)) 0))))
 
-(defn tui-write-model-range [(allocator (ptr Allocator))
+(defn tui-write-model-range [(allocator (dyn Allocator))
                              (model (ptr PresentationModel))
                              (start i64)
                              (end i64)
@@ -418,7 +419,7 @@
                 (set! at next))))
     0))
 
-(defn tui-render-presentation-cycle! [(allocator (ptr Allocator))
+(defn tui-render-presentation-cycle! [(allocator (dyn Allocator))
                                       (model (ptr PresentationModel))
                                       (policy (ptr TranscriptPolicy))
                                       (rendered-count (ptr i64))
@@ -558,7 +559,7 @@
     (set! rendered-count after)
     0))
 
-(defn tui-render-presentation! [(session-allocator (ptr Allocator))
+(defn tui-render-presentation! [(session-allocator (dyn Allocator))
                                 (model (ptr PresentationModel))
                                 (policy (ptr TranscriptPolicy))
                                 (rendered-count (ptr i64))
@@ -569,7 +570,7 @@
                                 (height i64)
                                 (busy bool)
                                 (cancelling bool)] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle session-allocator)
     (let [result
             (tui-render-presentation-cycle! (region/region-allocator cycle)
@@ -587,7 +588,7 @@
       result)))
 
 (defn tui-request-cancel! [(service (ptr RunService))
-                           (allocator (ptr Allocator))
+                           (allocator (dyn Allocator))
                            (run-id (slice u8))] (-> i64)
   (let [(mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
@@ -600,7 +601,7 @@
     (service-request-cancel-durable-run service (load command))))
 
 (defn tui-watch-run [(service (ptr RunService))
-                     (allocator (ptr Allocator))
+                     (allocator (dyn Allocator))
                      (run-id (slice u8))
                      (assistant (ptr StrBuf))
                      (profile (ref TerminalProfile))] (-> i64)
@@ -632,7 +633,7 @@
       0)
     (loop (if (load done)
               (break)
-              (let [cycle (alloc/stack scratch/ScratchArena)
+              (let [cycle (primitive/alloc-stack scratch/ScratchArena)
                     queried-width (terminal-query-width (cast i32 1))
                     queried-height (terminal-query-height (cast i32 1))
                     resized
@@ -790,9 +791,9 @@
     0))
 
 (defn tui-run-id-counter [] (-> (ptr i64))
-  (alloc/static i64))
+  (primitive/alloc-static i64))
 
-(defn tui-new-run-id [(allocator (ptr Allocator))] (-> (slice u8))
+(defn tui-new-run-id [(allocator (dyn Allocator))] (-> (slice u8))
   (let [timestamp (json-stringify allocator (json-integer allocator (now-ms)))
         process-id (json-stringify allocator (json-integer allocator (process/id)))
         counter
@@ -811,7 +812,7 @@
                                                                                          "-"
                                                                                          counter)))))))
 
-(defn tui-conversation-id [(allocator (ptr Allocator))] (-> (slice u8))
+(defn tui-conversation-id [(allocator (dyn Allocator))] (-> (slice u8))
   (match (os/env-get allocator "HARNESS_CONVERSATION_ID")
     (Ok [found]
         (match found
@@ -828,7 +829,7 @@
     (Err [failure] (tui-new-run-id allocator))))
 
 (defn tui-submit-prompt [(service (ptr RunService))
-                         (allocator (ptr Allocator))
+                         (allocator (dyn Allocator))
                          (provider (slice u8))
                          (model (slice u8))
                          (effort (slice u8))
@@ -847,7 +848,7 @@
               run-id))
           (do (tui-print-response allocator response profile) "")))))
 
-(defn tui-primary-prompt [(allocator (ptr Allocator))
+(defn tui-primary-prompt [(allocator (dyn Allocator))
                           (provider (slice u8))
                           (model (slice u8))
                           (effort (slice u8))
@@ -877,7 +878,7 @@
       (route-default-model (tui-status-provider provider))
       model))
 
-(defn tui-read-primary [(allocator (ptr Allocator))
+(defn tui-read-primary [(allocator (dyn Allocator))
                         (editor (ptr InputEditor))
                         (profile (ref TerminalProfile))
                         (provider (slice u8))
@@ -904,7 +905,7 @@
         (InputReadSubmitted text))))
 
 (defn tui-loop [(service (ptr RunService))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (profile (ref TerminalProfile))] (-> i64)
   (let [fixture-provider (terminal-env-eq? allocator "HARNESS_TUI_TEST_PROVIDER" "1")
         (mut done) false
@@ -916,7 +917,7 @@
         (mut catalog) (model-catalog-default allocator)
         (mut current-run) ""
         (mut history) (zeroed TuiConversation)
-        notifications (box allocator TuiNotificationSource (zeroed TuiNotificationSource))
+        notifications (box! allocator TuiNotificationSource (zeroed TuiNotificationSource))
         (mut commands) (command-registry-builtin allocator)
         (mut editor) (input-editor-new-with-commands allocator (mut commands))]
     (set! (.conversation-id history) (tui-conversation-id allocator))
@@ -999,7 +1000,7 @@
                                                                                                                            default-effort))))
                                                                         (ChoiceSelected [level]
                                                                                         (let [picked
-                                                                                                (alloc/stack EffortChoice)]
+                                                                                                (primitive/alloc-stack EffortChoice)]
                                                                                           (store! picked
                                                                                                   (effort-choice-at level))
                                                                                           (store! effort

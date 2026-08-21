@@ -3,6 +3,7 @@
 ;; rather than inspecting a rendered string -- a planner that quietly repainted
 ;; everything would still look right on screen and would still be the bug.
 (module harness-tui-diff-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -20,7 +21,7 @@
     (al-push! [FrameSpan] (mut spans) (frame-span text (str-len text) role))
     (frame-push-spans! frame (load spans))))
 
-(defn build-frame [(allocator (ptr Allocator))
+(defn build-frame [(allocator (dyn Allocator))
                    (slot (ptr Frame))
                    (rows i64)
                    (changed-row i64)] (-> i64)
@@ -82,8 +83,8 @@
 
 (deftest an-unchanged-frame-costs-no-terminal-work
          (let [allocator (malloc-allocator)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)
                (mut operations) (al-new [TerminalOperation] allocator)]
            (build-frame allocator previous 20 -1)
            (build-frame allocator next 20 -1)
@@ -95,8 +96,8 @@
 ;; The headline case: one row of twenty changed, so nineteen must be left alone.
 (deftest only-the-changed-row-is-repainted
          (let [allocator (malloc-allocator)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)
                (mut operations) (al-new [TerminalOperation] allocator)]
            (build-frame allocator previous 20 -1)
            (build-frame allocator next 20 7)
@@ -109,8 +110,8 @@
 ;; it matched would leave the wrong colour on screen.
 (deftest a-style-only-change-still-repaints-the-row
          (let [allocator (malloc-allocator)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)
                (mut operations) (al-new [TerminalOperation] allocator)]
            (store! previous (frame-new allocator))
            (store! next (frame-new allocator))
@@ -122,8 +123,8 @@
 
 (deftest every-changed-row-is-repainted
          (let [allocator (malloc-allocator)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)
                (mut operations) (al-new [TerminalOperation] allocator)]
            (build-frame allocator previous 5 -1)
            (store! next (frame-new allocator))
@@ -141,9 +142,9 @@
 ;; no longer where the diff would assume. That must decline to a full repaint.
 (deftest a-frame-with-committed-output-is-not-diffable
          (let [allocator (malloc-allocator)
-               committed (alloc/stack Frame)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)]
+               committed (primitive/alloc-stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)]
            (store! committed (frame-new allocator))
            (build-frame allocator previous 3 -1)
            (build-frame allocator next 3 -1)
@@ -155,9 +156,9 @@
 ;; repaint work regardless.
 (deftest a-resized-live-region-is-not-diffable
          (let [allocator (malloc-allocator)
-               committed (alloc/stack Frame)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)]
+               committed (primitive/alloc-stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)]
            (store! committed (frame-new allocator))
            (build-frame allocator previous 3 -1)
            (build-frame allocator next 4 -1)
@@ -165,8 +166,8 @@
 
 (deftest an-empty-live-region-plans-nothing
          (let [allocator (malloc-allocator)
-               previous (alloc/stack Frame)
-               next (alloc/stack Frame)
+               previous (primitive/alloc-stack Frame)
+               next (primitive/alloc-stack Frame)
                (mut operations) (al-new [TerminalOperation] allocator)]
            (store! previous (frame-new allocator))
            (store! next (frame-new allocator))

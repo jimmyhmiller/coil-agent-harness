@@ -1,4 +1,5 @@
 (module harness-search-tool)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.cancellation" :as native-cancellation)
@@ -25,7 +26,7 @@
 (defn execute-search-text [(self (ptr SearchTextTool))
                            (call (ptr ToolCall))
                            (context (ptr ToolExecutionContext))
-                           (allocator (ptr Allocator))] (-> ToolResult)
+                           (allocator (dyn Allocator))] (-> ToolResult)
   (let [arguments (.arguments call)
         query (match (json-string-at arguments "query")
                 (Some [value] value)
@@ -39,8 +40,8 @@
           (cancellation-requested? (load (field context cancellation)))
             (search-error call "search cancelled")
           :else
-            (let [args (alloc/stack (array (slice u8) 9))
-                  run-result (alloc/stack subprocess/RunResult)]
+            (let [args (primitive/alloc-stack (array (slice u8) 9))
+                  run-result (primitive/alloc-stack subprocess/RunResult)]
               (store! (index args 0) "rg")
               (store! (index args 1) "--line-number")
               (store! (index args 2) "--no-heading")
@@ -101,10 +102,10 @@
   (execute-tool [(self (ptr SearchTextTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))] (-> ToolResult)
+                 (allocator (dyn Allocator))] (-> ToolResult)
     (execute-search-text self call context allocator)))
 
-(defn search-text-schema [(allocator (ptr Allocator))] (-> Json)
+(defn search-text-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut query) (json-object allocator)
         (mut path) (json-object allocator)
         (mut properties) (json-object allocator)
@@ -123,10 +124,10 @@
     (load schema)))
 
 (defn register-search-text-tool! [(registry (mut ToolRegistry))
-                                  (allocator (ptr Allocator))
+                                  (allocator (dyn Allocator))
                                   (root (slice u8))] (-> bool)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator SearchTextTool (zeroed SearchTextTool))]
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator SearchTextTool (zeroed SearchTextTool))]
     (set! (.root implementation) root)
     (set! (.name (.spec definition)) "search_text")
     (set! (.description (.spec definition))

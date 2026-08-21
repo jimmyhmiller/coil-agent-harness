@@ -50,7 +50,7 @@
         (= profile "external-agent") "selected the external Codex agent capability"
         :else "selected the balanced Codex subscription policy"))
 
-(defn route-capabilities-json [(allocator (ptr Allocator))
+(defn route-capabilities-json [(allocator (dyn Allocator))
                                (capabilities ProviderCapabilities)] (-> Json)
   (let [(mut value) (json-object allocator)]
     (json-put-bool! (mut value) "streaming" (.streaming capabilities))
@@ -63,7 +63,7 @@
                       (json-integer allocator (.cost-tier capabilities)))
     (load value)))
 
-(defn model-route-command! [(allocator (ptr Allocator))
+(defn model-route-command! [(allocator (dyn Allocator))
                             (command (mut Json))] (-> ModelRouteResult)
   (let [requested-provider (route-command-string (load command) "provider")
         requested-model (route-command-string (load command) "model")

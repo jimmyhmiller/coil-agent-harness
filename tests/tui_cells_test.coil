@@ -1,4 +1,5 @@
 (module harness-tui-cells-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc)
 (import "coil.slice" :use *)
@@ -8,7 +9,7 @@
          (let [ascii (utf8-decode "A" 0)
                cjk (utf8-decode "界" 0)
                emoji (utf8-decode "🙂" 0)
-               malformed-bytes (alloc/stack (array u8 2))]
+               malformed-bytes (primitive/alloc-stack (array u8 2))]
            (store! (index malformed-bytes 0) (cast u8 192))
            (store! (index malformed-bytes 1) (cast u8 175))
            (let [malformed (utf8-decode (slice-new [u8] (index malformed-bytes 0) 2) 0)]
@@ -29,7 +30,7 @@
          (assert (= (text-cell-width "a界🙂") 5)))
 
 (deftest rejects-terminal-controls-and-malformed-text
-         (let [malformed-bytes (alloc/stack (array u8 2))]
+         (let [malformed-bytes (primitive/alloc-stack (array u8 2))]
            (store! (index malformed-bytes 0) (cast u8 192))
            (store! (index malformed-bytes 1) (cast u8 175))
            (assert (= (text-cell-width "line\n") -1))

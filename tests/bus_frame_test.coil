@@ -66,8 +66,8 @@
 ;; Write one frame, read it back, and report whether the payload survived.
 (defn round-trip-payload? [(chunk i64) (payload (slice u8))] (-> bool)
   (let [allocator (malloc-allocator)
-        transport (alloc/stack ChunkedTransport)
-        out (alloc/stack (slice u8))]
+        transport (primitive/alloc-stack ChunkedTransport)
+        out (primitive/alloc-stack (slice u8))]
     (chunked-new transport chunk)
     (if (!= (frame-write! transport payload) FRAME_OK)
         false
@@ -90,8 +90,8 @@
 ;; than reporting a failure.
 (deftest a-clean-close-between-frames-reports-eof
          (let [allocator (malloc-allocator)
-               transport (alloc/stack ChunkedTransport)
-               out (alloc/stack (slice u8))]
+               transport (primitive/alloc-stack ChunkedTransport)
+               out (primitive/alloc-stack (slice u8))]
            (chunked-new transport 4096)
            (assert (= (frame-read transport allocator out) FRAME_EOF))))
 
@@ -99,8 +99,8 @@
 ;; distinguishable from the orderly case above.
 (deftest a-close-mid-frame-reports-truncation
          (let [allocator (malloc-allocator)
-               transport (alloc/stack ChunkedTransport)
-               out (alloc/stack (slice u8))]
+               transport (primitive/alloc-stack ChunkedTransport)
+               out (primitive/alloc-stack (slice u8))]
            (chunked-new transport 4096)
            (assert (= (frame-write! transport "hello bus") FRAME_OK))
            ;; Drop the last two payload bytes, as an interrupted peer would.
@@ -111,9 +111,9 @@
 ;; allocated on its behalf.
 (deftest an-oversized-length-is-refused-before-allocating
          (let [allocator (malloc-allocator)
-               transport (alloc/stack ChunkedTransport)
-               out (alloc/stack (slice u8))
-               header (alloc/stack FrameHeader)]
+               transport (primitive/alloc-stack ChunkedTransport)
+               out (primitive/alloc-stack (slice u8))
+               header (primitive/alloc-stack FrameHeader)]
            (chunked-new transport 4096)
            (header-encode! header (+ MAX_FRAME_BYTES 1))
            (transport-write transport
@@ -122,7 +122,7 @@
            (assert (= (frame-read transport allocator out) FRAME_TOO_LARGE))))
 
 (deftest the-header-encodes-big-endian
-         (let [header (alloc/stack FrameHeader)
+         (let [header (primitive/alloc-stack FrameHeader)
                bytes (primitive/cast (ptr u8) (field header bytes))]
            (header-encode! header 66051)
            (assert (= (primitive/cast i64 (load (primitive/index bytes 0))) 0))
@@ -134,11 +134,11 @@
 ;; The layer above: an envelope encoded by a codec, framed, unframed, decoded.
 (deftest an-envelope-survives-encode-frame-unframe-decode
          (let [allocator (malloc-allocator)
-               transport (alloc/stack ChunkedTransport)
-               codec (alloc/stack MessagePackCodec)
-               original (alloc/stack Envelope)
-               decoded (alloc/stack Envelope)
-               out (alloc/stack (slice u8))]
+               transport (primitive/alloc-stack ChunkedTransport)
+               codec (primitive/alloc-stack MessagePackCodec)
+               original (primitive/alloc-stack Envelope)
+               decoded (primitive/alloc-stack Envelope)
+               out (primitive/alloc-stack (slice u8))]
            (chunked-new transport 1)
            (store! original
                    (envelope-new "msg-1"

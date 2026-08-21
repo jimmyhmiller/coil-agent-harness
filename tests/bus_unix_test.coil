@@ -3,6 +3,7 @@
 ;; the fact that this file changes only the setup -- and not a single assertion
 ;; about frames or envelopes -- is the evidence that the abstraction holds.
 (module harness-bus-unix-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
@@ -40,7 +41,7 @@
                 (match (time/duration-seconds 2)
                   (Err [_] false)
                   (Ok [duration]
-                      (let [accepted (alloc/stack socket/UnixConnection)]
+                      (let [accepted (primitive/alloc-stack socket/UnixConnection)]
                         (match (socket/unix-accept-for listener accepted duration)
                           (Err [_] false)
                           (Ok [_]
@@ -58,13 +59,13 @@
 
 (deftest an-envelope-crosses-a-unix-socket
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               client (alloc/stack UnixTransport)
-               server (alloc/stack UnixTransport)
-               codec (alloc/stack MessagePackCodec)
-               original (alloc/stack Envelope)
-               decoded (alloc/stack Envelope)
-               out (alloc/stack (slice u8))]
+               listener (primitive/alloc-stack socket/UnixListener)
+               client (primitive/alloc-stack UnixTransport)
+               server (primitive/alloc-stack UnixTransport)
+               codec (primitive/alloc-stack MessagePackCodec)
+               original (primitive/alloc-stack Envelope)
+               decoded (primitive/alloc-stack Envelope)
+               out (primitive/alloc-stack (slice u8))]
            (assert (connect-pair listener client server))
            (store! original
                    (envelope-new "msg-1"
@@ -89,12 +90,12 @@
 
 (deftest back-to-back-frames-stay-separate-on-one-unix-connection
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               client (alloc/stack UnixTransport)
-               server (alloc/stack UnixTransport)
-               first-out (alloc/stack (slice u8))
-               second-out (alloc/stack (slice u8))
-               third-out (alloc/stack (slice u8))]
+               listener (primitive/alloc-stack socket/UnixListener)
+               client (primitive/alloc-stack UnixTransport)
+               server (primitive/alloc-stack UnixTransport)
+               first-out (primitive/alloc-stack (slice u8))
+               second-out (primitive/alloc-stack (slice u8))
+               third-out (primitive/alloc-stack (slice u8))]
            (assert (connect-pair listener client server))
            (assert (= (frame-write! client "one") FRAME_OK))
            (assert (= (frame-write! client "") FRAME_OK))
@@ -109,10 +110,10 @@
 
 (deftest a-closed-unix-peer-reports-eof-not-failure
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               client (alloc/stack UnixTransport)
-               server (alloc/stack UnixTransport)
-               out (alloc/stack (slice u8))]
+               listener (primitive/alloc-stack socket/UnixListener)
+               client (primitive/alloc-stack UnixTransport)
+               server (primitive/alloc-stack UnixTransport)
+               out (primitive/alloc-stack (slice u8))]
            (assert (connect-pair listener client server))
            (transport-close! client)
            (assert (= (frame-read server allocator out) FRAME_EOF))
@@ -122,6 +123,6 @@
 ;; this is the check the coil session used to prove the stdlib binding really
 ;; executes, and it is worth keeping at this layer too.
 (deftest connecting-to-a-missing-socket-path-fails
-         (let [client (alloc/stack UnixTransport)]
+         (let [client (primitive/alloc-stack UnixTransport)]
            (remove-socket-path)
            (assert (= (unix-transport-connect! client SOCKET_PATH) TRANSPORT_FAILED))))

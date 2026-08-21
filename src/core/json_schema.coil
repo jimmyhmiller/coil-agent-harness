@@ -1,4 +1,5 @@
 (module harness-json-schema)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -14,14 +15,14 @@
    (message (slice u8))])
 
 (defn schema-valid [] (-> SchemaValidation)
-  (let [result (alloc/stack SchemaValidation)]
+  (let [result (primitive/alloc-stack SchemaValidation)]
     (set! (.ok result) true)
     (set! (.path result) "$")
     (set! (.message result) "")
     (load result)))
 
 (defn schema-invalid [(path (slice u8)) (message (slice u8))] (-> SchemaValidation)
-  (let [result (alloc/stack SchemaValidation)]
+  (let [result (primitive/alloc-stack SchemaValidation)]
     (set! (.ok result) false)
     (set! (.path result) path)
     (set! (.message result) message)
@@ -66,10 +67,10 @@
                         (load allowed)))
            (_ false))))
 
-(defn json-schema-equal? [(allocator (ptr Allocator)) (left Json) (right Json)] (-> bool)
+(defn json-schema-equal? [(allocator (dyn Allocator)) (left Json) (right Json)] (-> bool)
   (= (json-stringify allocator left) (json-stringify allocator right)))
 
-(defn schema-enum-valid? [(allocator (ptr Allocator)) (schema Json) (value Json)] (-> bool)
+(defn schema-enum-valid? [(allocator (dyn Allocator)) (schema Json) (value Json)] (-> bool)
   (match (json-get schema "enum")
          (JsonNull [] true)
          (JsonArray [items]
@@ -104,7 +105,7 @@
                       (load valid)))
          (_ false)))
 
-(defn schema-properties-valid? [(allocator (ptr Allocator)) (schema Json) (value Json) (depth i64)] (-> SchemaValidation)
+(defn schema-properties-valid? [(allocator (dyn Allocator)) (schema Json) (value Json) (depth i64)] (-> SchemaValidation)
   (let [properties (json-get schema "properties")]
     (match (json-object-keys value)
       (None [] (schema-valid))
@@ -132,7 +133,7 @@
                           (set! i (+ (load i) 1)))))
               (load result))))))
 
-(defn schema-array-valid? [(allocator (ptr Allocator)) (schema Json) (value Json) (path (slice u8)) (depth i64)] (-> SchemaValidation)
+(defn schema-array-valid? [(allocator (dyn Allocator)) (schema Json) (value Json) (path (slice u8)) (depth i64)] (-> SchemaValidation)
   (let [item-schema (json-get schema "items")]
     (match value
            (JsonArray [items]
@@ -152,7 +153,7 @@
                         (load result)))
            (_ (schema-valid)))))
 
-(defn schema-any-of-valid? [(allocator (ptr Allocator)) (schema Json) (value Json) (path (slice u8)) (depth i64)] (-> bool)
+(defn schema-any-of-valid? [(allocator (dyn Allocator)) (schema Json) (value Json) (path (slice u8)) (depth i64)] (-> bool)
   (match (json-get schema "anyOf")
          (JsonNull [] true)
          (JsonArray [choices]
@@ -176,7 +177,7 @@
 ;; Validate the JSON Schema subset shared by OpenAI strict tools and DeepSeek:
 ;; object/properties/required/additionalProperties, arrays/items, primitive types,
 ;; nullable type unions, enum, and anyOf. Unknown annotation keywords are ignored.
-(defn json-schema-validate-depth [(allocator (ptr Allocator))
+(defn json-schema-validate-depth [(allocator (dyn Allocator))
                                   (schema Json)
                                   (value Json)
                                   (path (slice u8))
@@ -199,7 +200,7 @@
                           (= actual "array") (schema-array-valid? allocator schema value path depth)
                           :else (schema-valid))))))))
 
-(defn json-schema-validate [(allocator (ptr Allocator)) (schema Json) (value Json)] (-> SchemaValidation)
+(defn json-schema-validate [(allocator (dyn Allocator)) (schema Json) (value Json)] (-> SchemaValidation)
   (json-schema-validate-depth allocator schema value "$" 0))
 
 ;; OpenAI strict function schemas require every declared object property to be

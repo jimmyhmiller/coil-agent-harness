@@ -1,4 +1,5 @@
 (module harness-service-http-server)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.http.server" :as http)
@@ -38,10 +39,10 @@
                 (set! i (+ (load i) 1)))))
     (= (load difference) 0)))
 
-(defn authenticate-service-request [(allocator (ptr Allocator))
+(defn authenticate-service-request [(allocator (dyn Allocator))
                                     (auth (ptr ServiceAuth))
                                     (supplied (slice u8))] (-> AuthenticatedPrincipal)
-  (let [principal (alloc/stack AuthenticatedPrincipal)
+  (let [principal (primitive/alloc-stack AuthenticatedPrincipal)
         operator-token (.operator-token auth)
         observer-token (.observer-token auth)
         operator-header (concat-or-empty allocator "Bearer " operator-token)
@@ -66,7 +67,7 @@
           :else 0)
     (load principal)))
 
-(defn write-service-response! [(allocator (ptr Allocator))
+(defn write-service-response! [(allocator (dyn Allocator))
                                (client-fd i64)
                                (response ServiceResponse)] (-> i64)
   (write-http-response allocator
@@ -74,7 +75,7 @@
                        (.status response)
                        (json-stringify allocator (.body response))))
 
-(defn handle-accepted-request! [(allocator (ptr Allocator))
+(defn handle-accepted-request! [(allocator (dyn Allocator))
                                 (client-fd i64)
                                 (service (ptr RunService))
                                 (auth (ptr ServiceAuth))
@@ -97,7 +98,7 @@
                                                             401
                                                             "unauthorized"
                                                             "valid bearer authentication is required")))
-              (let [request (alloc/stack ServiceHttpRequest)]
+              (let [request (primitive/alloc-stack ServiceHttpRequest)]
                 (set! (.method request) (http/method request-value))
                 (set! (.target request) (http/target request-value))
                 (set! (.body request) (http/body request-value))
@@ -113,7 +114,7 @@
     (allocation-domain-close! allocator domain)
     (load result)))
 
-(defn serve-run-service-once [(allocator (ptr Allocator))
+(defn serve-run-service-once [(allocator (dyn Allocator))
                               (listener (ptr HttpListener))
                               (service (ptr RunService))
                               (auth (ptr ServiceAuth))] (-> i64)
@@ -141,7 +142,7 @@
           (os/close (cast i32 client-fd))
           (if (< result 0) -1 0)))))
 
-(defn serve-run-service [(allocator (ptr Allocator))
+(defn serve-run-service [(allocator (dyn Allocator))
                          (listener (ptr HttpListener))
                          (service (ptr RunService))
                          (auth (ptr ServiceAuth))] (-> i64)
@@ -150,7 +151,7 @@
           0))
   0)
 
-(defn serve-run-service-until-shutdown [(allocator (ptr Allocator))
+(defn serve-run-service-until-shutdown [(allocator (dyn Allocator))
                                         (listener (ptr HttpListener))
                                         (service (ptr RunService))
                                         (auth (ptr ServiceAuth))

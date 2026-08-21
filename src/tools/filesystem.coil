@@ -1,4 +1,5 @@
 (module harness-filesystem-tools)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -80,7 +81,7 @@
                        0
                        (if (> wanted-end total-lines) total-lines wanted-end))
           next-line (if (< end-line total-lines) (+ end-line 1) 0)
-          result (alloc/stack LineWindow)]
+          result (primitive/alloc-stack LineWindow)]
       (set! (.content result) (subslice [u8] bytes actual-start actual-end))
       (set! (.total-lines result) total-lines)
       (set! (.start-line result) start-line)
@@ -100,7 +101,7 @@
                              (Some [position] false)
                              (None [] true))))))))
 
-(defn file-tool-path [(allocator (ptr Allocator))
+(defn file-tool-path [(allocator (dyn Allocator))
                       (root (slice u8))
                       (path (slice u8))] (-> (slice u8))
   (let [prefix (concat-or-empty allocator root "/")]
@@ -123,7 +124,7 @@
                 (set! i (+ (load i) 1)))))
     (load binary)))
 
-(defn bounded-read-file [(allocator (ptr Allocator))
+(defn bounded-read-file [(allocator (dyn Allocator))
                          (path (slice u8))] (-> BoundedReadResult)
   (let [c-path (str->cstr allocator path)
         fd
@@ -131,12 +132,12 @@
               (cast i32 -1)
               (os/open c-path (cast i32 0) 0))]
     (when (!= (cast i64 c-path) 0)
-      (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+      (free [i8] allocator (alloc-slice-new c-path (+ (slice-len [u8] path) 1)))
       0)
     (if (< fd (cast i32 0))
         (BoundedReadFailed "could not open file")
         (let [(mut bytes) (al-new [u8] allocator)
-              buffer (alloc/stack (array u8 4096))
+              buffer (primitive/alloc-stack (array u8 4096))
               (mut failed) false
               (mut truncated) false]
           (block :done
@@ -173,7 +174,7 @@
     (set! (.error result) message)
     (load result)))
 
-(defn file-tool-path-result [(allocator (ptr Allocator))
+(defn file-tool-path-result [(allocator (dyn Allocator))
                              (call (ptr ToolCall))
                              (key (slice u8))
                              (path (slice u8))] (-> ToolResult)
@@ -191,7 +192,7 @@
 (defn execute-read-text-file [(self (ptr ReadTextFileTool))
                               (call (ptr ToolCall))
                               (context (ptr ToolExecutionContext))
-                              (allocator (ptr Allocator))] (-> ToolResult)
+                              (allocator (dyn Allocator))] (-> ToolResult)
   (let [arguments (.arguments call)
         relative
           (match (json-string-at arguments "path")
@@ -257,7 +258,7 @@
 (defn execute-write-text-file [(self (ptr WriteTextFileTool))
                                (call (ptr ToolCall))
                                (context (ptr ToolExecutionContext))
-                               (allocator (ptr Allocator))] (-> ToolResult)
+                               (allocator (dyn Allocator))] (-> ToolResult)
   (let [arguments (.arguments call)
         relative
           (match (json-string-at arguments "path")
@@ -292,7 +293,7 @@
 (defn execute-edit-text-file [(self (ptr EditTextFileTool))
                               (call (ptr ToolCall))
                               (context (ptr ToolExecutionContext))
-                              (allocator (ptr Allocator))] (-> ToolResult)
+                              (allocator (dyn Allocator))] (-> ToolResult)
   (let [arguments (.arguments call)
         relative
           (match (json-string-at arguments "path")
@@ -358,7 +359,7 @@
 (defn execute-create-directory [(self (ptr CreateDirectoryTool))
                                 (call (ptr ToolCall))
                                 (context (ptr ToolExecutionContext))
-                                (allocator (ptr Allocator))] (-> ToolResult)
+                                (allocator (dyn Allocator))] (-> ToolResult)
   (let [relative (file-tool-relative-path call)]
     (cond (cancellation-requested? (load (field context cancellation)))
             (file-tool-error call "directory creation cancelled")
@@ -372,7 +373,7 @@
                         -1
                         (cast i64 (mkdir c-path (cast i32 FILE_TOOL_DIRECTORY_MODE))))]
               (when (!= (cast i64 c-path) 0)
-                (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+                (free [i8] allocator (alloc-slice-new c-path (+ (slice-len [u8] path) 1)))
                 0)
               (if (= code 0)
                   (file-tool-path-result allocator call "created" relative)
@@ -381,7 +382,7 @@
 (defn execute-delete-file [(self (ptr DeleteFileTool))
                            (call (ptr ToolCall))
                            (context (ptr ToolExecutionContext))
-                           (allocator (ptr Allocator))] (-> ToolResult)
+                           (allocator (dyn Allocator))] (-> ToolResult)
   (let [relative (file-tool-relative-path call)]
     (cond (cancellation-requested? (load (field context cancellation))) (file-tool-error call "file deletion cancelled")
           (not (file-tool-path-safe? relative))
@@ -391,7 +392,7 @@
                   c-path (str->cstr allocator path)
                   code (if (= (cast i64 c-path) 0) -1 (cast i64 (unlink c-path)))]
               (when (!= (cast i64 c-path) 0)
-                (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+                (free [i8] allocator (alloc-slice-new c-path (+ (slice-len [u8] path) 1)))
                 0)
               (if (= code 0)
                   (file-tool-path-result allocator call "deleted" relative)
@@ -400,7 +401,7 @@
 (defn execute-remove-directory [(self (ptr RemoveDirectoryTool))
                                 (call (ptr ToolCall))
                                 (context (ptr ToolExecutionContext))
-                                (allocator (ptr Allocator))] (-> ToolResult)
+                                (allocator (dyn Allocator))] (-> ToolResult)
   (let [relative (file-tool-relative-path call)]
     (cond (cancellation-requested? (load (field context cancellation)))
             (file-tool-error call "directory removal cancelled")
@@ -411,7 +412,7 @@
                   c-path (str->cstr allocator path)
                   code (if (= (cast i64 c-path) 0) -1 (cast i64 (rmdir c-path)))]
               (when (!= (cast i64 c-path) 0)
-                (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+                (free [i8] allocator (alloc-slice-new c-path (+ (slice-len [u8] path) 1)))
                 0)
               (if (= code 0)
                   (file-tool-path-result allocator call "removed" relative)
@@ -421,7 +422,7 @@
   (execute-tool [(self (ptr ReadTextFileTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-read-text-file self call context allocator)))
 
@@ -429,7 +430,7 @@
   (execute-tool [(self (ptr WriteTextFileTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-write-text-file self call context allocator)))
 
@@ -437,7 +438,7 @@
   (execute-tool [(self (ptr EditTextFileTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-edit-text-file self call context allocator)))
 
@@ -445,7 +446,7 @@
   (execute-tool [(self (ptr CreateDirectoryTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-create-directory self call context allocator)))
 
@@ -453,7 +454,7 @@
   (execute-tool [(self (ptr DeleteFileTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-delete-file self call context allocator)))
 
@@ -461,11 +462,11 @@
   (execute-tool [(self (ptr RemoveDirectoryTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-remove-directory self call context allocator)))
 
-(defn file-tool-schema [(allocator (ptr Allocator))
+(defn file-tool-schema [(allocator (dyn Allocator))
                         (include-content bool)] (-> Json)
   (let [(mut path) (json-object allocator)
         (mut content) (json-object allocator)
@@ -486,7 +487,7 @@
     (json-put-bool! (mut schema) "additionalProperties" false)
     (load schema)))
 
-(defn read-text-file-schema [(allocator (ptr Allocator))] (-> Json)
+(defn read-text-file-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut path) (json-object allocator)
         (mut start-line) (json-object allocator)
         (mut line-count) (json-object allocator)
@@ -512,10 +513,10 @@
     (json-put-bool! (mut schema) "additionalProperties" false)
     (load schema)))
 
-(defn read-text-file-definition [(allocator (ptr Allocator))
+(defn read-text-file-definition [(allocator (dyn Allocator))
                                  (root (slice u8))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator ReadTextFileTool (zeroed ReadTextFileTool))]
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator ReadTextFileTool (zeroed ReadTextFileTool))]
     (set! (.root implementation) root)
     (set! (.name (.spec definition)) "read_text_file")
     (set! (.description (.spec definition))
@@ -528,10 +529,10 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn write-text-file-definition [(allocator (ptr Allocator))
+(defn write-text-file-definition [(allocator (dyn Allocator))
                                   (root (slice u8))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator WriteTextFileTool (zeroed WriteTextFileTool))]
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator WriteTextFileTool (zeroed WriteTextFileTool))]
     (set! (.root implementation) root)
     (set! (.name (.spec definition)) "write_text_file")
     (set! (.description (.spec definition)) "Create or replace a workspace-relative text file, up to one MiB.")
@@ -543,7 +544,7 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn edit-text-file-schema [(allocator (ptr Allocator))] (-> Json)
+(defn edit-text-file-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut path) (json-object allocator)
         (mut old-text) (json-object allocator)
         (mut new-text) (json-object allocator)
@@ -565,10 +566,10 @@
     (json-put-bool! (mut schema) "additionalProperties" false)
     (load schema)))
 
-(defn edit-text-file-definition [(allocator (ptr Allocator))
+(defn edit-text-file-definition [(allocator (dyn Allocator))
                                  (root (slice u8))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator EditTextFileTool (zeroed EditTextFileTool))]
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator EditTextFileTool (zeroed EditTextFileTool))]
     (set! (.root implementation) root)
     (set! (.name (.spec definition)) "edit_text_file")
     (set! (.description (.spec definition))
@@ -581,13 +582,13 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn filesystem-path-definition [(allocator (ptr Allocator))
+(defn filesystem-path-definition [(allocator (dyn Allocator))
                                   (root (slice u8))
                                   (name (slice u8))
                                   (description (slice u8))
                                   (effect ToolEffect)
                                   (implementation (dyn ToolImplementation))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)]
+  (let [definition (primitive/alloc-stack ToolDefinition)]
     (set! (.name (.spec definition)) name)
     (set! (.description (.spec definition)) description)
     (set! (.input-schema (.spec definition)) (file-tool-schema allocator false))
@@ -598,9 +599,9 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn create-directory-definition [(allocator (ptr Allocator))
+(defn create-directory-definition [(allocator (dyn Allocator))
                                    (root (slice u8))] (-> ToolDefinition)
-  (let [implementation (box allocator CreateDirectoryTool (zeroed CreateDirectoryTool))]
+  (let [implementation (box! allocator CreateDirectoryTool (zeroed CreateDirectoryTool))]
     (set! (.root implementation) root)
     (filesystem-path-definition allocator
                                 root
@@ -609,9 +610,9 @@
                                 (Reversible)
                                 implementation)))
 
-(defn delete-file-definition [(allocator (ptr Allocator))
+(defn delete-file-definition [(allocator (dyn Allocator))
                               (root (slice u8))] (-> ToolDefinition)
-  (let [implementation (box allocator DeleteFileTool (zeroed DeleteFileTool))]
+  (let [implementation (box! allocator DeleteFileTool (zeroed DeleteFileTool))]
     (set! (.root implementation) root)
     (filesystem-path-definition allocator
                                 root
@@ -620,9 +621,9 @@
                                 (Destructive)
                                 implementation)))
 
-(defn remove-directory-definition [(allocator (ptr Allocator))
+(defn remove-directory-definition [(allocator (dyn Allocator))
                                    (root (slice u8))] (-> ToolDefinition)
-  (let [implementation (box allocator RemoveDirectoryTool (zeroed RemoveDirectoryTool))]
+  (let [implementation (box! allocator RemoveDirectoryTool (zeroed RemoveDirectoryTool))]
     (set! (.root implementation) root)
     (filesystem-path-definition allocator
                                 root
@@ -632,7 +633,7 @@
                                 implementation)))
 
 (defn register-filesystem-tools! [(registry (mut ToolRegistry))
-                                  (allocator (ptr Allocator))
+                                  (allocator (dyn Allocator))
                                   (root (slice u8))] (-> bool)
   (let [read-added
           (tool-register! (mut registry)

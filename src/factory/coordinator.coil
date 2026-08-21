@@ -1,4 +1,5 @@
 (module harness-factory-coordinator)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -21,7 +22,7 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-(defn factory-stage-payload [(allocator (ptr Allocator))
+(defn factory-stage-payload [(allocator (dyn Allocator))
                              (worker (ref FactoryWorker))
                              (provider (slice u8))
                              (model (slice u8))
@@ -41,7 +42,7 @@
                               (run-value (slice u8))] (-> (slice u8))
   (if (> (slice-len [u8] worker-value) 0) worker-value run-value))
 
-(defn factory-run-id [(allocator (ptr Allocator))
+(defn factory-run-id [(allocator (dyn Allocator))
                       (name (slice u8))] (-> (slice u8))
   (let [(mut value) (sb-new allocator)]
     (sb-push-str! (mut value) "factory-")
@@ -51,7 +52,7 @@
                   (json-stringify allocator (json-integer allocator (now-ms))))
     (sb-finish! (mut value))))
 
-(defn factory-command-id [(allocator (ptr Allocator))
+(defn factory-command-id [(allocator (dyn Allocator))
                           (phase (slice u8))
                           (invocation i64)
                           (index i64)] (-> (slice u8))
@@ -64,7 +65,7 @@
     (sb-push-str! (mut value) (json-stringify allocator (json-integer allocator index)))
     (sb-finish! (mut value))))
 
-(defn factory-command-payload [(allocator (ptr Allocator))
+(defn factory-command-payload [(allocator (dyn Allocator))
                                (phase (slice u8))
                                (command (slice u8))
                                (index i64)
@@ -78,7 +79,7 @@
       0)
     (load payload)))
 
-(defn run-factory-commands [(allocator (ptr Allocator))
+(defn run-factory-commands [(allocator (dyn Allocator))
                             (commands (ArrayList (slice u8)))
                             (phase (slice u8))
                             (invocation i64)
@@ -88,8 +89,8 @@
                             (provider-name (slice u8))
                             (model (slice u8))
                             (emitter (ptr EventEmitter))] (-> i64)
-  (let [tool (alloc/stack BashTool)
-        context (alloc/stack ToolExecutionContext)
+  (let [tool (primitive/alloc-stack BashTool)
+        context (primitive/alloc-stack ToolExecutionContext)
         (mut i) 0
         n (al-len [(slice u8)] commands)
         (mut result) 0]
@@ -102,7 +103,7 @@
               (break)
               (let [command (al-get [(slice u8)] commands (load i))
                     call-id (factory-command-id allocator phase invocation (load i))
-                    call (alloc/stack ToolCall)
+                    call (primitive/alloc-stack ToolCall)
                     (mut arguments) (json-object allocator)]
                 (json-put-string! (mut arguments) "command" command)
                 (set! (.id call) call-id)
@@ -149,7 +150,7 @@
                 (set! i (+ (load i) 1))))))
   0)
 
-(defn factory-stage-prompt [(allocator (ptr Allocator))
+(defn factory-stage-prompt [(allocator (dyn Allocator))
                             (definition (ref FactoryDefinition))
                             (worker (ref FactoryWorker))
                             (workspace (slice u8))] (-> (slice u8))
@@ -180,15 +181,15 @@
                   "\nExecute the Markdown assignment in this workspace using the available tools and supplied context. The factory definition above is this run's private copy; you may update its context, goal, tool groups, worker list, or later worker Markdown when that helps subsequent phases. The coordinator reloads it before the next phase. Use inspect_workflow when you need the live ordered topology, current position, or completed history. The workflow continues in order by default; use set_workflow_state to complete early or route to a named worker. Decide what validation the assignment requires and perform it. Before finishing, call report_worker_status with ready=true only if you believe the assignment is complete and validated; otherwise report ready=false and explain what remains.")
     (sb-finish! (mut prompt))))
 
-(defn factory-request [(allocator (ptr Allocator))
+(defn factory-request [(allocator (dyn Allocator))
                        (registry (ptr ToolRegistry))
                        (run-id (slice u8))
                        (model (slice u8))
                        (reasoning (slice u8))
                        (prompt (slice u8))] (-> ModelRequest)
-  (let [request (alloc/stack ModelRequest)
-        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        message (alloc/stack Message)]
+  (let [request (primitive/alloc-stack ModelRequest)
+        messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+        message (primitive/alloc-stack Message)]
     (set! (.role message) (UserRole))
     (set! (.content message) prompt)
     (al-push! [Message] messages (load message))
@@ -232,7 +233,7 @@
     (load enabled)))
 
 (defn factory-register-configured-tools! [(registry (mut ToolRegistry))
-                                          (allocator (ptr Allocator))
+                                          (allocator (dyn Allocator))
                                           (workspace (slice u8))
                                           (definition (ref FactoryDefinition))] (-> i64)
   (when (factory-tool-group-enabled? definition "filesystem")
@@ -244,7 +245,7 @@
     0)
   0)
 
-(defn factory-stage-run-id [(allocator (ptr Allocator))
+(defn factory-stage-run-id [(allocator (dyn Allocator))
                             (name (slice u8))
                             (stage i64)] (-> (slice u8))
   (let [(mut value) (sb-new allocator)]
@@ -254,7 +255,7 @@
                   (json-stringify allocator (json-integer allocator (+ stage 1))))
     (sb-finish! (mut value))))
 
-(defn run-factory-stage [(allocator (ptr Allocator))
+(defn run-factory-stage [(allocator (dyn Allocator))
                          (provider (dyn ModelProvider))
                          (definition (ref FactoryDefinition))
                          (worker (ref FactoryWorker))
@@ -285,10 +286,10 @@
     (if (not (allocation-domain-valid? domain))
         (set! result 70)
         (let [run-allocator (allocation-domain-allocator domain)
-              registry (box run-allocator ToolRegistry (tool-registry-new run-allocator))
+              registry (box! run-allocator ToolRegistry (tool-registry-new run-allocator))
               prompt (factory-stage-prompt run-allocator definition worker workspace)
-              request (alloc/stack ModelRequest)
-              policy (alloc/stack AgentRunPolicy)]
+              request (primitive/alloc-stack ModelRequest)
+              policy (primitive/alloc-stack AgentRunPolicy)]
           (factory-register-configured-tools! registry run-allocator workspace definition)
           (register-factory-status-tool! registry run-allocator worker-status)
           (register-factory-workflow-tools! registry run-allocator workflow-state)
@@ -322,7 +323,7 @@
           (allocation-domain-close! allocator domain)))
     (load result)))
 
-(defn factory-apply-workflow-decision! [(allocator (ptr Allocator))
+(defn factory-apply-workflow-decision! [(allocator (dyn Allocator))
                                         (definition-directory (slice u8))
                                         (workflow-state (ptr FactoryWorkflowState))
                                         (stage (ptr i64))
@@ -340,7 +341,7 @@
         :else (store! stage (+ (load stage) 1)))
   0)
 
-(defn run-factory-stage-with-commands [(allocator (ptr Allocator))
+(defn run-factory-stage-with-commands [(allocator (dyn Allocator))
                                        (provider (dyn ModelProvider))
                                        (definition (ref FactoryDefinition))
                                        (worker (ref FactoryWorker))
@@ -425,21 +426,21 @@
       0)
     (load result)))
 
-(defn run-factory-definition [(allocator (ptr Allocator))
+(defn run-factory-definition [(allocator (dyn Allocator))
                               (definition (ref FactoryDefinition))
                               (runtime-contexts (ArrayList (slice u8)))
                               (workspace (slice u8))
                               (provider-name (slice u8))
                               (model (slice u8))
                               (emitter (ptr EventEmitter))] (-> i64)
-  (let [worker-status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+  (let [worker-status (box! allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
         provider-factory
-          (box allocator
+          (box! allocator
                DefaultRuntimeProviderFactory
                (zeroed DefaultRuntimeProviderFactory))
         factory-id (factory-run-id allocator (.name definition))
         workflow-state
-          (box allocator
+          (box! allocator
                FactoryWorkflowState
                (factory-workflow-state-new allocator (load (field definition directory))))
         (mut result) 0

@@ -3,6 +3,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.str" :use *)
 (import "codex-app-server" :use *)
 (import "codex-direct" :use *)
@@ -11,10 +12,10 @@
 (import "harness-main" :use *)
 (import "harness-tool" :use *)
 
-(defn cache-audit-request [(allocator (ptr Allocator))
+(defn cache-audit-request [(allocator (dyn Allocator))
                            (messages (ptr (ArrayList Message)))] (-> (ptr ModelRequest))
-  (let [request (box allocator ModelRequest (zeroed ModelRequest))
-        registry (box allocator ToolRegistry (tool-registry-new allocator))]
+  (let [request (box! allocator ModelRequest (zeroed ModelRequest))
+        registry (box! allocator ToolRegistry (tool-registry-new allocator))]
     (store! (field request run-id) "direct-cache-audit")
     (store! (field request operation-id) "model")
     (store! (field request model) "gpt-5.6-terra")
@@ -23,7 +24,7 @@
     (store! (field request tools) registry)
     (store! (field request tool-choice) (ToolsNone))
     (store! (field request parallel-tool-calls) true)
-    (store! (field request reasoning) (ReasoningLow))
+    (store! (field request reasoning) "low")
     (store! (field request cache-key) "coil-direct-cache-audit-v1")
     (store! (field request prompt-cache-key) "coil-direct-cache-audit-v1")
     (store! (field request max-output-tokens) 64)
@@ -32,14 +33,14 @@
 
 (deftest direct-subscription-reports-cached-prefix-tokens
          (let [allocator (malloc-allocator)
-               context (alloc/stack CodexDirectContext)
-               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-               first (alloc/stack Message)
+               context (primitive/alloc-stack CodexDirectContext)
+               messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+               first (primitive/alloc-stack Message)
                (mut prefix) (sb-new allocator)
                (mut i) 0
-               sink (box allocator NoopEventSink (zeroed NoopEventSink))
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
+               sink (box! allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))]
            (loop (if (>= (load i) 1400)
                      (break)
                      (do
@@ -56,8 +57,8 @@
                (ModelErr [failure] (assert false))
                (ModelOk [response]
                         (let [first-response response
-                              assistant (alloc/stack Message)
-                              second (alloc/stack Message)]
+                              assistant (primitive/alloc-stack Message)
+                              second (primitive/alloc-stack Message)]
                           (store! (field assistant role) (AssistantRole))
                           (store! (field assistant content)
                                   (load (field first-response output-text)))
@@ -87,10 +88,10 @@
 
 (deftest direct-subscription-replays-reasoning-and-tool-output
          (let [allocator (malloc-allocator)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               context (box allocator CodexDirectContext (codex-direct-context allocator))
-               strategy (box allocator (dyn CodexExecutionStrategy) context)
-               provider (alloc/stack CodexProvider)]
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               context (box! allocator CodexDirectContext (codex-direct-context allocator))
+               strategy (box! allocator (dyn CodexExecutionStrategy) context)
+               provider (primitive/alloc-stack CodexProvider)]
            (tool-register! registry (echo-definition allocator))
            (store! provider (zeroed CodexProvider))
            (store! (field provider strategy) strategy)

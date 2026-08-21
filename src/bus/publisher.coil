@@ -21,7 +21,7 @@
 ;; The topic a run's events are published on. Returns an empty slice if the
 ;; allocation fails, which callers must treat as "do not publish" rather than
 ;; publishing to the empty topic.
-(defn run-topic [(allocator (ptr Allocator)) (run-id (slice u8))] (-> (slice u8))
+(defn run-topic [(allocator (dyn Allocator)) (run-id (slice u8))] (-> (slice u8))
   (if (= (slice-len run-id) 0)
       ""
       (match (str-concat allocator RUN_TOPIC_PREFIX run-id)

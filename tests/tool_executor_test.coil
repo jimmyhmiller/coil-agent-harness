@@ -1,4 +1,5 @@
 (module harness-tool-executor-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -29,7 +30,7 @@
 
 (defn execute-probe [(probe (ptr ParallelProbe))
                      (call (ptr ToolCall))
-                     (allocator (ptr Allocator))] (-> ToolResult)
+                     (allocator (dyn Allocator))] (-> ToolResult)
   (let [active (+ (atomic-add (load (field probe active)) 1) 1)
         (mut result) (tool-result-empty (.id call) (ToolSucceeded))]
     (update-maximum! (load (field probe maximum)) active)
@@ -44,7 +45,7 @@
   (execute-tool [(self (ptr ParallelProbe))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-probe self call allocator)))
 
@@ -77,11 +78,11 @@
                           (_ 0))
                    0)))
 
-(defn executor-tool [(allocator (ptr Allocator)) (probe (ptr ParallelProbe))] (-> ToolDefinition)
+(defn executor-tool [(allocator (dyn Allocator)) (probe (ptr ParallelProbe))] (-> ToolDefinition)
   (let [schema-result
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
-        definition (alloc/stack ToolDefinition)]
+        definition (primitive/alloc-stack ToolDefinition)]
     (set! (.name (.spec definition)) "probe")
     (set! (.description (.spec definition)) "Parallelism probe")
     (set! (.input-schema (.spec definition)) (.value schema-result))
@@ -92,16 +93,16 @@
     (set! (.implementation definition) probe)
     (load definition)))
 
-(defn executor-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
-  (let [call (alloc/stack ToolCall)]
+(defn executor-call [(allocator (dyn Allocator)) (id (slice u8))] (-> ToolCall)
+  (let [call (primitive/alloc-stack ToolCall)]
     (set! (.id call) id)
     (set! (.name call) "probe")
     (set! (.arguments call) (json-object allocator))
     (set! (.raw-arguments call) "{}")
     (load call)))
 
-(defn executor-bash-call [(allocator (ptr Allocator))] (-> ToolCall)
-  (let [call (alloc/stack ToolCall)
+(defn executor-bash-call [(allocator (dyn Allocator))] (-> ToolCall)
+  (let [call (primitive/alloc-stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-object-put! (mut arguments) "command" (JsonString "printf worker-stack-ok"))
     (set! (.id call) "bash-worker")
@@ -114,12 +115,12 @@
 ;; pthread stack was exhausted inside execute-bash -> subprocess/run.
 (deftest executes-bash-on-a-tool-worker-with-an-explicit-stack
          (let [allocator (malloc-allocator)
-               sequence (box allocator i64 0)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
-               sink (alloc/stack NoopEventSink)
-               emitter (alloc/stack EventEmitter)
-               execution (alloc/stack ToolExecutionRequest)]
+               sequence (box! allocator i64 0)
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               calls (box! allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+               sink (primitive/alloc-stack NoopEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               execution (primitive/alloc-stack ToolExecutionRequest)]
            (let [(mut registry-value) (load registry)]
              (register-bash-tool! (mut registry-value) allocator ".")
              (store! registry (load registry-value)))
@@ -145,18 +146,18 @@
 
 (deftest executes-independent-tools-concurrently-and-keeps-result-order
          (let [allocator (malloc-allocator)
-               active (box allocator i64 0)
-               maximum (box allocator i64 0)
-               event-count (box allocator i64 0)
-               valid-envelope (box allocator i64 1)
-               valid-proposal (box allocator i64 1)
-               sequence (box allocator i64 0)
-               probe (box allocator ParallelProbe (zeroed ParallelProbe))
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
-               sink (alloc/stack CountingEventSink)
-               emitter (alloc/stack EventEmitter)
-               execution (alloc/stack ToolExecutionRequest)]
+               active (box! allocator i64 0)
+               maximum (box! allocator i64 0)
+               event-count (box! allocator i64 0)
+               valid-envelope (box! allocator i64 1)
+               valid-proposal (box! allocator i64 1)
+               sequence (box! allocator i64 0)
+               probe (box! allocator ParallelProbe (zeroed ParallelProbe))
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               calls (box! allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+               sink (primitive/alloc-stack CountingEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               execution (primitive/alloc-stack ToolExecutionRequest)]
            (store! (field probe active) active)
            (store! (field probe maximum) maximum)
            (let [(mut registry-value) (load registry)]
@@ -193,18 +194,18 @@
 
 (deftest reports-a-tool-that-exceeds-its-cooperative-deadline
          (let [allocator (malloc-allocator)
-               active (box allocator i64 0)
-               maximum (box allocator i64 0)
-               event-count (box allocator i64 0)
-               valid-envelope (box allocator i64 1)
-               valid-proposal (box allocator i64 1)
-               sequence (box allocator i64 0)
-               probe (box allocator ParallelProbe (zeroed ParallelProbe))
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
-               sink (alloc/stack CountingEventSink)
-               emitter (alloc/stack EventEmitter)
-               execution (alloc/stack ToolExecutionRequest)
+               active (box! allocator i64 0)
+               maximum (box! allocator i64 0)
+               event-count (box! allocator i64 0)
+               valid-envelope (box! allocator i64 1)
+               valid-proposal (box! allocator i64 1)
+               sequence (box! allocator i64 0)
+               probe (box! allocator ParallelProbe (zeroed ParallelProbe))
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               calls (box! allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+               sink (primitive/alloc-stack CountingEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               execution (primitive/alloc-stack ToolExecutionRequest)
                (mut definition) (executor-tool allocator probe)]
            (store! (field probe active) active)
            (store! (field probe maximum) maximum)

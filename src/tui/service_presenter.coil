@@ -15,7 +15,7 @@
     (Some [text] text)
     (None [] "")))
 
-(defn service-view-error [(allocator (ptr Allocator))
+(defn service-view-error [(allocator (dyn Allocator))
                           (body Json)] (-> ViewNode)
   (let [message (service-json-string body "message")]
     (view-flow (RoleFailure)
@@ -25,7 +25,7 @@
                    message
                    "The request failed."))))
 
-(defn service-view-run [(allocator (ptr Allocator))
+(defn service-view-run [(allocator (dyn Allocator))
                         (status i64)
                         (body Json)
                         (unicode bool)] (-> ViewNode)
@@ -55,7 +55,7 @@
           0)
         (load root))))
 
-(defn service-dependency-text [(allocator (ptr Allocator))
+(defn service-dependency-text [(allocator (dyn Allocator))
                                (dependencies Json)] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut at) 0
@@ -69,7 +69,7 @@
                 (set! at (+ (load at) 1)))))
     (sb-finish! (mut output))))
 
-(defn service-view-workflow [(allocator (ptr Allocator))
+(defn service-view-workflow [(allocator (dyn Allocator))
                              (status i64)
                              (body Json)
                              (unicode bool)] (-> ViewNode)
@@ -123,7 +123,7 @@
                     (set! at (+ (load at) 1)))))
         (load root))))
 
-(defn service-view-generic [(allocator (ptr Allocator))
+(defn service-view-generic [(allocator (dyn Allocator))
                             (status i64)
                             (body Json)
                             (unicode bool)] (-> ViewNode)

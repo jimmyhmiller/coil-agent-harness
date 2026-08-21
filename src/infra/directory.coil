@@ -60,7 +60,7 @@
 ;; against a missing NUL walking off the end of the record.
 (const DIRENT_NAME_MAX 1024)
 
-(defn dirent-name [(allocator (ptr Allocator)) (entry (ptr i8))] (-> (slice u8))
+(defn dirent-name [(allocator (dyn Allocator)) (entry (ptr i8))] (-> (slice u8))
   (let [bytes (primitive/cast (ptr u8) entry)
         start (primitive/index bytes DIRENT_NAME_OFFSET)
         (mut length) 0]
@@ -86,7 +86,7 @@
 ;; directory cannot be opened, which callers treat as "no peers" rather than as
 ;; an error: a missing socket directory means nobody is listening, and that is a
 ;; normal state, not a failure.
-(defn directory-entries [(allocator (ptr Allocator))
+(defn directory-entries [(allocator (dyn Allocator))
                          (path (slice u8))] (-> (ArrayList (slice u8)))
   (let [(mut names) (al-new [(slice u8)] allocator)
         handle (opendir (str->cstr allocator path))]
@@ -106,7 +106,7 @@
 ;; Entries whose name ends with `suffix`. The socket directory holds one file
 ;; per session named `<pid>.sock`, so this is how a caller asks for sockets
 ;; without needing the entry type -- which some filesystems report as unknown.
-(defn directory-entries-with-suffix [(allocator (ptr Allocator))
+(defn directory-entries-with-suffix [(allocator (dyn Allocator))
                                      (path (slice u8))
                                      (suffix (slice u8))] (-> (ArrayList (slice u8)))
   (let [all (directory-entries allocator path)
@@ -125,20 +125,20 @@
                 (set! i (+ (load i) 1)))))
     (load matched)))
 
-(defn directory-create [(allocator (ptr Allocator))
+(defn directory-create [(allocator (dyn Allocator))
                         (path (slice u8))
                         (mode i64)] (-> i64)
   (primitive/cast i64 (mkdir (str->cstr allocator path) (primitive/cast u32 mode))))
 
-(defn path-remove [(allocator (ptr Allocator)) (path (slice u8))] (-> i64)
+(defn path-remove [(allocator (dyn Allocator)) (path (slice u8))] (-> i64)
   (primitive/cast i64 (unlink (str->cstr allocator path))))
 
-(defn path-set-mode [(allocator (ptr Allocator))
+(defn path-set-mode [(allocator (dyn Allocator))
                      (path (slice u8))
                      (mode i64)] (-> i64)
   (primitive/cast i64 (chmod (str->cstr allocator path) (primitive/cast u32 mode))))
 
-(defn path-exists? [(allocator (ptr Allocator)) (path (slice u8))] (-> bool)
+(defn path-exists? [(allocator (dyn Allocator)) (path (slice u8))] (-> bool)
   (= (primitive/cast i64 (access (str->cstr allocator path) ACCESS_EXISTS)) 0))
 
 ;; Create `path` and every missing parent.
@@ -151,7 +151,7 @@
 ;;
 ;; An existing directory is success, not an error: EEXIST is the normal outcome
 ;; on every run after the first.
-(defn directory-create-all [(allocator (ptr Allocator))
+(defn directory-create-all [(allocator (dyn Allocator))
                             (path (slice u8))
                             (mode i64)] (-> i64)
   (let [n (slice-len [u8] path)
@@ -170,7 +170,7 @@
     (if (path-exists? allocator path) 0 -1)))
 
 ;; Join two path components with a single separator.
-(defn path-join [(allocator (ptr Allocator))
+(defn path-join [(allocator (dyn Allocator))
                  (base (slice u8))
                  (name (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)

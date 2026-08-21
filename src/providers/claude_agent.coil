@@ -1,4 +1,5 @@
 (module claude-agent)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.slice" :use *)
@@ -14,14 +15,14 @@
 ;; directly from the provider's configured environment variables.
 (defstruct ClaudeAnthropicContext [(messages DeepSeekAnthropicContext)])
 
-(defn claude-login [(allocator (ptr Allocator))] (-> i64)
+(defn claude-login [(allocator (dyn Allocator))] (-> i64)
   (subscription/claude-login-native allocator))
 
-(defn claude-logout [(allocator (ptr Allocator))] (-> i64)
+(defn claude-logout [(allocator (dyn Allocator))] (-> i64)
   (subscription/claude-logout-native allocator))
 
-(defn claude-anthropic-context-default [(allocator (ptr Allocator))] (-> ClaudeAnthropicContext)
-  (let [context (alloc/stack ClaudeAnthropicContext)
+(defn claude-anthropic-context-default [(allocator (dyn Allocator))] (-> ClaudeAnthropicContext)
+  (let [context (primitive/alloc-stack ClaudeAnthropicContext)
         (mut messages) (deepseek-anthropic-context-default allocator)]
     (set! (.endpoint messages) "https://api.anthropic.com/v1/messages")
     (set! (.primary-env (.credential messages)) c"ANTHROPIC_OAUTH_TOKEN")
@@ -40,7 +41,7 @@
   (execute-model [(self (ptr ClaudeAnthropicContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (match (subscription/claude-load-native allocator)
                    (subscription/ClaudeCredentialsFailed [message]

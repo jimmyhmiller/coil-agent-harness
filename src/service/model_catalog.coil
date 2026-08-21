@@ -10,6 +10,7 @@
 ;; picker, not an allowlist, so a new model works the moment the provider serves
 ;; it -- you just have to type it.
 (module harness-model-catalog)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -41,7 +42,7 @@
                     (summary (slice u8))
                     (effort bool)
                     (default-effort (slice u8))] (-> ModelChoice)
-  (let [choice (alloc/stack ModelChoice)]
+  (let [choice (primitive/alloc-stack ModelChoice)]
     (set! (.provider choice) provider)
     (set! (.model choice) model)
     (set! (.label choice) label)
@@ -50,8 +51,8 @@
     (set! (.default-effort choice) default-effort)
     (load choice)))
 
-(defn model-catalog-new [(allocator (ptr Allocator))] (-> ModelCatalog)
-  (let [catalog (alloc/stack ModelCatalog)]
+(defn model-catalog-new [(allocator (dyn Allocator))] (-> ModelCatalog)
+  (let [catalog (primitive/alloc-stack ModelCatalog)]
     (set! (.choices catalog) (al-new [ModelChoice] allocator))
     (load catalog)))
 
@@ -67,7 +68,7 @@
 
 ;; Registration order is menu order, so the list reads newest-and-strongest
 ;; first rather than alphabetically.
-(defn model-catalog-default [(allocator (ptr Allocator))] (-> ModelCatalog)
+(defn model-catalog-default [(allocator (dyn Allocator))] (-> ModelCatalog)
   (let [(mut catalog) (model-catalog-new allocator)]
     (model-catalog-add! (mut catalog)
                         (model-choice "auto"
@@ -190,7 +191,7 @@
 (defn effort-choice [(effort (slice u8))
                      (label (slice u8))
                      (summary (slice u8))] (-> EffortChoice)
-  (let [choice (alloc/stack EffortChoice)]
+  (let [choice (primitive/alloc-stack EffortChoice)]
     (set! (.effort choice) effort)
     (set! (.label choice) label)
     (set! (.summary choice) summary)

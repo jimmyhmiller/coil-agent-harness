@@ -36,7 +36,7 @@
 (const JOURNAL_FILE_MODE 420)
 
 (defstruct EventJournal
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (fd i64)
    (lock (ptr i64))
    (failed (ptr i64))
@@ -63,7 +63,7 @@
 (defn journal-unlock! [(cell (ptr i64))] (-> i64)
   (atomic-store cell 0))
 
-(defn event-journal-open [(allocator (ptr Allocator))
+(defn event-journal-open [(allocator (dyn Allocator))
                           (path (slice u8))
                           (sync-each-event bool)] (-> JournalOpenResult)
   (let [c-path (str->cstr allocator path)
@@ -74,20 +74,20 @@
                             (| JOURNAL_O_CLOEXEC
                                (| JOURNAL_O_CREAT JOURNAL_O_APPEND))))
                    JOURNAL_FILE_MODE)]
-    (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+    (free [i8] allocator (alloc-slice-new c-path (+ (slice-len [u8] path) 1)))
     (if (< fd (cast i32 0))
         (JournalOpenFailed "could not open event journal")
-        (let [journal (alloc/stack EventJournal)]
+        (let [journal (primitive/alloc-stack EventJournal)]
           (set! (.allocator journal) allocator)
           (set! (.fd journal) (cast i64 fd))
-          (store! (field journal lock) (box allocator i64 0))
-          (store! (field journal failed) (box allocator i64 0))
+          (store! (field journal lock) (box! allocator i64 0))
+          (store! (field journal failed) (box! allocator i64 0))
           (set! (.scratch-domain journal) (allocation-domain-open allocator))
           (set! (.path journal) (json-copy-string allocator path))
           (set! (.sync-each-event journal) sync-each-event)
           (JournalOpened (load journal))))))
 
-(defn event-journal-append-bytes! [(allocator (ptr Allocator))
+(defn event-journal-append-bytes! [(allocator (dyn Allocator))
                                    (path (slice u8))
                                    (bytes (slice u8))] (-> i64)
   (let [c-path (str->cstr allocator path)
@@ -98,8 +98,8 @@
                             (| JOURNAL_O_CLOEXEC
                                (| JOURNAL_O_CREAT JOURNAL_O_APPEND))))
                    JOURNAL_FILE_MODE)
-        writer (alloc/stack io/Writer)]
-    (raw-free allocator c-path (+ (slice-len [u8] path) 1) 1)
+        writer (primitive/alloc-stack io/Writer)]
+    (free [i8] allocator (alloc-slice-new c-path (+ (slice-len [u8] path) 1)))
     (if (< fd (cast i32 0))
         -1
         (let [result
@@ -124,12 +124,12 @@
   (= (atomic-load (load (field journal failed))) 1))
 
 (defn event-journal-publish [(journal (ptr EventJournal)) (event (ptr Event))] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle
                         (allocation-domain-allocator (load (field journal scratch-domain))))
     (let [allocator (region/region-allocator cycle)]
       (journal-lock! (load (field journal lock)))
-      (let [writer (alloc/stack io/Writer)
+      (let [writer (primitive/alloc-stack io/Writer)
             fd (.fd journal)
             (mut result) -1]
         (if (< fd 0)
@@ -156,8 +156,8 @@
   (and (> (slice-len [u8] bytes) 0)
        (= (cast i64 (slice-get [u8] bytes (- (slice-len [u8] bytes) 1))) 10)))
 
-(defn journal-recovery-empty [(allocator (ptr Allocator))] (-> JournalRecovery)
-  (let [recovery (alloc/stack JournalRecovery)]
+(defn journal-recovery-empty [(allocator (dyn Allocator))] (-> JournalRecovery)
+  (let [recovery (primitive/alloc-stack JournalRecovery)]
     (set! (.ok recovery) true)
     (set! (.events recovery) (al-new [Json] allocator))
     (set! (.backing-bytes recovery) "")
@@ -166,7 +166,7 @@
     (set! (.error recovery) "")
     (load recovery)))
 
-(defn event-journal-recover [(allocator (ptr Allocator))
+(defn event-journal-recover [(allocator (dyn Allocator))
                              (path (slice u8))] (-> JournalRecovery)
   (let [(mut recovery) (journal-recovery-empty allocator)]
     (match (fs/read-file allocator path)
@@ -214,7 +214,7 @@
 ;; Readers in one process must not observe an append between the file read and
 ;; JSON projection. TUI sessions use process-scoped journals.
 (defn event-journal-recover-synchronized [(journal (ptr EventJournal))
-                                          (allocator (ptr Allocator))
+                                          (allocator (dyn Allocator))
                                           (path (slice u8))] (-> JournalRecovery)
   (journal-lock! (load (field journal lock)))
   (let [recovery (event-journal-recover allocator path)]

@@ -1,4 +1,5 @@
 (module harness-agent-runner)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -30,7 +31,7 @@
 ;; Caller-owned request/provider dependencies must outlive the handle. The job itself
 ;; is allocator-owned and its completion flag is safe to poll from another thread.
 (defstruct AgentRunJob
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (provider (ptr (dyn ModelProvider)))
    (request (ptr ModelRequest))
    (emitter (ptr EventEmitter))
@@ -83,7 +84,7 @@
               (.model request)
               payload))
 
-(defn runner-model-operation-id [(allocator (ptr Allocator))
+(defn runner-model-operation-id [(allocator (dyn Allocator))
                                  (root-operation-id (slice u8))
                                  (turn i64)] (-> (slice u8))
   (let [(mut value) (sb-new allocator)]
@@ -121,7 +122,7 @@
     (load valid)))
 
 (defn runner-budget-failure [] (-> ModelResult)
-  (let [failure (alloc/stack ModelFailure)]
+  (let [failure (primitive/alloc-stack ModelFailure)]
     (set! (.kind failure) (ConfigurationFailure))
     (set! (.provider failure) "runtime")
     (set! (.status-code failure) 0)
@@ -131,7 +132,7 @@
 
 (defn runner-stop-failure [(kind ModelFailureKind)
                            (message (slice u8))] (-> ModelResult)
-  (let [failure (alloc/stack ModelFailure)]
+  (let [failure (primitive/alloc-stack ModelFailure)]
     (set! (.kind failure) kind)
     (set! (.provider failure) "runtime")
     (set! (.status-code failure) 0)
@@ -151,7 +152,7 @@
 (defn request-cancelled? [(request (ptr ModelRequest))] (-> bool)
   (cancellation-requested? (load (field request cancellation))))
 
-(defn runner-retry-event [(allocator (ptr Allocator))
+(defn runner-retry-event [(allocator (dyn Allocator))
                           (emitter (ptr EventEmitter))
                           (request (ptr ModelRequest))
                           (attempt i64)
@@ -171,7 +172,7 @@
 ;; Retry only failures explicitly classified by the provider as transient. The
 ;; same request and operation id are reused, so this neither loses continuation
 ;; state nor becomes an additional logical model turn.
-(defn execute-model-with-retry [(allocator (ptr Allocator))
+(defn execute-model-with-retry [(allocator (dyn Allocator))
                                 (provider (dyn ModelProvider))
                                 (request (ptr ModelRequest))
                                 (emitter (ptr EventEmitter))] (-> ModelResult)
@@ -182,7 +183,7 @@
               (break)
               (do
                 (set! attempt (+ (load attempt) 1))
-                (let [turn-scratch (alloc/stack scratch/ScratchArena)]
+                (let [turn-scratch (primitive/alloc-stack scratch/ScratchArena)]
                   (scratch/scratch-init turn-scratch (malloc-allocator))
                   (let [turn-result
                           (execute-model provider
@@ -215,15 +216,15 @@
 ;; unlimited, which is the normal policy: an internal loop counter must not turn
 ;; unfinished work into a user-visible failure. Provider continuations retain
 ;; opaque prior output so reasoning/signature fields are never lost.
-(defn run-agent [(allocator (ptr Allocator))
+(defn run-agent [(allocator (dyn Allocator))
                  (provider (dyn ModelProvider))
                  (request (ptr ModelRequest))
                  (emitter (ptr EventEmitter))
                  (policy AgentRunPolicy)] (-> ModelResult)
-  (let [current (box allocator ModelRequest (load request))
+  (let [current (box! allocator ModelRequest (load request))
         lifecycle
           (if (= (load (field request run-lifecycle)) (cast (ptr i64) 0))
-              (box allocator i64 RUN_LIFECYCLE_QUEUED)
+              (box! allocator i64 RUN_LIFECYCLE_QUEUED)
               (load (field request run-lifecycle)))
         (mut turn) 0
         root-operation-id (.operation-id request)
@@ -319,10 +320,10 @@
                                                                               (RunCompleted)
                                                                               (JsonString (.response-id response-value))))
                                                      (let [calls
-                                                             (box allocator
+                                                             (box! allocator
                                                                   (ArrayList ToolCall)
                                                                   (load (field response-value tool-calls)))
-                                                           execution (alloc/stack ToolExecutionRequest)]
+                                                           execution (primitive/alloc-stack ToolExecutionRequest)]
                                                        (set! (.run-id execution) (.run-id current))
                                                        (set! (.parent-operation-id execution)
                                                              (.operation-id current))
@@ -339,7 +340,7 @@
                                                              (.max-parallel-tools policy))
                                                        (let [batch (execute-tools-parallel allocator execution)
                                                              results
-                                                               (box allocator
+                                                               (box! allocator
                                                                     (ArrayList ToolResult)
                                                                     (load (field batch results)))]
                                                          (if (async-delegation-batch? calls results)
@@ -389,15 +390,15 @@
 ;; Start an owned background worker. Completion is observable through the same event
 ;; emitter as a foreground run; callers poll `agent-run-finished?` and eventually join.
 ;; The handle owns the request's cancellation resource and releases it during join.
-(defn run-agent-background [(allocator (ptr Allocator))
+(defn run-agent-background [(allocator (dyn Allocator))
                             (provider (dyn ModelProvider))
                             (request (ptr ModelRequest))
                             (emitter (ptr EventEmitter))
                             (policy AgentRunPolicy)] (-> AgentRunHandle)
-  (let [job (box allocator AgentRunJob (zeroed AgentRunJob))
-        provider-cell (box allocator (dyn ModelProvider) provider)
-        completed (box allocator i64 0)
-        handle (alloc/stack AgentRunHandle)]
+  (let [job (box! allocator AgentRunJob (zeroed AgentRunJob))
+        provider-cell (box! allocator (dyn ModelProvider) provider)
+        completed (box! allocator i64 0)
+        handle (primitive/alloc-stack AgentRunHandle)]
     (when (= (load (field request cancellation))
              (cast (ptr CancellationToken) 0))
       (store! (field request cancellation) (cancellation-token-new allocator))
@@ -410,7 +411,7 @@
     (set! (.result job) (runner-budget-failure))
     (store! (field job lifecycle)
             (if (= (load (field request run-lifecycle)) (cast (ptr i64) 0))
-                (box allocator i64 RUN_LIFECYCLE_QUEUED)
+                (box! allocator i64 RUN_LIFECYCLE_QUEUED)
                 (load (field request run-lifecycle))))
     (set! (.run-lifecycle request) (load (field job lifecycle)))
     (set! (.completed job) completed)

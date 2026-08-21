@@ -84,14 +84,14 @@
    (paste-enabled bool)])
 
 (defn terminal-session-new [] (-> TerminalSession)
-  (let [session (alloc/stack TerminalSession)]
+  (let [session (primitive/alloc-stack TerminalSession)]
     (set! (.saved session) (zeroed TerminalAttributes))
     (set! (.raw session) false)
     (set! (.paste-enabled session) false)
     (load session)))
 
 (defn terminal-overrides-default [] (-> TerminalOverrides)
-  (let [overrides (alloc/stack TerminalOverrides)]
+  (let [overrides (primitive/alloc-stack TerminalOverrides)]
     (set! (.force-plain overrides) false)
     (set! (.screen-reader overrides) false)
     (set! (.reduced-motion overrides) false)
@@ -102,7 +102,7 @@
     (set! (.width overrides) 0)
     (load overrides)))
 
-(defn terminal-env-eq? [(allocator (ptr Allocator))
+(defn terminal-env-eq? [(allocator (dyn Allocator))
                         (name (slice u8))
                         (expected (slice u8))] (-> bool)
   (match (os/env-get allocator name)
@@ -116,7 +116,7 @@
           (None [] false)))
     (Err [failure] false)))
 
-(defn terminal-env-nonempty? [(allocator (ptr Allocator))
+(defn terminal-env-nonempty? [(allocator (dyn Allocator))
                               (name (slice u8))] (-> bool)
   (match (os/env-get allocator name)
     (Ok [maybe]
@@ -132,7 +132,7 @@
           (None [] false)))
     (Err [failure] false)))
 
-(defn terminal-env-int [(allocator (ptr Allocator))
+(defn terminal-env-int [(allocator (dyn Allocator))
                         (name (slice u8))] (-> i64)
   (match (os/env-get allocator name)
     (Ok [maybe]
@@ -148,7 +148,7 @@
           (None [] 0)))
     (Err [failure] 0)))
 
-(defn terminal-env-contains? [(allocator (ptr Allocator))
+(defn terminal-env-contains? [(allocator (dyn Allocator))
                               (name (slice u8))
                               (needle (slice u8))] (-> bool)
   (match (os/env-get allocator name)
@@ -165,7 +165,7 @@
           (None [] false)))
     (Err [failure] false)))
 
-(defn terminal-env-unicode? [(allocator (ptr Allocator))] (-> bool)
+(defn terminal-env-unicode? [(allocator (dyn Allocator))] (-> bool)
   (or (terminal-env-contains? allocator "LC_ALL" "UTF-8")
       (or (terminal-env-contains? allocator "LC_ALL" "UTF8")
           (or (terminal-env-contains? allocator "LC_ALL" "utf8")
@@ -176,13 +176,13 @@
                               (or (terminal-env-contains? allocator "LANG" "UTF8")
                                   (terminal-env-contains? allocator "LANG" "utf8"))))))))))
 
-(defn terminal-env-enabled? [(allocator (ptr Allocator))
+(defn terminal-env-enabled? [(allocator (dyn Allocator))
                              (name (slice u8))] (-> bool)
   (and (terminal-env-nonempty? allocator name)
        (and (not (terminal-env-eq? allocator name "0"))
             (not (terminal-env-eq? allocator name "false")))))
 
-(defn terminal-overrides-from-env [(allocator (ptr Allocator))] (-> TerminalOverrides)
+(defn terminal-overrides-from-env [(allocator (dyn Allocator))] (-> TerminalOverrides)
   (let [(mut overrides) (terminal-overrides-default)]
     (set! (.force-plain overrides) (terminal-env-enabled? allocator "COIL_TUI_PLAIN"))
     (set! (.screen-reader overrides) (terminal-env-enabled? allocator "COIL_TUI_SCREEN_READER"))
@@ -204,7 +204,7 @@
   (if (> physical-columns 1) (- physical-columns 1) physical-columns))
 
 (defn terminal-query-width [(fd i32)] (-> i64)
-  (let [size (alloc/stack TerminalWindowSize)]
+  (let [size (primitive/alloc-stack TerminalWindowSize)]
     (set! size (zeroed TerminalWindowSize))
     (if (= (ioctl fd (cast u64 TUI_TIOCGWINSZ) size) 0)
         ;; Do not write into the terminal's final column. Most terminals defer
@@ -215,14 +215,14 @@
         0)))
 
 (defn terminal-query-height [(fd i32)] (-> i64)
-  (let [size (alloc/stack TerminalWindowSize)]
+  (let [size (primitive/alloc-stack TerminalWindowSize)]
     (set! size (zeroed TerminalWindowSize))
     (if (= (ioctl fd (cast u64 TUI_TIOCGWINSZ) size) 0)
         (cast i64 (.rows size))
         0)))
 
-(defn terminal-detect-facts [(allocator (ptr Allocator))] (-> TerminalFacts)
-  (let [facts (alloc/stack TerminalFacts)
+(defn terminal-detect-facts [(allocator (dyn Allocator))] (-> TerminalFacts)
+  (let [facts (primitive/alloc-stack TerminalFacts)
         output-tty (= (isatty (cast i32 1)) 1)
         queried-width (if output-tty (terminal-query-width (cast i32 1)) 0)
         parsed-width (terminal-env-int allocator "COLUMNS")]
@@ -244,7 +244,7 @@
 
 (defn terminal-profile-from [(facts (ref TerminalFacts))
                              (overrides (ref TerminalOverrides))] (-> TerminalProfile)
-  (let [profile (alloc/stack TerminalProfile)
+  (let [profile (primitive/alloc-stack TerminalProfile)
         plain
           (or (.force-plain overrides)
               (or (.screen-reader overrides)
@@ -288,13 +288,13 @@
               (.rows facts)))
     (load profile)))
 
-(defn terminal-detect-profile [(allocator (ptr Allocator))
+(defn terminal-detect-profile [(allocator (dyn Allocator))
                                (overrides (ref TerminalOverrides))] (-> TerminalProfile)
   (let [facts (terminal-detect-facts allocator)]
     (terminal-profile-from facts overrides)))
 
 (defn terminal-write-all [(fd i64) (value (slice u8))] (-> i64)
-  (let [writer (alloc/stack io/Writer)]
+  (let [writer (primitive/alloc-stack io/Writer)]
     (match (io/write-all (io/fd-writer writer fd)
                          (cast (ptr i8) (slice-data [u8] value))
                          (slice-len [u8] value))
@@ -302,23 +302,23 @@
       (Err [failure] -1))))
 
 (defn terminal-write-byte [(fd i64) (byte u8)] (-> i64)
-  (let [value (alloc/stack (array u8 1))]
+  (let [value (primitive/alloc-stack (array u8 1))]
     (set! (index value 0) byte)
     (terminal-write-all fd (slice-new [u8] (index value 0) 1))))
 
-(defn terminal-control-sequence [(allocator (ptr Allocator))
+(defn terminal-control-sequence [(allocator (dyn Allocator))
                                  (suffix (slice u8))] (-> (slice u8))
   (let [(mut sequence) (sb-new allocator)]
     (sb-push-byte! (mut sequence) (cast u8 27))
     (sb-push-str! (mut sequence) suffix)
     (sb-finish! (mut sequence))))
 
-(defn terminal-write-control [(allocator (ptr Allocator))
+(defn terminal-write-control [(allocator (dyn Allocator))
                               (fd i64)
                               (suffix (slice u8))] (-> i64)
   (terminal-write-all fd (terminal-control-sequence allocator suffix)))
 
-(defn terminal-write-csi-number [(allocator (ptr Allocator))
+(defn terminal-write-csi-number [(allocator (dyn Allocator))
                                  (fd i64)
                                  (number i64)
                                  (suffix (slice u8))] (-> i64)
@@ -339,7 +339,7 @@
     (sb-push-str! (mut sequence) suffix)
     (terminal-write-all fd (sb-finish! (mut sequence)))))
 
-(defn terminal-role-sgr [(allocator (ptr Allocator))
+(defn terminal-role-sgr [(allocator (dyn Allocator))
                          (role StyleRole)] (-> (slice u8))
   (match role
     (RolePrimary [] (terminal-control-sequence allocator "[1m"))
@@ -352,7 +352,7 @@
     (RoleCodeComment [] (terminal-control-sequence allocator "[2m"))
     (RoleCodeNumber [] (terminal-control-sequence allocator "[36m"))))
 
-(defn terminal-execute! [(allocator (ptr Allocator))
+(defn terminal-execute! [(allocator (dyn Allocator))
                          (fd i64)
                          (profile (ref TerminalProfile))
                          (operation TerminalOperation)] (-> i64)
@@ -427,12 +427,12 @@
                 (set! at (+ (load at) 1)))))
     0))
 
-(defn terminal-session-enter! [(allocator (ptr Allocator))
+(defn terminal-session-enter! [(allocator (dyn Allocator))
                                (session (ptr TerminalSession))
                                (profile (ref TerminalProfile))] (-> bool)
   (if (not (.interactive profile))
       false
-      (let [raw (alloc/stack TerminalAttributes)]
+      (let [raw (primitive/alloc-stack TerminalAttributes)]
         (if (!= (tcgetattr (cast i32 0) (mut (.saved session))) (cast i32 0))
             false
             (do
@@ -446,7 +446,7 @@
                     (set! (.paste-enabled session) true)
                     true)))))))
 
-(defn terminal-session-restore! [(allocator (ptr Allocator))
+(defn terminal-session-restore! [(allocator (dyn Allocator))
                                  (session (ptr TerminalSession))
                                  (profile (ref TerminalProfile))] (-> i64)
   ;; Restoration is idempotent so every normal/error exit can use the same path.

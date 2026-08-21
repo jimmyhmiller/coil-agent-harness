@@ -1,4 +1,5 @@
 (module harness-tui-layout)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -22,7 +23,7 @@
    (expanded bool)])
 
 (defn layout-options [(width i64) (unicode bool) (expanded bool)] (-> LayoutOptions)
-  (let [options (alloc/stack LayoutOptions)]
+  (let [options (primitive/alloc-stack LayoutOptions)]
     (set! (.width options) (if (< width 12) 12 width))
     (set! (.unicode options) unicode)
     (set! (.compact options) false)
@@ -55,7 +56,7 @@
     (PresentationPending [] (RoleMuted))
     (PresentationRunning [] (RoleMuted))))
 
-(defn layout-join [(allocator (ptr Allocator))
+(defn layout-join [(allocator (dyn Allocator))
                    (first (slice u8))
                    (second (slice u8))] (-> (slice u8))
   (let [(mut builder) (sb-new allocator)]
@@ -66,7 +67,7 @@
       0)
     (sb-finish! (mut builder))))
 
-(defn layout-diagnostic-text [(allocator (ptr Allocator))
+(defn layout-diagnostic-text [(allocator (dyn Allocator))
                               (value Json)] (-> (slice u8))
   (let [text (json-stringify allocator value)
         count (slice-len [u8] text)
@@ -112,7 +113,7 @@
                    (= (slice-get [u8] text (+ at 2)) (cast u8 96)))))))
 
 ;; Push `body` as alternating prose and code nodes.
-(defn layout-push-markdown! [(allocator (ptr Allocator))
+(defn layout-push-markdown! [(allocator (dyn Allocator))
                              (root (ptr ViewNode))
                              (body (slice u8))
                              (first-prefix (slice u8))
@@ -184,7 +185,7 @@
       0)
     0))
 
-(defn layout-view-push! [(allocator (ptr Allocator))
+(defn layout-view-push! [(allocator (dyn Allocator))
                          (root (ptr ViewNode))
                          (item (ref PresentationBlock))
                          (options (ref LayoutOptions))] (-> i64)
@@ -332,7 +333,7 @@
                                                (.detail item)))))
     0))
 
-(defn layout-model-range-view [(allocator (ptr Allocator))
+(defn layout-model-range-view [(allocator (dyn Allocator))
                                (model (ptr PresentationModel))
                                (start i64)
                                (end i64)
@@ -377,7 +378,7 @@
                 (set! at (+ (load at) 1)))))
     (load root)))
 
-(defn layout-model-range [(allocator (ptr Allocator))
+(defn layout-model-range [(allocator (dyn Allocator))
                           (model (ptr PresentationModel))
                           (start i64)
                           (end i64)

@@ -28,7 +28,7 @@
                 (set! start (- (load start) 1))))
       (substr directory (load start) (load end)))))
 
-(defn scaffold-write [(allocator (ptr Allocator))
+(defn scaffold-write [(allocator (dyn Allocator))
                       (directory (slice u8))
                       (name (slice u8))
                       (contents (slice u8))] (-> bool)
@@ -36,7 +36,7 @@
     (Ok [written] true)
     (Err [failure] false)))
 
-(defn scaffold-step-slug [(allocator (ptr Allocator))
+(defn scaffold-step-slug [(allocator (dyn Allocator))
                           (step (slice u8))] (-> (slice u8))
   (let [(mut slug) (sb-new allocator)
         (mut at) 0
@@ -68,7 +68,7 @@
           (substr value 0 (- length 1))
           value))))
 
-(defn scaffold-worker-file [(allocator (ptr Allocator))
+(defn scaffold-worker-file [(allocator (dyn Allocator))
                             (number i64)
                             (slug (slice u8))] (-> (slice u8))
   (let [(mut filename) (sb-new allocator)]
@@ -80,7 +80,7 @@
     (sb-push-str! (mut filename) ".md")
     (sb-finish! (mut filename))))
 
-(defn scaffold-factory-with-steps [(allocator (ptr Allocator))
+(defn scaffold-factory-with-steps [(allocator (dyn Allocator))
                                    (directory (slice u8))
                                    (steps (ArrayList (slice u8)))] (-> FactoryScaffoldResult)
   (let [name (factory-directory-name directory)
@@ -155,7 +155,7 @@
                   (FactoryScaffolded directory)
                   (FactoryScaffoldFailed "could not write factory scaffold files"))))))
 
-(defn scaffold-factory [(allocator (ptr Allocator))
+(defn scaffold-factory [(allocator (dyn Allocator))
                         (directory (slice u8))] (-> FactoryScaffoldResult)
   (let [(mut steps) (al-new [(slice u8)] allocator)]
     (al-push! [(slice u8)] (mut steps) "worker")

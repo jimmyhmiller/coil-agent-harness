@@ -1,4 +1,5 @@
 (module harness-tui-app-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -25,11 +26,11 @@
 (deftest idle-composer-discovers-an-addressed-notification-run
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-tui-notification.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               service (alloc/stack RunService)
-               source (alloc/stack TuiNotificationSource)
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               service (primitive/alloc-stack RunService)
+               source (primitive/alloc-stack TuiNotificationSource)
                (mut command) (json-object allocator)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)

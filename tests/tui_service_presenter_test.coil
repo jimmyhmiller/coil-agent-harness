@@ -8,7 +8,7 @@
 (import "harness-tui-view" :use *)
 (import "harness-tui-view-layout" :use *)
 
-(defn service-test-text [(allocator (ptr Allocator))
+(defn service-test-text [(allocator (dyn Allocator))
                          (node ViewNode)] (-> (slice u8))
   (let [view (terminal-view node)
         (mut laid-out) (view-layout allocator view 80)]

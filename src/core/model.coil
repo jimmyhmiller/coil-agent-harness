@@ -1,4 +1,5 @@
 (module harness-model)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -97,9 +98,9 @@
   (ModelOk [(response ModelResponse)])
   (ModelErr [(failure ModelFailure)]))
 
-(defn model-response-clone-into [(target (ptr Allocator))
+(defn model-response-clone-into [(target (dyn Allocator))
                                  (source ModelResponse)] (-> ModelResponse)
-  (let [result (alloc/stack ModelResponse)
+  (let [result (primitive/alloc-stack ModelResponse)
         (mut calls) (al-new [ToolCall] target)
         source-calls (field source tool-calls)
         (mut at) 0
@@ -123,9 +124,9 @@
     (set! (.raw-output result) (json-clone target (.raw-output source)))
     (load result)))
 
-(defn model-failure-clone-into [(target (ptr Allocator))
+(defn model-failure-clone-into [(target (dyn Allocator))
                                 (source ModelFailure)] (-> ModelFailure)
-  (let [result (alloc/stack ModelFailure)]
+  (let [result (primitive/alloc-stack ModelFailure)]
     (set! (.kind result) (.kind source))
     (set! (.provider result) (json-copy-string target (.provider source)))
     (set! (.status-code result) (.status-code source))
@@ -133,7 +134,7 @@
     (set! (.retryable result) (.retryable source))
     (load result)))
 
-(defn model-result-clone-into [(target (ptr Allocator))
+(defn model-result-clone-into [(target (dyn Allocator))
                                (source ModelResult)] (-> ModelResult)
   (match source
     (ModelOk [response] (ModelOk (model-response-clone-into target response)))
@@ -150,7 +151,7 @@
    (cost-tier i64)])
 
 (defn provider-capabilities-for [(name (slice u8))] (-> ProviderCapabilities)
-  (let [capabilities (alloc/stack ProviderCapabilities)
+  (let [capabilities (primitive/alloc-stack ProviderCapabilities)
         codex (or (= name "codex") (= name "codex-app-server"))
         claude (or (= name "claude") (= name "claude-anthropic"))
         agent-sdk (= name "agent-sdk")]
@@ -176,7 +177,7 @@
   (execute-model [(self (ptr Self))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)))
 
 (defn message-role-name [(role MessageRole)] (-> (slice u8))

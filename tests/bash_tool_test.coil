@@ -1,4 +1,5 @@
 (module harness-bash-tool-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -11,10 +12,10 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-(defn bash-call [(allocator (ptr Allocator))
+(defn bash-call [(allocator (dyn Allocator))
                  (id (slice u8))
                  (command (slice u8))] (-> ToolCall)
-  (let [call (alloc/stack ToolCall)
+  (let [call (primitive/alloc-stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-object-put! (mut arguments) "command" (JsonString command))
     (set! (.id call) id)
@@ -25,9 +26,9 @@
 
 (deftest bash-captures-both-streams-and-exit-status
          (let [allocator (malloc-allocator)
-               tool (alloc/stack BashTool)
-               call (alloc/stack ToolCall)
-               context (alloc/stack ToolExecutionContext)]
+               tool (primitive/alloc-stack BashTool)
+               call (primitive/alloc-stack ToolCall)
+               context (primitive/alloc-stack ToolExecutionContext)]
            (store! (field tool cwd) ".")
            (store! call
                    (bash-call allocator
@@ -51,9 +52,9 @@
 
 (deftest bash-refuses-a-pre-cancelled-run
          (let [allocator (malloc-allocator)
-               tool (alloc/stack BashTool)
-               call (alloc/stack ToolCall)
-               context (alloc/stack ToolExecutionContext)
+               tool (primitive/alloc-stack BashTool)
+               call (primitive/alloc-stack ToolCall)
+               context (primitive/alloc-stack ToolExecutionContext)
                cancellation (cancellation-token-new allocator)]
            (store! (field tool cwd) ".")
            (store! call (bash-call allocator "bash-2" "printf 'should not run'"))
@@ -69,9 +70,9 @@
 
 (deftest bash-honors-an-optional-shorter-timeout
          (let [allocator (malloc-allocator)
-               tool (alloc/stack BashTool)
-               call (alloc/stack ToolCall)
-               context (alloc/stack ToolExecutionContext)]
+               tool (primitive/alloc-stack BashTool)
+               call (primitive/alloc-stack ToolCall)
+               context (primitive/alloc-stack ToolExecutionContext)]
            (store! (field tool cwd) ".")
            (store! call (bash-call allocator "bash-short-timeout" "sleep 1"))
            (let [(mut arguments) (load (field call arguments))]
@@ -101,9 +102,9 @@
 
 (deftest bash-spills-complete-large-output-before-returning-a-preview
          (let [allocator (malloc-allocator)
-               tool (alloc/stack BashTool)
-               call (alloc/stack ToolCall)
-               context (alloc/stack ToolExecutionContext)]
+               tool (primitive/alloc-stack BashTool)
+               call (primitive/alloc-stack ToolCall)
+               context (primitive/alloc-stack ToolExecutionContext)]
            (store! (field tool cwd) ".")
            (store! call
                    (bash-call allocator
@@ -135,9 +136,9 @@
 
 (deftest bash-keeps-binary-bytes-in-artifact-not-model-output
          (let [allocator (malloc-allocator)
-               tool (alloc/stack BashTool)
-               call (alloc/stack ToolCall)
-               context (alloc/stack ToolExecutionContext)]
+               tool (primitive/alloc-stack BashTool)
+               call (primitive/alloc-stack ToolCall)
+               context (primitive/alloc-stack ToolExecutionContext)]
            (store! (field tool cwd) ".")
            (store! call
                    (bash-call allocator

@@ -11,7 +11,7 @@
 (import "harness-tui-transcript" :use *)
 (import "provider-common" :use *)
 
-(defn tui-event [(allocator (ptr Allocator))
+(defn tui-event [(allocator (dyn Allocator))
                  (sequence i64)
                  (kind (slice u8))
                  (run-id (slice u8))

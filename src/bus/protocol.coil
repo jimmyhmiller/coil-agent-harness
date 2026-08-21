@@ -16,6 +16,7 @@
 ;; understanding payloads, so a relay can forward a message whose type it has
 ;; never seen -- and a payload can use a different codec than the envelope.
 (module harness-bus-protocol)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.slice" :use *)
@@ -115,7 +116,7 @@
                     (to Address)
                     (kind MessageKind)
                     (body (slice u8))] (-> Envelope)
-  (let [envelope (alloc/stack Envelope)]
+  (let [envelope (primitive/alloc-stack Envelope)]
     (set! (.version envelope) PROTOCOL_VERSION)
     (set! (.id envelope) id)
     (set! (.correlation envelope) (None [(slice u8)]))
@@ -131,7 +132,7 @@
                       (request (ptr Envelope))
                       (from Address)
                       (body (slice u8))] (-> Envelope)
-  (let [envelope (alloc/stack Envelope)]
+  (let [envelope (primitive/alloc-stack Envelope)]
     (set! envelope (envelope-new id from (.from request) (Reply) body))
     (set! (.correlation envelope) (Some (.id request)))
     (load envelope)))
@@ -150,11 +151,11 @@
 (deftrait Codec [Self]
   (codec-name [(self (ptr Self))] (-> (slice u8)))
   (codec-encode [(self (ptr Self))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (envelope (ptr Envelope))]
                 (-> (Result (slice u8) SerError)))
   (codec-decode [(self (ptr Self))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (source (slice u8))
                  (out (ptr Envelope))]
                 (-> (Result i64 DeError))))
@@ -165,12 +166,12 @@
 (impl Codec MessagePackCodec
   (codec-name [(self (ptr MessagePackCodec))] (-> (slice u8)) "msgpack")
   (codec-encode [(self (ptr MessagePackCodec))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (envelope (ptr Envelope))]
                 (-> (Result (slice u8) SerError))
                 (to-msgpack-bytes [Envelope] allocator (load envelope)))
   (codec-decode [(self (ptr MessagePackCodec))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (source (slice u8))
                  (out (ptr Envelope))]
                 (-> (Result i64 DeError))
@@ -184,12 +185,12 @@
 (impl Codec JsonCodec
   (codec-name [(self (ptr JsonCodec))] (-> (slice u8)) "json")
   (codec-encode [(self (ptr JsonCodec))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (envelope (ptr Envelope))]
                 (-> (Result (slice u8) SerError))
                 (to-json-str [Envelope] allocator (load envelope)))
   (codec-decode [(self (ptr JsonCodec))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (source (slice u8))
                  (out (ptr Envelope))]
                 (-> (Result i64 DeError))

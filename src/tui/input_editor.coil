@@ -1,4 +1,5 @@
 (module harness-tui-input-editor)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -50,7 +51,7 @@
 ;; tell you. Storing the match list too would give it a second chance to disagree
 ;; with the buffer.
 (defstruct InputEditor
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (bytes (ArrayList u8))
    (cursor i64)
    (history (ArrayList (slice u8)))
@@ -65,9 +66,9 @@
    ;; Optional bottom-row context owned by the caller (for example, model).
    (status (slice u8))])
 
-(defn input-editor-new-with-commands [(allocator (ptr Allocator))
+(defn input-editor-new-with-commands [(allocator (dyn Allocator))
                                       (commands (ptr CommandRegistry))] (-> InputEditor)
-  (let [editor (alloc/stack InputEditor)]
+  (let [editor (primitive/alloc-stack InputEditor)]
     (set! (.allocator editor) allocator)
     (set! (.bytes editor) (al-new [u8] allocator))
     (set! (.cursor editor) 0)
@@ -88,7 +89,7 @@
   (set! (.status editor) status)
   0)
 
-(defn input-editor-new [(allocator (ptr Allocator))] (-> InputEditor)
+(defn input-editor-new [(allocator (dyn Allocator))] (-> InputEditor)
   (input-editor-new-with-commands allocator (cast (ptr CommandRegistry) 0)))
 
 (defn input-editor-text [(editor (ptr InputEditor))] (-> (slice u8))
@@ -96,7 +97,7 @@
              (load (field (field editor bytes) data))
              (al-len [u8] (.bytes editor))))
 
-(defn input-copy [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+(defn input-copy [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)]
     (sb-push-str! (mut output) text)
     (sb-finish! (mut output))))

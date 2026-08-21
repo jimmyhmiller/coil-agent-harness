@@ -41,7 +41,7 @@
 ;; and to make complete byte-stream behavior injectable in contract tests.
 (deftrait StreamingHttpTransport [Self]
   (send-streaming-http [(self (ptr Self))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (request (ptr HttpRequest))
                         (response (mut HttpResponse))]
                        (-> i64)))
@@ -94,7 +94,7 @@
                   (set! i (+ (load i) 1)))))
     (load found)))
 
-(defn request-headers [(allocator (ptr Allocator))
+(defn request-headers [(allocator (dyn Allocator))
                        (lines (ptr (ArrayList (slice u8))))] (-> (slice client/Header))
   (let [(mut headers) (al-new [client/Header] allocator)
         (mut i) 0
@@ -105,7 +105,7 @@
               (let [line (al-get [(slice u8)] (load lines) (load i))
                     colon (header-colon line)]
                 (when (> colon 0)
-                  (let [header (alloc/stack client/Header)
+                  (let [header (primitive/alloc-stack client/Header)
                         value-start
                           (if (and (< (+ colon 1) (slice-len [u8] line))
                                    (= (cast i64 (slice-get [u8] line (+ colon 1))) 32))
@@ -119,10 +119,10 @@
     (al-into-slice [client/Header] (mut headers))))
 
 ;; Adapt the harness's existing POST shape to Coil's supported HTTP client.
-(defn http-post [(allocator (ptr Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
+(defn http-post [(allocator (dyn Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
   (let [headers (request-headers allocator (load (field request headers)))
-        native-request (alloc/stack client/Request)
-        result (alloc/stack HttpResponse)]
+        native-request (primitive/alloc-stack client/Request)
+        result (primitive/alloc-stack HttpResponse)]
     (set! (.transport-code result) 0)
     (set! (.status-code result) 0)
     (set! (.body result) "")
@@ -150,13 +150,13 @@
 ;; The retained body is still ours to build: the client hands bytes to the sink
 ;; and buffers nothing, so `capture-streaming-chunk` keeps the capped copy that
 ;; `HttpResponse.body` promises.
-(defn http-post-stream [(allocator (ptr Allocator))
+(defn http-post-stream [(allocator (dyn Allocator))
                         (request (ptr HttpRequest))] (-> HttpResponse)
   (let [headers (request-headers allocator (load (field request headers)))
-        native-request (alloc/stack client/Request)
-        capture (alloc/stack StreamingCapture)
-        sink (alloc/stack client/BodySink)
-        result (alloc/stack HttpResponse)]
+        native-request (primitive/alloc-stack client/Request)
+        capture (primitive/alloc-stack StreamingCapture)
+        sink (primitive/alloc-stack client/BodySink)
+        result (primitive/alloc-stack HttpResponse)]
     (set! (.transport-code result) 0)
     (set! (.status-code result) 0)
     (set! (.body result) "")
@@ -212,7 +212,7 @@
 
 (impl StreamingHttpTransport CurlStreamingHttpTransport
   (send-streaming-http [(self (ptr CurlStreamingHttpTransport))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (request (ptr HttpRequest))
                         (response (mut HttpResponse))]
                        (-> i64)
@@ -221,9 +221,9 @@
                          0)))
 
 (defn streaming-http-send [(transport (dyn StreamingHttpTransport))
-                           (allocator (ptr Allocator))
+                           (allocator (dyn Allocator))
                            (request (ptr HttpRequest))] (-> HttpResponse)
-  (let [response (alloc/stack HttpResponse)]
+  (let [response (primitive/alloc-stack HttpResponse)]
     (set! (.transport-code response) -1)
     (set! (.status-code response) 0)
     (set! (.body response) "")

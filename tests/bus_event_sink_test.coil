@@ -1,4 +1,5 @@
 (module harness-bus-event-sink-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
@@ -51,10 +52,10 @@
 
 (deftest both-sinks-receive-every-event
          (let [allocator (malloc-allocator)
-               durable (alloc/stack RecordingSink)
-               observers (alloc/stack RecordingSink)
-               tee (alloc/stack TeeEventSink)
-               event (alloc/stack Event)]
+               durable (primitive/alloc-stack RecordingSink)
+               observers (primitive/alloc-stack RecordingSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               event (primitive/alloc-stack Event)]
            (recording-init! durable 0)
            (recording-init! observers 0)
            (tee-event-sink-init! tee allocator durable observers)
@@ -67,10 +68,10 @@
 ;; An observer must never see an event the journal has not recorded yet.
 (deftest the-durable-sink-runs-before-observers
          (let [allocator (malloc-allocator)
-               durable (alloc/stack RecordingSink)
-               observers (alloc/stack RecordingSink)
-               tee (alloc/stack TeeEventSink)
-               event (alloc/stack Event)]
+               durable (primitive/alloc-stack RecordingSink)
+               observers (primitive/alloc-stack RecordingSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               event (primitive/alloc-stack Event)]
            (recording-init! durable 0)
            (recording-init! observers 0)
            ;; The observer reports how many times the durable sink had already
@@ -84,10 +85,10 @@
 ;; Losing a subscriber must not fail the run that was being watched.
 (deftest an-observer-failure-does-not-fail-the-event
          (let [allocator (malloc-allocator)
-               durable (alloc/stack RecordingSink)
-               observers (alloc/stack RecordingSink)
-               tee (alloc/stack TeeEventSink)
-               event (alloc/stack Event)]
+               durable (primitive/alloc-stack RecordingSink)
+               observers (primitive/alloc-stack RecordingSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               event (primitive/alloc-stack Event)]
            (recording-init! durable 0)
            (recording-init! observers -1)
            (tee-event-sink-init! tee allocator durable observers)
@@ -99,10 +100,10 @@
 ;; observer -- so it must be reported and the observer must not run.
 (deftest a-durable-failure-is-reported-and-skips-observers
          (let [allocator (malloc-allocator)
-               durable (alloc/stack RecordingSink)
-               observers (alloc/stack RecordingSink)
-               tee (alloc/stack TeeEventSink)
-               event (alloc/stack Event)]
+               durable (primitive/alloc-stack RecordingSink)
+               observers (primitive/alloc-stack RecordingSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               event (primitive/alloc-stack Event)]
            (recording-init! durable -1)
            (recording-init! observers 0)
            (tee-event-sink-init! tee allocator durable observers)

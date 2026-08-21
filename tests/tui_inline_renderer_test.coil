@@ -23,7 +23,7 @@
 
 ;; A symbolic trace makes cursor behavior reviewable without duplicating ANSI bytes
 ;; outside the terminal driver.
-(defn inline-test-trace [(allocator (ptr Allocator))
+(defn inline-test-trace [(allocator (dyn Allocator))
                          (operations (ptr (ArrayList TerminalOperation)))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut at) 0

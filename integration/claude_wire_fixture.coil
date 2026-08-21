@@ -2,8 +2,12 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.cancellation" :as cancellation)
+(import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
+(import "coil.subprocess" :as subprocess)
 (import "coil.thread" :use *)
+(import "coil.time" :as time)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
@@ -16,7 +20,7 @@
 (import "claude-agent" :use *)
 
 (defstruct ClaudeWireJob
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (request (ptr ModelRequest))
    (iterations i64)
    (completed (ptr i64))])
@@ -36,12 +40,40 @@
     (store! (load (field job completed)) (load at))
     (cast (ptr i8) 0)))
 
+;; Exercise subprocess argv/capture allocation plus child spawn/reap without auth,
+;; credentials, shell interpretation, output, or network access. The completed
+;; result is explicitly freed before request serialization starts.
+(defn perturb-subprocess [(allocator (dyn Allocator))] (-> bool)
+  (let [args (primitive/alloc-stack (array (slice u8) 1))
+        result (primitive/alloc-stack subprocess/RunResult)]
+    (store! (index args 0) "--")
+    (match (subprocess/run allocator
+                           result
+                           (subprocess/run-options
+                             "/bin/true"
+                             (slice-new [(slice u8)] (index args 0) 1)
+                             ""
+                             1
+                             1
+                             (None [time/Instant])
+                             (cast (ptr cancellation/Cancellation) 0)
+                             (zeroed time/Duration)))
+      (Err [failure] false)
+      (Ok [completed]
+          (let [succeeded
+                  (match (load (field completed status))
+                    (subprocess/Exited [code] (= code 0))
+                    (subprocess/Signaled [signal] false))]
+            (subprocess/run-result-free allocator completed)
+            succeeded)))))
+
 ;; Compile this fixture with optimization: the production crash occurred while an
-;; optimized worker serialized the Claude request tree containing native tools.
+;; optimized worker serialized the Claude request tree containing native tools,
+;; immediately after subprocess allocation and lifecycle activity.
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
-        registry (box owner ToolRegistry (tool-registry-new owner))
-        service (alloc/stack RunService)
+        registry (box! owner ToolRegistry (tool-registry-new owner))
+        service (primitive/alloc-stack RunService)
         (mut run) 0
         (mut status) 0]
     (register-filesystem-tools! registry owner ".")
@@ -53,14 +85,14 @@
               (let [run-domain (allocation-domain-open owner)
                     run-allocator (allocation-domain-allocator run-domain)
                     run-messages
-                      (box run-allocator
+                      (box! run-allocator
                            (ArrayList Message)
                            (al-new [Message] run-allocator))
-                    request (box run-allocator ModelRequest (zeroed ModelRequest))
-                    message (alloc/stack Message)
-                    completed (box run-allocator i64 0)
-                    job (box run-allocator ClaudeWireJob (zeroed ClaudeWireJob))
-                    worker (alloc/stack Thread)]
+                    request (box! run-allocator ModelRequest (zeroed ModelRequest))
+                    message (primitive/alloc-stack Message)
+                    completed (box! run-allocator i64 0)
+                    job (box! run-allocator ClaudeWireJob (zeroed ClaudeWireJob))
+                    worker (primitive/alloc-stack Thread)]
                 (store! (field message role) (UserRole))
                 (store! (field message content) "test")
                 (al-push! [Message] run-messages (load message))
@@ -72,13 +104,11 @@
                 (store! (field request tools) registry)
                 (store! (field request tool-choice) (ToolsAuto))
                 (store! (field request parallel-tool-calls) true)
-                (store! (field request reasoning) (ReasoningMedium))
+                (store! (field request reasoning) "medium")
                 (store! (field request max-output-tokens) 4096)
                 (store! (field (field request continuation) present) false)
                 (store! (field (field request continuation) previous-output) (JsonNull))
-                ;; Exercise the same subprocess/allocation perturbation that occurs
-                ;; immediately before Claude request serialization in production.
-                (claude-oauth-command run-allocator "token" true)
+                (when (not (perturb-subprocess run-allocator)) (store! status 4) 0)
                 (store! (field job allocator) run-allocator)
                 (store! (field job request) request)
                 (store! (field job iterations) 100)

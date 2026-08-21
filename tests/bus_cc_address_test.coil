@@ -6,6 +6,7 @@
 ;; set -- round-trips perfectly here and is silently degraded to opaque text on
 ;; the wire. The expected strings below come from the reference client.
 (module harness-bus-cc-address-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
@@ -83,8 +84,8 @@
 
 (deftest each-scheme-parses-to-its-target
          (let [allocator (malloc-allocator)
-               scheme (alloc/stack CcScheme)
-               target (alloc/stack (slice u8))]
+               scheme (primitive/alloc-stack CcScheme)
+               target (primitive/alloc-stack (slice u8))]
            (cc-parse-address allocator "uds:/tmp/cc-socks/7.sock" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcUds)))
            (assert (= (load target) "/tmp/cc-socks/7.sock"))
@@ -105,8 +106,8 @@
 ;; A human types a path; the protocol means a uds address.
 (deftest a-bare-absolute-path-is-a-socket-address
          (let [allocator (malloc-allocator)
-               scheme (alloc/stack CcScheme)
-               target (alloc/stack (slice u8))]
+               scheme (primitive/alloc-stack CcScheme)
+               target (primitive/alloc-stack (slice u8))]
            (cc-parse-address allocator "/tmp/cc-socks/7.sock" scheme target)
            (assert (cc-scheme-eq (load scheme) (CcUds)))
            (assert (= (load target) "/tmp/cc-socks/7.sock"))
@@ -118,8 +119,8 @@
 ;; connect to a file that does not exist.
 (deftest a-percent-escaped-path-parses-back-to-the-real-path
          (let [allocator (malloc-allocator)
-               scheme (alloc/stack CcScheme)
-               target (alloc/stack (slice u8))
+               scheme (primitive/alloc-stack CcScheme)
+               target (primitive/alloc-stack (slice u8))
                address (cc-uds-address allocator "/tmp/cc socks/7.sock")]
            (assert (= address "uds:/tmp/cc%20socks/7.sock"))
            (cc-parse-address allocator address scheme target)

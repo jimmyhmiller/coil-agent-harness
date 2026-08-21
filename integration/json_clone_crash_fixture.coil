@@ -2,6 +2,7 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
 (import "harness-allocation-domain" :use *)
 (import "harness-bash-tool" :use *)
@@ -18,8 +19,8 @@
   (let [owner (malloc-allocator)
         domain (allocation-domain-open owner)
         allocator (allocation-domain-allocator domain)
-        registry (box owner ToolRegistry (tool-registry-new owner))
-        service (alloc/stack RunService)
+        registry (box! owner ToolRegistry (tool-registry-new owner))
+        service (primitive/alloc-stack RunService)
         (mut round) 0]
     (store! service (zeroed RunService))
     (register-filesystem-tools! registry owner ".")

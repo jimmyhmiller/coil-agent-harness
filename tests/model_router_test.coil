@@ -7,7 +7,7 @@
 (import "harness-model-router" :use *)
 (import "provider-common" :use *)
 
-(defn routing-command [(allocator (ptr Allocator))
+(defn routing-command [(allocator (dyn Allocator))
                        (provider (slice u8))
                        (model (slice u8))
                        (profile (slice u8))] (-> Json)

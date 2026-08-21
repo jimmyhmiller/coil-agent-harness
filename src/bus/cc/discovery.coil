@@ -21,6 +21,7 @@
 ;; socket connect is the truth. This needs no heartbeat and no lease, and it
 ;; self-heals: a stale entry is discovered by whoever next tries to use it.
 (module harness-bus-cc-discovery)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -95,8 +96,8 @@
 ;; listener whose backlog is full on a platform that blocks rather than
 ;; returning EBUSY. That needs a non-blocking connect to fix properly, and it is
 ;; not worth a partial fix that only looks like one.
-(defn cc-probe-alive? [(allocator (ptr Allocator)) (socket-path (slice u8))] (-> bool)
-  (let [connection (alloc/stack socket/UnixConnection)]
+(defn cc-probe-alive? [(allocator (dyn Allocator)) (socket-path (slice u8))] (-> bool)
+  (let [connection (primitive/alloc-stack socket/UnixConnection)]
     (match (socket/unix-connect connection socket-path)
       (Ok [_]
           (do (socket/unix-connection-close! connection) true))
@@ -121,7 +122,7 @@
 ;; Overlay a session file's metadata onto a peer we already found by socket.
 ;; Returns false when the file is missing or unreadable, which leaves the peer
 ;; usable -- it just stays anonymous.
-(defn cc-apply-session-file! [(allocator (ptr Allocator))
+(defn cc-apply-session-file! [(allocator (dyn Allocator))
                               (path (slice u8))
                               (peer (ptr CcPeer))] (-> bool)
   (match (fs-read allocator path)
@@ -172,7 +173,7 @@
 ;; or a diagnostic listing wants; ordinary callers pass false and get only peers
 ;; they can actually reach.
 (defn cc-discover [(realm (ptr CcRealm))
-                   (allocator (ptr Allocator))
+                   (allocator (dyn Allocator))
                    (include-dead bool)] (-> (ArrayList CcPeer))
   (let [socket-dir (.socket-dir realm)
         sessions-dir (.sessions-dir realm)
@@ -186,7 +187,7 @@
               (let [name (al-get [(slice u8)] names (load i))
                     pid (cc-pid-from-socket-name name)]
                 (when (> pid 0)
-                  (let [peer (alloc/stack CcPeer)
+                  (let [peer (primitive/alloc-stack CcPeer)
                         socket-path (path-join allocator socket-dir name)]
                     (cc-peer-init! peer)
                     (store! (field peer socket-path) socket-path)
@@ -209,7 +210,7 @@
                 (set! i (+ (load i) 1)))))
     (load peers)))
 
-(defn session-file-name [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
+(defn session-file-name [(allocator (dyn Allocator)) (pid i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (cc-push-decimal! (mut buffer) pid)
     (sb-push-str! (mut buffer) ".json")
@@ -217,7 +218,7 @@
 
 ;; Read a whole file, or None. Wrapped because a missing session file is the
 ;; common case, not an exception.
-(defn fs-read [(allocator (ptr Allocator)) (path (slice u8))] (-> (Option (slice u8)))
+(defn fs-read [(allocator (dyn Allocator)) (path (slice u8))] (-> (Option (slice u8)))
   (match (fs/read-file allocator path)
     (Err [failure] (None [(slice u8)]))
     (Ok [contents] (Some contents))))
@@ -247,11 +248,11 @@
 ;; deliberate: reachability never depended on registration, so neither should
 ;; addressing. Returns an empty slice when nothing matches.
 (defn cc-resolve [(realm (ptr CcRealm))
-                  (allocator (ptr Allocator))
+                  (allocator (dyn Allocator))
                   (query (slice u8))] (-> (slice u8))
   (if (cc-address-local? query)
-      (let [scheme (alloc/stack CcScheme)
-            target (alloc/stack (slice u8))]
+      (let [scheme (primitive/alloc-stack CcScheme)
+            target (primitive/alloc-stack (slice u8))]
         (cc-parse-address allocator query scheme target)
         (load target))
       (let [(mut peers) (cc-discover realm allocator false)
@@ -272,7 +273,7 @@
 ;; Both conditions, not either: a live process that has not yet bound its socket
 ;; is starting up, and unlinking its entry would make a session that is about to
 ;; be reachable disappear from every roster. Returns the number reaped.
-(defn cc-reap-stale! [(realm (ptr CcRealm)) (allocator (ptr Allocator))] (-> i64)
+(defn cc-reap-stale! [(realm (ptr CcRealm)) (allocator (dyn Allocator))] (-> i64)
   (let [sessions-dir (.sessions-dir realm)
         socket-dir (.socket-dir realm)
         names (directory-entries-with-suffix allocator sessions-dir ".json")
@@ -308,7 +309,7 @@
           (sb-push-str! (mut renamed) ".sock")
           (cc-pid-from-socket-name (sb-str (load renamed)))))))
 
-(defn socket-file-name [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
+(defn socket-file-name [(allocator (dyn Allocator)) (pid i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (cc-push-decimal! (mut buffer) pid)
     (sb-push-str! (mut buffer) ".sock")

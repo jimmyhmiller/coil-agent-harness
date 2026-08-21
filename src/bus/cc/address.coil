@@ -72,7 +72,7 @@
 
 ;; Percent-encode every byte outside the safe set. Operates on bytes rather than
 ;; code points, which is what the reference client's UTF-8 expansion amounts to.
-(defn cc-encode-address [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+(defn cc-encode-address [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut i) 0
         n (slice-len [u8] text)]
@@ -92,7 +92,7 @@
 ;; rejected, matching the reference client's `safeDecode`: an address that fails
 ;; to decode is still a usable opaque string, and refusing it here would lose a
 ;; message the receiver would have accepted.
-(defn cc-decode-address [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+(defn cc-decode-address [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut i) 0
         n (slice-len [u8] text)]
@@ -133,7 +133,7 @@
 ;; Building and parsing
 ;; ---------------------------------------------------------------------------
 
-(defn cc-uds-address [(allocator (ptr Allocator)) (path (slice u8))] (-> (slice u8))
+(defn cc-uds-address [(allocator (dyn Allocator)) (path (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) "uds:")
     (sb-push-str! (mut buffer) (cc-encode-address allocator path))
@@ -141,7 +141,7 @@
 
 ;; Split an address into scheme and decoded target. `did:` keeps its prefix
 ;; because the whole string is the identifier, not a locator with a payload.
-(defn cc-parse-address [(allocator (ptr Allocator))
+(defn cc-parse-address [(allocator (dyn Allocator))
                         (address (slice u8))
                         (out-scheme (ptr CcScheme))
                         (out-target (ptr (slice u8)))] (-> i64)
@@ -172,7 +172,7 @@
 ;; Where the sockets live
 ;; ---------------------------------------------------------------------------
 
-(defn cc-env-or [(allocator (ptr Allocator))
+(defn cc-env-or [(allocator (dyn Allocator))
                  (name (slice u8))
                  (fallback (slice u8))] (-> (slice u8))
   (match (os/env-get allocator name)
@@ -190,7 +190,7 @@
 ;; directory as the sessions they talk to, because a `peer_message_status`
 ;; receipt whose `from` lives elsewhere is rejected as "outside our socket
 ;; namespace". Agreeing on this path is part of the protocol.
-(defn cc-socket-dir [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cc-socket-dir [(allocator (dyn Allocator))] (-> (slice u8))
   (let [base
           (cc-env-or allocator
                      "XDG_RUNTIME_DIR"
@@ -222,7 +222,7 @@
 ;; The socket path for a pid, with the reference client's length fallback. The
 ;; fallback exists because `sockaddr_un` cannot hold a longer path at all, so a
 ;; silent truncation would bind the wrong file.
-(defn cc-socket-path [(allocator (ptr Allocator)) (pid i64)] (-> (slice u8))
+(defn cc-socket-path [(allocator (dyn Allocator)) (pid i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) (cc-socket-dir allocator))
     (sb-push-byte! (mut buffer) (cast u8 47))
@@ -240,5 +240,5 @@
 ;; Our own address, for the `from` attribute of an outgoing envelope. A peer
 ;; that never listens can still send, but supplying a `from` it does not serve
 ;; would make replies vanish, so callers pass the path they actually bound.
-(defn cc-self-address [(allocator (ptr Allocator)) (socket-path (slice u8))] (-> (slice u8))
+(defn cc-self-address [(allocator (dyn Allocator)) (socket-path (slice u8))] (-> (slice u8))
   (cc-uds-address allocator socket-path))

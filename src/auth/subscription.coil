@@ -43,7 +43,7 @@
   (ClaudeCredentialsLoaded [(credentials ClaudeCredentials)])
   (ClaudeCredentialsFailed [(message (slice u8))]))
 
-(defn auth-env [(allocator (ptr Allocator))
+(defn auth-env [(allocator (dyn Allocator))
                 (name (slice u8))] (-> (slice u8))
   (match (os/env-get allocator name)
     (Err [failure] "")
@@ -52,35 +52,35 @@
           (None [] "")
           (Some [value] (os/owned-string-slice value))))))
 
-(defn auth-home [(allocator (ptr Allocator))] (-> (slice u8))
+(defn auth-home [(allocator (dyn Allocator))] (-> (slice u8))
   (auth-env allocator "HOME"))
 
-(defn auth-directory [(allocator (ptr Allocator))] (-> (slice u8))
+(defn auth-directory [(allocator (dyn Allocator))] (-> (slice u8))
   (let [override (auth-env allocator "HARNESS_AUTH_DIR")]
     (if (> (slice-len [u8] override) 0)
         override
         (path-join allocator (auth-home allocator) ".coil-agent-harness"))))
 
-(defn codex-harness-auth-path [(allocator (ptr Allocator))] (-> (slice u8))
+(defn codex-harness-auth-path [(allocator (dyn Allocator))] (-> (slice u8))
   (path-join allocator (auth-directory allocator) "codex-auth.json"))
 
-(defn codex-cli-auth-path [(allocator (ptr Allocator))] (-> (slice u8))
+(defn codex-cli-auth-path [(allocator (dyn Allocator))] (-> (slice u8))
   (let [override (auth-env allocator "CODEX_AUTH_FILE")]
     (if (> (slice-len [u8] override) 0)
         override
         (path-join allocator (path-join allocator (auth-home allocator) ".codex") "auth.json"))))
 
-(defn claude-auth-path [(allocator (ptr Allocator))] (-> (slice u8))
+(defn claude-auth-path [(allocator (dyn Allocator))] (-> (slice u8))
   (path-join allocator (auth-directory allocator) "auth.json"))
 
-(defn auth-read-json [(allocator (ptr Allocator)) (path (slice u8))] (-> Json)
+(defn auth-read-json [(allocator (dyn Allocator)) (path (slice u8))] (-> Json)
   (match (fs/read-file allocator path)
     (Err [failure] (JsonNull))
     (Ok [contents]
         (let [parsed (json-parse allocator contents)]
           (if (.ok parsed) (.value parsed) (JsonNull))))))
 
-(defn auth-write-secure-json [(allocator (ptr Allocator))
+(defn auth-write-secure-json [(allocator (dyn Allocator))
                               (path (slice u8))
                               (value Json)] (-> bool)
   (let [directory (auth-directory allocator)
@@ -93,8 +93,8 @@
                          384)
       (Err [failure] false)
       (Ok [opened]
-          (let [file (alloc/stack fs/File)
-                writer (alloc/stack io/Writer)]
+          (let [file (primitive/alloc-stack fs/File)
+                writer (primitive/alloc-stack io/Writer)]
             (set! file opened)
             (let [written
                     (match (io/write-all (fs/file-writer writer file)
@@ -115,14 +115,14 @@
                 (when (not moved) (path-remove allocator temporary) 0)
                 moved)))))))
 
-(defn auth-lock [(allocator (ptr Allocator)) (name (slice u8))] (-> (ptr fs/File))
+(defn auth-lock [(allocator (dyn Allocator)) (name (slice u8))] (-> (ptr fs/File))
   (let [directory (auth-directory allocator)
         path (path-join allocator directory name)]
     (directory-create-all allocator directory 448)
     (match (fs/file-open (str->cstr allocator path) (primitive/ior O_RDWR O_CREAT) 384)
       (Err [failure] (cast (ptr fs/File) 0))
       (Ok [opened]
-          (let [file (box allocator fs/File opened)]
+          (let [file (box! allocator fs/File opened)]
             (path-set-mode allocator path 384)
             (if (= (cast i64 (flock (cast i32 (fs/file-fd file)) AUTH-LOCK-EX)) 0)
                 file
@@ -135,12 +135,12 @@
     0)
   0)
 
-(defn auth-http-token [(allocator (ptr Allocator))
+(defn auth-http-token [(allocator (dyn Allocator))
                        (url (slice u8))
                        (body (slice u8))
                        (content-type (slice u8))] (-> Json)
-  (let [request (alloc/stack HttpRequest)
-        headers (box allocator (ArrayList (slice u8)) (al-new [(slice u8)] allocator))]
+  (let [request (primitive/alloc-stack HttpRequest)
+        headers (box! allocator (ArrayList (slice u8)) (al-new [(slice u8)] allocator))]
     (al-push! [(slice u8)] headers (concat-or-empty allocator "Content-Type: " content-type))
     (al-push! [(slice u8)] headers "Accept: application/json")
     (al-push! [(slice u8)] headers "User-Agent: coil-agent-harness/0.1")
@@ -160,7 +160,7 @@
             (if (.ok parsed) (.value parsed) (JsonNull)))
           (JsonNull)))))
 
-(defn auth-form-pair! [(allocator (ptr Allocator))
+(defn auth-form-pair! [(allocator (dyn Allocator))
                        (output (mut StrBuf))
                        (name (slice u8))
                        (value (slice u8))] (-> i64)
@@ -172,7 +172,7 @@
   (sb-push-str! (mut output) (oauth-url-encode allocator value))
   0)
 
-(defn codex-account-id [(allocator (ptr Allocator)) (tokens Json)] (-> (slice u8))
+(defn codex-account-id [(allocator (dyn Allocator)) (tokens Json)] (-> (slice u8))
   (match (json-string-at tokens "account_id")
     (Some [value] value)
     (None []
@@ -189,8 +189,8 @@
                       (Some [value] value)
                       (None [] ""))))))))
 
-(defn codex-from-tokens [(allocator (ptr Allocator)) (tokens Json)] (-> CodexCredentials)
-  (let [credentials (alloc/stack CodexCredentials)]
+(defn codex-from-tokens [(allocator (dyn Allocator)) (tokens Json)] (-> CodexCredentials)
+  (let [credentials (primitive/alloc-stack CodexCredentials)]
     (set! (.access-token credentials) (match (json-string-at tokens "access_token") (Some [value] value) (None [] "")))
     (set! (.refresh-token credentials)
           (match (json-string-at tokens "refresh_token") (Some [value] value) (None [] "")))
@@ -198,13 +198,13 @@
     (set! (.account-id credentials) (codex-account-id allocator tokens))
     (load credentials)))
 
-(defn codex-token-expiring? [(allocator (ptr Allocator))
+(defn codex-token-expiring? [(allocator (dyn Allocator))
                              (access-token (slice u8))] (-> bool)
   (let [claims (oauth-jwt-claims allocator access-token)
         expires-seconds (json-number-i64 (json-get claims "exp"))]
     (or (= expires-seconds 0) (<= (* expires-seconds 1000) (+ (now-ms) 300000)))))
 
-(defn codex-refresh-native-at [(allocator (ptr Allocator))
+(defn codex-refresh-native-at [(allocator (dyn Allocator))
                                (tokens Json)
                                (endpoint (slice u8))] (-> Json)
   (let [refresh
@@ -250,13 +250,13 @@
               0)
             (load response))))))
 
-(defn codex-refresh-native [(allocator (ptr Allocator)) (tokens Json)] (-> Json)
+(defn codex-refresh-native [(allocator (dyn Allocator)) (tokens Json)] (-> Json)
   (codex-refresh-native-at allocator tokens "https://auth.openai.com/oauth/token"))
 
-(defn codex-load-native [(allocator (ptr Allocator))] (-> CodexCredentialResult)
+(defn codex-load-native [(allocator (dyn Allocator))] (-> CodexCredentialResult)
   (let [environment (auth-env allocator "HARNESS_CODEX_ACCESS_TOKEN")]
     (if (> (slice-len [u8] environment) 0)
-        (let [credentials (alloc/stack CodexCredentials)]
+        (let [credentials (primitive/alloc-stack CodexCredentials)]
           (set! (.access-token credentials) environment)
           (set! (.refresh-token credentials) "")
           (set! (.id-token credentials) "")
@@ -296,7 +296,7 @@
             (auth-unlock lock)
             result)))))
 
-(defn codex-authorize-url [(allocator (ptr Allocator))
+(defn codex-authorize-url [(allocator (dyn Allocator))
                            (verifier (slice u8))
                            (state (slice u8))
                            (redirect (slice u8))] (-> (slice u8))
@@ -314,7 +314,7 @@
     (auth-form-pair! allocator (mut query) "originator" "coil-agent-harness")
     (concat-or-empty allocator "https://auth.openai.com/oauth/authorize?" (sb-finish! (mut query)))))
 
-(defn codex-code-form [(allocator (ptr Allocator))
+(defn codex-code-form [(allocator (dyn Allocator))
                        (code (slice u8))
                        (verifier (slice u8))
                        (redirect (slice u8))] (-> (slice u8))
@@ -326,7 +326,7 @@
     (auth-form-pair! allocator (mut form) "code_verifier" verifier)
     (sb-finish! (mut form))))
 
-(defn codex-login-native [(allocator (ptr Allocator))] (-> i64)
+(defn codex-login-native [(allocator (dyn Allocator))] (-> i64)
   (let [verifier (oauth-random-token allocator 48)
         state (oauth-random-token allocator 32)
         redirect "http://localhost:1455/auth/callback"
@@ -349,7 +349,7 @@
                         0
                         1)))))))))
 
-(defn codex-logout-native [(allocator (ptr Allocator))] (-> i64)
+(defn codex-logout-native [(allocator (dyn Allocator))] (-> i64)
   (let [lock (auth-lock allocator "codex-auth.lock")
         path (codex-harness-auth-path allocator)
         result
@@ -362,13 +362,13 @@
     result))
 
 (defn claude-from-json [(value Json)] (-> ClaudeCredentials)
-  (let [credentials (alloc/stack ClaudeCredentials)]
+  (let [credentials (primitive/alloc-stack ClaudeCredentials)]
     (set! (.access-token credentials) (match (json-string-at value "access") (Some [token] token) (None [] "")))
     (set! (.refresh-token credentials) (match (json-string-at value "refresh") (Some [token] token) (None [] "")))
     (set! (.expires-ms credentials) (json-number-i64 (json-get value "expires")))
     (load credentials)))
 
-(defn claude-token-document [(allocator (ptr Allocator))
+(defn claude-token-document [(allocator (dyn Allocator))
                              (response Json)] (-> Json)
   (let [(mut credential) (json-object allocator)
         (mut document) (json-object allocator)]
@@ -385,7 +385,7 @@
     (json-object-put! (mut document) "anthropic" (load credential))
     (load document)))
 
-(defn claude-refresh-native-at [(allocator (ptr Allocator))
+(defn claude-refresh-native-at [(allocator (dyn Allocator))
                                 (refresh-token (slice u8))
                                 (endpoint (slice u8))] (-> Json)
   (let [(mut body) (json-object allocator)]
@@ -407,20 +407,20 @@
         0)
       (load response))))
 
-(defn claude-refresh-native [(allocator (ptr Allocator))
+(defn claude-refresh-native [(allocator (dyn Allocator))
                              (refresh-token (slice u8))] (-> Json)
   (claude-refresh-native-at allocator
                             refresh-token
                             "https://platform.claude.com/v1/oauth/token"))
 
-(defn claude-load-native [(allocator (ptr Allocator))] (-> ClaudeCredentialResult)
+(defn claude-load-native [(allocator (dyn Allocator))] (-> ClaudeCredentialResult)
   (let [primary (auth-env allocator "ANTHROPIC_OAUTH_TOKEN")
         environment
           (if (> (slice-len [u8] primary) 0)
               primary
               (auth-env allocator "ANTHROPIC_AUTH_TOKEN"))]
     (if (> (slice-len [u8] environment) 0)
-        (let [credentials (alloc/stack ClaudeCredentials)]
+        (let [credentials (primitive/alloc-stack ClaudeCredentials)]
           (set! (.access-token credentials) environment)
           (set! (.refresh-token credentials) "")
           (set! (.expires-ms credentials) 0)
@@ -454,7 +454,7 @@
             (auth-unlock lock)
             result)))))
 
-(defn claude-authorize-url [(allocator (ptr Allocator))
+(defn claude-authorize-url [(allocator (dyn Allocator))
                             (verifier (slice u8))
                             (redirect (slice u8))] (-> (slice u8))
   (let [challenge (oauth-pkce-challenge allocator verifier)
@@ -472,7 +472,7 @@
     (auth-form-pair! allocator (mut query) "state" verifier)
     (concat-or-empty allocator "https://claude.ai/oauth/authorize?" (sb-finish! (mut query)))))
 
-(defn claude-code-body [(allocator (ptr Allocator))
+(defn claude-code-body [(allocator (dyn Allocator))
                         (code (slice u8))
                         (verifier (slice u8))
                         (redirect (slice u8))] (-> Json)
@@ -485,7 +485,7 @@
     (json-put-string! (mut body) "code_verifier" verifier)
     (load body)))
 
-(defn claude-login-native [(allocator (ptr Allocator))] (-> i64)
+(defn claude-login-native [(allocator (dyn Allocator))] (-> i64)
   (let [verifier (oauth-random-token allocator 48)
         redirect "http://localhost:53692/callback"
         url (claude-authorize-url allocator verifier redirect)]
@@ -506,7 +506,7 @@
                     0
                     1)))))))
 
-(defn claude-logout-native [(allocator (ptr Allocator))] (-> i64)
+(defn claude-logout-native [(allocator (dyn Allocator))] (-> i64)
   (let [lock (auth-lock allocator "auth.lock")
         path (claude-auth-path allocator)
         result

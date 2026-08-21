@@ -29,12 +29,12 @@
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-(defn write-empty! [(allocator (ptr Allocator)) (path (slice u8))] (-> bool)
+(defn write-empty! [(allocator (dyn Allocator)) (path (slice u8))] (-> bool)
   (match (fs/write-file allocator path "")
     (Err [failure] false)
     (Ok [_] true)))
 
-(defn scratch-dir [(allocator (ptr Allocator)) (name (slice u8))] (-> (slice u8))
+(defn scratch-dir [(allocator (dyn Allocator)) (name (slice u8))] (-> (slice u8))
   (path-join allocator "/tmp" name))
 
 (deftest a-created-directory-lists-the-files-written-into-it

@@ -5,7 +5,7 @@
 (import "harness-tui-run-watch" :use *)
 (import "provider-common" :use *)
 
-(defn run-watch-test-event [(allocator (ptr Allocator))
+(defn run-watch-test-event [(allocator (dyn Allocator))
                             (run-id (slice u8))
                             (kind (slice u8))] (-> Json)
   (let [(mut event) (json-object allocator)]

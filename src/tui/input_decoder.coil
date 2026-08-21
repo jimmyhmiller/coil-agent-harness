@@ -1,4 +1,5 @@
 (module harness-tui-input-decoder)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -14,13 +15,13 @@
   (InputPasteTooLarge []))
 
 (defstruct InputDecoder
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (escape (ArrayList u8))
    (paste (ArrayList u8))
    (pasting bool)])
 
-(defn input-decoder-new [(allocator (ptr Allocator))] (-> InputDecoder)
-  (let [decoder (alloc/stack InputDecoder)]
+(defn input-decoder-new [(allocator (dyn Allocator))] (-> InputDecoder)
+  (let [decoder (primitive/alloc-stack InputDecoder)]
     (set! (.allocator decoder) allocator)
     (set! (.escape decoder) (al-new [u8] allocator))
     (set! (.paste decoder) (al-new [u8] allocator))
@@ -214,7 +215,7 @@
         (= byte (cast u8 18)) (InputDecoded (InputReverseSearch))
         (= byte (cast u8 9)) (InputDecoded (InputComplete))
         (>= byte (cast u8 32))
-          (let [single (alloc/stack (array u8 1))]
+          (let [single (primitive/alloc-stack (array u8 1))]
             (store! (index single 0) byte)
             (InputDecoded (InputInsert (input-copy (load (field decoder allocator))
                                                    (slice-new [u8] (index single 0) 1)))))

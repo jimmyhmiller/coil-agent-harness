@@ -1,4 +1,5 @@
 (module harness-allocation-domain)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.atomic" :use *)
@@ -10,74 +11,86 @@
 (defstruct AllocationDomain
   [(region region/Region)
    (mutex sync/Mutex)
-   (allocator Allocator)
    (valid bool)])
 
 (defn allocation-domain-count-cell [] (-> (ptr i64))
-  (alloc/static i64))
+  (primitive/alloc-static i64))
 
-(defn allocation-domain-alloc [(context (ptr i8))
-                               (size i64)
-                               (alignment i64)] (-> (Option (ptr i8)))
-  (let [domain (cast (ptr AllocationDomain) context)]
-    (match (sync/mutex-lock! (field domain mutex))
-      (Err [failure] (None))
-      (Ok [locked]
-          (let [result
-                  (raw-alloc (region/region-allocator (field domain region))
-                             size
-                             alignment)]
-            (sync/mutex-unlock! (field domain mutex))
-            result)))))
+(defn allocation-domain-alloc [(domain (ptr AllocationDomain))
+                               (request (ref AllocRequest))] (-> (Option (ptr i8)))
+  (match (sync/mutex-lock! (field domain mutex))
+    (Err [failure] (None))
+    (Ok [locked]
+        (let [result
+                (raw-alloc (region/region-allocator (field domain region)) request)]
+          (sync/mutex-unlock! (field domain mutex))
+          result))))
 
-(defn allocation-domain-resize [(context (ptr i8))
+(defn allocation-domain-resize [(domain (ptr AllocationDomain))
                                 (pointer (ptr i8))
-                                (old-size i64)
-                                (new-size i64)
-                                (alignment i64)] (-> (Option (ptr i8)))
-  (let [domain (cast (ptr AllocationDomain) context)]
-    (match (sync/mutex-lock! (field domain mutex))
-      (Err [failure] (None))
-      (Ok [locked]
-          ;; Growable collections express their first allocation as
-          ;; resize(NULL, 0, size). Region's resize hook linearly searches its
-          ;; ownership list even for NULL, turning construction quadratic. Keep
-          ;; these as distinct return paths: merging Option(pointer) aggregates
-          ;; across this branch is currently miscompiled by LLVM -O3.
-          (if (= old-size 0)
-              (let [allocated
-                      (raw-alloc (region/region-allocator (field domain region))
-                                 new-size
-                                 alignment)]
-                (sync/mutex-unlock! (field domain mutex))
-                allocated)
-              (let [resized
-                      (raw-resize (region/region-allocator (field domain region))
-                                  pointer
-                                  old-size
-                                  new-size
-                                  alignment)]
-                (sync/mutex-unlock! (field domain mutex))
-                resized))))))
+                                (old (ref AllocRequest))
+                                (new (ref AllocRequest))] (-> bool)
+  (match (sync/mutex-lock! (field domain mutex))
+    (Err [failure] false)
+    (Ok [locked]
+        (let [resized
+                (raw-resize (region/region-allocator (field domain region))
+                            pointer
+                            old
+                            new)]
+          (sync/mutex-unlock! (field domain mutex))
+          resized))))
 
-(defn allocation-domain-free [(context (ptr i8))
+(defn allocation-domain-remap [(domain (ptr AllocationDomain))
+                               (pointer (ptr i8))
+                               (old (ref AllocRequest))
+                               (new (ref AllocRequest))] (-> (Option (ptr i8)))
+  (match (sync/mutex-lock! (field domain mutex))
+    (Err [failure] (None))
+    (Ok [locked]
+        (let [remapped
+                (raw-remap (region/region-allocator (field domain region))
+                           pointer
+                           old
+                           new)]
+          (sync/mutex-unlock! (field domain mutex))
+          remapped))))
+
+(defn allocation-domain-free [(domain (ptr AllocationDomain))
                               (pointer (ptr i8))
-                              (size i64)
-                              (alignment i64)] (-> i64)
-  (let [domain (cast (ptr AllocationDomain) context)]
-    (match (sync/mutex-lock! (field domain mutex))
-      (Err [failure] -1)
-      (Ok [locked]
-          (do
-            (raw-free (region/region-allocator (field domain region))
-                      pointer
-                      size
-                      alignment)
-            (sync/mutex-unlock! (field domain mutex))
-            0)))))
+                              (request (ref AllocRequest))] (-> i64)
+  (match (sync/mutex-lock! (field domain mutex))
+    (Err [failure] -1)
+    (Ok [locked]
+        (do
+          (raw-free (region/region-allocator (field domain region)) pointer request)
+          (sync/mutex-unlock! (field domain mutex))
+          0))))
 
-(defn allocation-domain-open [(owner (ptr Allocator))] (-> (ptr AllocationDomain))
-  (let [domain (box owner AllocationDomain (zeroed AllocationDomain))]
+(impl Allocator AllocationDomain
+  (allocate [(self (ptr AllocationDomain)) (request (ref AllocRequest))]
+            (-> (Option (ptr i8)))
+            (allocation-domain-alloc self request))
+  (resize [(self (ptr AllocationDomain))
+           (memory (ptr i8))
+           (old (ref AllocRequest))
+           (new (ref AllocRequest))]
+          (-> bool)
+          (allocation-domain-resize self memory old new))
+  (remap [(self (ptr AllocationDomain))
+          (memory (ptr i8))
+          (old (ref AllocRequest))
+          (new (ref AllocRequest))]
+         (-> (Option (ptr i8)))
+         (allocation-domain-remap self memory old new))
+  (deallocate [(self (ptr AllocationDomain))
+               (memory (ptr i8))
+               (request (ref AllocRequest))]
+              (-> i64)
+              (allocation-domain-free self memory request)))
+
+(defn allocation-domain-open [(owner (dyn Allocator))] (-> (ptr AllocationDomain))
+  (let [domain (box! owner AllocationDomain (zeroed AllocationDomain))]
     (region/region-init (field domain region) owner)
     (match (sync/mutex-init-with-allocator (field domain mutex) owner)
       (Err [failure]
@@ -86,10 +99,6 @@
              (set! (.valid domain) false)))
       (Ok [mutex]
           (do
-            (set! (.alloc (.allocator domain)) (fnptr-of allocation-domain-alloc))
-            (set! (.resize (.allocator domain)) (fnptr-of allocation-domain-resize))
-            (set! (.free (.allocator domain)) (fnptr-of allocation-domain-free))
-            (set! (.ctx (.allocator domain)) (cast (ptr i8) domain))
             (set! (.valid domain) true)
             (atomic-add (allocation-domain-count-cell) 1))))
     domain))
@@ -98,10 +107,10 @@
   (and (!= domain (cast (ptr AllocationDomain) 0))
        (.valid domain)))
 
-(defn allocation-domain-allocator [(domain (ptr AllocationDomain))] (-> (ptr Allocator))
-  (field domain allocator))
+(defn allocation-domain-allocator [(domain (ptr AllocationDomain))] (-> (dyn Allocator))
+  (primitive/make-dyn Allocator domain))
 
-(defn allocation-domain-close! [(owner (ptr Allocator))
+(defn allocation-domain-close! [(owner (dyn Allocator))
                                 (domain (ptr AllocationDomain))] (-> i64)
   (when (!= domain (cast (ptr AllocationDomain) 0))
     (when (load (field domain valid))

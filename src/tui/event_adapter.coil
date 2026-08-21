@@ -19,7 +19,7 @@
   (let [operation (presentation-json-string event "operation_id")]
     (if (> (slice-len [u8] operation) 0) operation fallback)))
 
-(defn presentation-payload-text [(allocator (ptr Allocator))
+(defn presentation-payload-text [(allocator (dyn Allocator))
                                  (payload Json)] (-> (slice u8))
   (match payload (JsonString [text] text) (_ (json-stringify allocator payload))))
 
@@ -33,7 +33,7 @@
                     (> (slice-len [u8] error) 0) error
                     :else fallback)))))
 
-(defn presentation-event-action [(allocator (ptr Allocator))
+(defn presentation-event-action [(allocator (dyn Allocator))
                                  (event Json)] (-> PresentationAction)
   (let [kind (presentation-json-string event "event")
         run-id (presentation-json-string event "run_id")

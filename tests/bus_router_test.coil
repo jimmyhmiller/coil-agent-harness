@@ -1,4 +1,5 @@
 (module harness-bus-router-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -12,7 +13,7 @@
                (from Address)
                (to Address)
                (out (mut (ArrayList i64)))] (-> i64)
-  (let [envelope (alloc/stack Envelope)]
+  (let [envelope (primitive/alloc-stack Envelope)]
     (set! envelope (envelope-new "m" from to (Instruction) "body"))
     (router-recipients router envelope (mut out))))
 
@@ -21,7 +22,7 @@
 
 (deftest a-direct-message-reaches-exactly-one-mailbox
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [alice (router-attach! router (Agent "alice"))
                  bob (router-attach! router (Agent "bob"))
@@ -32,7 +33,7 @@
 
 (deftest a-topic-reaches-subscribers-and-nobody-else
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [publisher (router-attach! router (Agent "runner"))
                  watcher (router-attach! router (Agent "tui"))
@@ -46,7 +47,7 @@
 ;; need to know how many are watching.
 (deftest a-topic-reaches-every-subscriber
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [runner (router-attach! router (Agent "runner"))
                  first-watcher (router-attach! router (Agent "tui-1"))
@@ -60,7 +61,7 @@
 ;; also subscribes to processes its own traffic.
 (deftest a-sender-never-receives-its-own-message
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [runner (router-attach! router (Agent "runner"))
                  (mut broadcast-out) (al-new [i64] allocator)
@@ -71,7 +72,7 @@
 
 (deftest a-broadcast-reaches-everyone-except-the-sender
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [sender (router-attach! router (Agent "a"))
                  second (router-attach! router (Agent "b"))
@@ -82,7 +83,7 @@
 ;; Service traffic is for the harness itself; participants must not see it.
 (deftest service-messages-reach-no-participant
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [agent (router-attach! router (Agent "a"))
                  (mut out) (al-new [i64] allocator)]
@@ -90,7 +91,7 @@
 
 (deftest unsubscribing-stops-delivery
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [watcher (router-attach! router (Agent "tui"))
                  (mut before) (al-new [i64] allocator)
@@ -103,7 +104,7 @@
 ;; A client that drops and re-subscribes must not receive doubles.
 (deftest subscribing-twice-does-not-duplicate-delivery
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [watcher (router-attach! router (Agent "tui"))
                  (mut out) (al-new [i64] allocator)]
@@ -113,7 +114,7 @@
 
 (deftest attaching-one-address-twice-reuses-its-mailbox
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [first (router-attach! router (Agent "a"))
                  again (router-attach! router (Agent "a"))]
@@ -122,7 +123,7 @@
 
 (deftest a-detached-participant-stops-receiving
          (let [allocator (malloc-allocator)
-               router (alloc/stack Router)]
+               router (primitive/alloc-stack Router)]
            (store! router (router-new allocator))
            (let [watcher (router-attach! router (Agent "tui"))
                  (mut before) (al-new [i64] allocator)

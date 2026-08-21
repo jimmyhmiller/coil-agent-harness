@@ -48,14 +48,14 @@
 
 ;; Sixteen bytes from the kernel. `read-file` is not usable here: it reads to
 ;; EOF, and /dev/urandom has none.
-(defn cc-random-bytes [(allocator (ptr Allocator))
+(defn cc-random-bytes [(allocator (dyn Allocator))
                        (buffer (ptr u8))
                        (length i64)] (-> bool)
   (match (fs/file-open (str->cstr allocator "/dev/urandom") CC_O_RDONLY 0)
     (Err [failure] false)
     (Ok [opened]
-        (let [file (alloc/stack fs/File)
-              reader (alloc/stack io/Reader)]
+        (let [file (primitive/alloc-stack fs/File)
+              reader (primitive/alloc-stack io/Reader)]
           (set! file opened)
           (let [source (fs/file-reader reader file)
                 outcome (io/read-exact source (cast (ptr i8) buffer) length)]
@@ -71,8 +71,8 @@
 ;; from the kernel rather than a seeded generator because two harness processes
 ;; started in the same millisecond must not mint colliding ids -- a receipt is
 ;; matched to an outstanding message by this value alone.
-(defn cc-new-message-id [(allocator (ptr Allocator))] (-> (slice u8))
-  (let [bytes (alloc/stack (array u8 16))
+(defn cc-new-message-id [(allocator (dyn Allocator))] (-> (slice u8))
+  (let [bytes (primitive/alloc-stack (array u8 16))
         raw (cast (ptr u8) bytes)]
     (if (not (cc-random-bytes allocator raw 16))
         ""
@@ -104,7 +104,7 @@
 ;; `session-id` empty means "do not pin", which is almost always what you want.
 ;; `from` empty means "no reply address", which is legal -- a one-shot sender
 ;; that never listens can still deliver.
-(defn cc-user-frame [(allocator (ptr Allocator))
+(defn cc-user-frame [(allocator (dyn Allocator))
                      (message-id (slice u8))
                      (content (slice u8))
                      (from (slice u8))
@@ -131,7 +131,7 @@
       0)
     (load frame)))
 
-(defn cc-control-frame [(allocator (ptr Allocator))
+(defn cc-control-frame [(allocator (dyn Allocator))
                         (message-id (slice u8))
                         (action (slice u8))] (-> Json)
   (let [(mut frame) (json-object allocator)]
@@ -141,7 +141,7 @@
     (json-object-put! (mut frame) "action" (JsonString action))
     (load frame)))
 
-(defn cc-rename-frame [(allocator (ptr Allocator))
+(defn cc-rename-frame [(allocator (dyn Allocator))
                        (message-id (slice u8))
                        (name (slice u8))] (-> Json)
   (let [(mut frame) (cc-control-frame allocator message-id "rename")]
@@ -151,7 +151,7 @@
 ;; A delivery receipt for a message someone sent us. The receiver accepts one
 ;; only if `from` lives in the same socket directory as its own socket, so the
 ;; address here must be our real bound path.
-(defn cc-status-frame [(allocator (ptr Allocator))
+(defn cc-status-frame [(allocator (dyn Allocator))
                        (message-id (slice u8))
                        (status (slice u8))
                        (reason (slice u8))
@@ -171,7 +171,7 @@
 ;; Serialize a frame as one NDJSON line, trailing newline included. Returns an
 ;; empty slice if the result would exceed what the receiver will read, so an
 ;; oversized frame fails here rather than as a dropped connection.
-(defn cc-frame-line [(allocator (ptr Allocator)) (frame Json)] (-> (slice u8))
+(defn cc-frame-line [(allocator (dyn Allocator)) (frame Json)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) (json-stringify allocator frame))
     (sb-push-byte! (mut buffer) (cast u8 10))
@@ -224,7 +224,7 @@
 ;; Parse one NDJSON line. Returns false when the line is not JSON or not an
 ;; object; an unrecognized `type` parses successfully as CcUnknownFrame, because
 ;; a future frame kind is not a protocol error and must not drop the connection.
-(defn cc-frame-parse [(allocator (ptr Allocator))
+(defn cc-frame-parse [(allocator (dyn Allocator))
                       (line (slice u8))
                       (out (ptr CcFrame))] (-> bool)
   (cc-frame-init! out)

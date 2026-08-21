@@ -31,11 +31,11 @@
 ;; `event-emitter-init!` -- copying a boxed trait object through a returned
 ;; aggregate crosses an ownership boundary.
 (defn tee-event-sink-init! [(sink (ptr TeeEventSink))
-                            (allocator (ptr Allocator))
+                            (allocator (dyn Allocator))
                             (durable (dyn EventSink))
                             (observers (dyn EventSink))] (-> i64)
-  (store! (field sink durable) (alloc/box allocator (dyn EventSink) durable))
-  (store! (field sink observers) (alloc/box allocator (dyn EventSink) observers))
+  (store! (field sink durable) (alloc/box! allocator (dyn EventSink) durable))
+  (store! (field sink observers) (alloc/box! allocator (dyn EventSink) observers))
   0)
 
 (impl EventSink TeeEventSink

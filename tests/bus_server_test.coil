@@ -9,6 +9,7 @@
 ;; coil.socket (SO_NOSIGPIPE on Darwin, MSG_NOSIGNAL on Linux), so a closed peer
 ;; now surfaces as an ordinary write error and the subscriber is retired.
 (module harness-bus-server-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -39,13 +40,13 @@
     (if (= (cast i64 c-path) 0) 0 (do (unlink c-path) 0))))
 
 ;; Connect a client and complete the Subscribe handshake from its side.
-(defn subscribe-client! [(allocator (ptr Allocator))
+(defn subscribe-client! [(allocator (dyn Allocator))
                          (client (ptr UnixTransport))
                          (codec (dyn Codec))
                          (topic (slice u8))] (-> bool)
   (if (!= (unix-transport-connect! client SOCKET_PATH) 0)
       false
-      (let [envelope (alloc/stack Envelope)]
+      (let [envelope (primitive/alloc-stack Envelope)]
         (set! envelope (envelope-new "sub" (Agent "client") (Service) (Subscribe) topic))
         (try (let [bytes (try-or! (codec-encode codec allocator envelope) false)]
                   (= (frame-write! client bytes) FRAME_OK))))))
@@ -53,13 +54,13 @@
 ;; Read one event name off a client socket, or "" if nothing arrives.
 (defn receive-event-kind [(transport (ptr UnixTransport))
                           (codec (dyn Codec))
-                          (allocator (ptr Allocator))] (-> (slice u8))
-  (let [out (alloc/stack (slice u8))
-        envelope (alloc/stack Envelope)]
+                          (allocator (dyn Allocator))] (-> (slice u8))
+  (let [out (primitive/alloc-stack (slice u8))
+        envelope (primitive/alloc-stack Envelope)]
     (if (!= (frame-read transport allocator out) FRAME_OK)
         ""
         (try (let [_ (try-or! (codec-decode codec allocator (load out) envelope) "")]
-                  (let [parsed (alloc/stack JsonParseResult)]
+                  (let [parsed (primitive/alloc-stack JsonParseResult)]
                     (store! parsed (json-parse allocator (load (field envelope body))))
                     (if (not (load (field parsed ok)))
                         ""
@@ -72,18 +73,18 @@
 
 (deftest the-server-fans-one-run-out-to-every-subscriber-of-it
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               codec (alloc/stack MessagePackCodec)
-               journal (alloc/stack EventJournal)
-               observer (alloc/stack BusObserverSink)
-               tee (alloc/stack TeeEventSink)
-               emitter (alloc/stack EventEmitter)
-               router (alloc/stack Router)
-               server (alloc/stack BusServer)
-               sequence (alloc/stack i64)
-               watcher-a (alloc/stack UnixTransport)
-               watcher-b (alloc/stack UnixTransport)
-               bystander (alloc/stack UnixTransport)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               codec (primitive/alloc-stack MessagePackCodec)
+               journal (primitive/alloc-stack EventJournal)
+               observer (primitive/alloc-stack BusObserverSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               router (primitive/alloc-stack Router)
+               server (primitive/alloc-stack BusServer)
+               sequence (primitive/alloc-stack i64)
+               watcher-a (primitive/alloc-stack UnixTransport)
+               watcher-b (primitive/alloc-stack UnixTransport)
+               bystander (primitive/alloc-stack UnixTransport)]
            (remove-path SOCKET_PATH)
            (remove-path JOURNAL_PATH)
            (match (socket/unix-listen listener SOCKET_PATH 8)
@@ -124,12 +125,12 @@
 ;; subscriber, and must not wedge the accept path.
 (deftest a-client-that-never-subscribes-is-refused
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               codec (alloc/stack MessagePackCodec)
-               observer (alloc/stack BusObserverSink)
-               router (alloc/stack Router)
-               server (alloc/stack BusServer)
-               silent (alloc/stack UnixTransport)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               codec (primitive/alloc-stack MessagePackCodec)
+               observer (primitive/alloc-stack BusObserverSink)
+               router (primitive/alloc-stack Router)
+               server (primitive/alloc-stack BusServer)
+               silent (primitive/alloc-stack UnixTransport)]
            (remove-path SOCKET_PATH)
            (match (socket/unix-listen listener SOCKET_PATH 8)
              (Err [_] (assert false))
@@ -152,13 +153,13 @@
 ;; rather than being guessed at.
 (deftest a-client-that-sends-the-wrong-kind-is-refused
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               codec (alloc/stack MessagePackCodec)
-               observer (alloc/stack BusObserverSink)
-               router (alloc/stack Router)
-               server (alloc/stack BusServer)
-               client (alloc/stack UnixTransport)
-               envelope (alloc/stack Envelope)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               codec (primitive/alloc-stack MessagePackCodec)
+               observer (primitive/alloc-stack BusObserverSink)
+               router (primitive/alloc-stack Router)
+               server (primitive/alloc-stack BusServer)
+               client (primitive/alloc-stack UnixTransport)
+               envelope (primitive/alloc-stack Envelope)]
            (remove-path SOCKET_PATH)
            (match (socket/unix-listen listener SOCKET_PATH 8)
              (Err [_] (assert false))
@@ -185,17 +186,17 @@
 ;; subscriber whose socket is gone.
 (deftest a-dead-subscriber-is-retired-and-the-others-keep-receiving
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               codec (alloc/stack MessagePackCodec)
-               journal (alloc/stack EventJournal)
-               observer (alloc/stack BusObserverSink)
-               tee (alloc/stack TeeEventSink)
-               emitter (alloc/stack EventEmitter)
-               router (alloc/stack Router)
-               server (alloc/stack BusServer)
-               sequence (alloc/stack i64)
-               doomed (alloc/stack UnixTransport)
-               survivor (alloc/stack UnixTransport)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               codec (primitive/alloc-stack MessagePackCodec)
+               journal (primitive/alloc-stack EventJournal)
+               observer (primitive/alloc-stack BusObserverSink)
+               tee (primitive/alloc-stack TeeEventSink)
+               emitter (primitive/alloc-stack EventEmitter)
+               router (primitive/alloc-stack Router)
+               server (primitive/alloc-stack BusServer)
+               sequence (primitive/alloc-stack i64)
+               doomed (primitive/alloc-stack UnixTransport)
+               survivor (primitive/alloc-stack UnixTransport)]
            (remove-path SOCKET_PATH)
            (remove-path JOURNAL_PATH)
            (match (socket/unix-listen listener SOCKET_PATH 8)
@@ -243,12 +244,12 @@
 ;; matters more than the return value.
 (deftest a-silent-client-is-refused-on-a-deadline-rather-than-waited-on
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               codec (alloc/stack MessagePackCodec)
-               observer (alloc/stack BusObserverSink)
-               router (alloc/stack Router)
-               server (alloc/stack BusServer)
-               silent (alloc/stack UnixTransport)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               codec (primitive/alloc-stack MessagePackCodec)
+               observer (primitive/alloc-stack BusObserverSink)
+               router (primitive/alloc-stack Router)
+               server (primitive/alloc-stack BusServer)
+               silent (primitive/alloc-stack UnixTransport)]
            (remove-path SOCKET_PATH)
            (match (socket/unix-listen listener SOCKET_PATH 8)
              (Err [_] (assert false))
@@ -271,11 +272,11 @@
 ;; nothing is pending -- the serve loop calls this on every tick.
 (deftest polling-an-idle-listener-reports-nothing-pending
          (let [allocator (malloc-allocator)
-               listener (alloc/stack socket/UnixListener)
-               codec (alloc/stack MessagePackCodec)
-               observer (alloc/stack BusObserverSink)
-               router (alloc/stack Router)
-               server (alloc/stack BusServer)]
+               listener (primitive/alloc-stack socket/UnixListener)
+               codec (primitive/alloc-stack MessagePackCodec)
+               observer (primitive/alloc-stack BusObserverSink)
+               router (primitive/alloc-stack Router)
+               server (primitive/alloc-stack BusServer)]
            (remove-path SOCKET_PATH)
            (match (socket/unix-listen listener SOCKET_PATH 8)
              (Err [_] (assert false))

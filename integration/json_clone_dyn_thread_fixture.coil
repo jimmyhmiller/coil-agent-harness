@@ -2,6 +2,7 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.thread" :use *)
 (import "harness-allocation-domain" :use *)
 (import "harness-bash-tool" :use *)
@@ -12,11 +13,11 @@
 (import "harness-tool" :use *)
 
 (defstruct CloneThreadJob
-  [(owner (ptr Allocator))
+  [(owner (dyn Allocator))
    (registry (ptr ToolRegistry))
    (emitter (ptr EventEmitter))])
 
-(defn build-copy-request [(allocator (ptr Allocator))
+(defn build-copy-request [(allocator (dyn Allocator))
                           (registry (ptr ToolRegistry))] (-> Json)
   (let [(mut params) (json-object allocator)
         (mut tools) (json-array allocator)
@@ -61,12 +62,12 @@
 
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
-        registry (box owner ToolRegistry (tool-registry-new owner))
-        sink (box owner NoopEventSink (zeroed NoopEventSink))
-        sequence (box owner i64 1)
-        emitter (box owner EventEmitter (event-emitter-new owner sink sequence))
-        job (box owner CloneThreadJob (zeroed CloneThreadJob))
-        thread (alloc/stack Thread)]
+        registry (box! owner ToolRegistry (tool-registry-new owner))
+        sink (box! owner NoopEventSink (zeroed NoopEventSink))
+        sequence (box! owner i64 1)
+        emitter (box! owner EventEmitter (event-emitter-new owner sink sequence))
+        job (box! owner CloneThreadJob (zeroed CloneThreadJob))
+        thread (primitive/alloc-stack Thread)]
     (register-filesystem-tools! registry owner ".")
     (register-bash-tool! registry owner ".")
     (store! (field job owner) owner)

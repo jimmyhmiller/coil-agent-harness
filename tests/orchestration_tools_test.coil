@@ -1,4 +1,5 @@
 (module harness-orchestration-tools-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.fs" :as fs)
@@ -29,29 +30,29 @@
                       (-> RunCancellationResult)
                       (RunCancellationAccepted))
   (describe-tools [(self (ptr OrchestrationController))
-                   (allocator (ptr Allocator))
+                   (allocator (dyn Allocator))
                    (out (ptr Json))]
                   (-> i64)
                   -1)
   (authorize-tool-call [(self (ptr OrchestrationController))
                         (command (ptr Json))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (out (ptr Json))]
                        (-> i64)
                        -1)
   (invoke-tool [(self (ptr OrchestrationController))
                 (command (ptr Json))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (out (ptr Json))]
                (-> i64)
                -1))
 
-(defn orchestration-call [(allocator (ptr Allocator))
+(defn orchestration-call [(allocator (dyn Allocator))
                           (id (slice u8))
                           (name (slice u8))
                           (run-id (slice u8))
                           (prompt (slice u8))] (-> ToolCall)
-  (let [call (alloc/stack ToolCall)
+  (let [call (primitive/alloc-stack ToolCall)
         (mut arguments) (json-object allocator)]
     (json-put-string! (mut arguments) "run_id" run-id)
     (when (not (= name "spawn_subagents"))
@@ -68,7 +69,7 @@
 (defn orchestration-succeeded? [(result ToolResult)] (-> bool)
   (match (.status result) (ToolSucceeded [] true) (_ false)))
 
-(defn batch-agent [(allocator (ptr Allocator))
+(defn batch-agent [(allocator (dyn Allocator))
                    (run-id (slice u8))
                    (provider (slice u8))
                    (model (slice u8))
@@ -106,12 +107,12 @@
 (deftest subagent-and-workflow-tools-use-durable-run-service
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-orchestration-tools.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack OrchestrationController)
-               service (alloc/stack RunService)
-               context (alloc/stack ToolExecutionContext)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack OrchestrationController)
+               service (primitive/alloc-stack RunService)
+               context (primitive/alloc-stack ToolExecutionContext)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -136,12 +137,12 @@
              (json-put-string! (mut parent) "prompt" "coordinate")
              (let [response (service-submit-run service (mut parent) "test")]
                (assert-eq (load (field response status)) 202)))
-           (let [spawn-tool (alloc/stack SpawnSubagentsTool)
-                 spawn-call (alloc/stack ToolCall)
+           (let [spawn-tool (primitive/alloc-stack SpawnSubagentsTool)
+                 spawn-call (primitive/alloc-stack ToolCall)
                  (mut arguments) (json-object allocator)
                  (mut agents) (json-array allocator)]
              (store! (field spawn-tool service) service)
-             (let [duplicate-call (alloc/stack ToolCall)
+             (let [duplicate-call (primitive/alloc-stack ToolCall)
                    (mut duplicate-arguments) (json-object allocator)
                    (mut duplicates) (json-array allocator)]
                (json-array-push! (mut duplicates)
@@ -172,7 +173,7 @@
              (let [result (execute-spawn-subagents spawn-tool spawn-call context allocator)]
                (assert (orchestration-succeeded? result))
                (assert-eq (json-array-length (json-get (load (field result output)) "handles")) 2)))
-           (let [async-tool (alloc/stack StartAsyncTool)
+           (let [async-tool (primitive/alloc-stack StartAsyncTool)
                  (mut async-call)
                    (orchestration-call allocator
                                        "async-bash-call"
@@ -192,9 +193,9 @@
              (let [result (execute-start-async async-tool (mut async-call) context allocator)]
                (assert (orchestration-succeeded? result))
                (assert (= (command-string (load (field result output)) "status") "queued"))))
-           (let [workflow-tool (alloc/stack CreateWorkflowNodeTool)
-                 root-call (alloc/stack ToolCall)
-                 child-call (alloc/stack ToolCall)]
+           (let [workflow-tool (primitive/alloc-stack CreateWorkflowNodeTool)
+                 root-call (primitive/alloc-stack ToolCall)
+                 child-call (primitive/alloc-stack ToolCall)]
              (store! (field workflow-tool service) service)
              (store! root-call
                      (orchestration-call allocator
@@ -223,7 +224,7 @@
                (json-object-put! (mut arguments) "depends_on" (load dependencies))
                (store! (field child-call arguments) (load arguments)))
              (assert (orchestration-succeeded? (execute-create-workflow-node workflow-tool child-call context allocator))))
-           (let [notify-tool (alloc/stack NotifyAsyncTool)
+           (let [notify-tool (primitive/alloc-stack NotifyAsyncTool)
                  (mut notify-call)
                    (orchestration-call allocator
                                        "notify-call"

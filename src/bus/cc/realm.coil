@@ -67,26 +67,26 @@
 ;; caps a socket path at 104 bytes on the BSD layout macOS inherits, and a path
 ;; under a home directory plus a realm name can exceed that. A short base keeps
 ;; the length fallback in `cc-socket-path` from ever being needed.
-(defn cc-realm-socket-base [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cc-realm-socket-base [(allocator (dyn Allocator))] (-> (slice u8))
   (cc-env-or allocator
              "XDG_RUNTIME_DIR"
              (cc-env-or allocator "TMPDIR" "/tmp")))
 
-(defn cc-realm-config-root [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cc-realm-config-root [(allocator (dyn Allocator))] (-> (slice u8))
   (cc-env-or allocator
              "HARNESS_CONFIG_DIR"
              (path-join allocator
                         (cc-env-or allocator "HOME" "/tmp")
                         ".coil-agent-harness")))
 
-(defn cc-realm-private-socket-dir [(allocator (ptr Allocator))
+(defn cc-realm-private-socket-dir [(allocator (dyn Allocator))
                                    (name (slice u8))] (-> (slice u8))
   (let [(mut leaf) (sb-new allocator)]
     (sb-push-str! (mut leaf) "harness-socks-")
     (sb-push-str! (mut leaf) name)
     (path-join allocator (cc-realm-socket-base allocator) (sb-str (load leaf)))))
 
-(defn cc-realm-private-sessions-dir [(allocator (ptr Allocator))
+(defn cc-realm-private-sessions-dir [(allocator (dyn Allocator))
                                      (name (slice u8))] (-> (slice u8))
   (path-join allocator
              (path-join allocator
@@ -95,7 +95,7 @@
              "sessions"))
 
 ;; The realm named by the environment, or the default.
-(defn cc-realm-configured-name [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cc-realm-configured-name [(allocator (dyn Allocator))] (-> (slice u8))
   (let [configured (cc-env-or allocator "HARNESS_BUS_REALM" "")]
     (if (= (slice-len [u8] configured) 0) CC_REALM_DEFAULT configured)))
 
@@ -104,7 +104,7 @@
 ;; An empty name means "whatever the environment says", so a caller with no
 ;; opinion and a caller that was given `--realm` go through one path.
 (defn cc-realm-init! [(realm (ptr CcRealm))
-                      (allocator (ptr Allocator))
+                      (allocator (dyn Allocator))
                       (name (slice u8))] (-> i64)
   (let [chosen
           (if (= (slice-len [u8] name) 0)
@@ -133,7 +133,7 @@
 ;; Claude Code's registry. `CLAUDE_CONFIG_DIR` relocates it, but every
 ;; participant must agree on the same value, so it is not an escape from writing
 ;; the file -- only from writing it under the home directory.
-(defn cc-claude-sessions-dir [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cc-claude-sessions-dir [(allocator (dyn Allocator))] (-> (slice u8))
   (let [configured (cc-env-or allocator "CLAUDE_CONFIG_DIR" "")]
     (if (> (slice-len [u8] configured) 0)
         (path-join allocator configured "sessions")
@@ -143,7 +143,7 @@
 
 ;; The socket path a participant with this pid would bind in this realm.
 (defn cc-realm-socket-path [(realm (ptr CcRealm))
-                            (allocator (ptr Allocator))
+                            (allocator (dyn Allocator))
                             (pid i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (cc-push-decimal! (mut buffer) pid)
@@ -158,7 +158,7 @@
 ;; boundary, and a world-listable registry would advertise every session on the
 ;; machine to any local process.
 (defn cc-realm-ensure-directories! [(realm (ptr CcRealm))
-                                    (allocator (ptr Allocator))] (-> i64)
+                                    (allocator (dyn Allocator))] (-> i64)
   (directory-create-all allocator (.socket-dir realm) 448)
   (directory-create-all allocator (.sessions-dir realm) 448)
   0)

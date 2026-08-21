@@ -1,4 +1,5 @@
 (module harness-factory-workflow)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -14,7 +15,7 @@
 ;; Routing is run state, not factory metadata. Worker files describe the available
 ;; topology; these fields record the current traversal through that live topology.
 (defstruct FactoryWorkflowState
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (lock (ptr i64))
    (definition-directory (slice u8))
    (current-worker (slice u8))
@@ -23,11 +24,11 @@
    (decision i64)  ;; 0 = continue, 1 = complete, 2 = goto
    (target (slice u8))])
 
-(defn factory-workflow-state-new [(allocator (ptr Allocator))
+(defn factory-workflow-state-new [(allocator (dyn Allocator))
                                   (definition-directory (slice u8))] (-> FactoryWorkflowState)
   (let [(mut state) (zeroed FactoryWorkflowState)]
     (set! (.allocator state) allocator)
-    (store! (field state lock) (box allocator i64 0))
+    (store! (field state lock) (box! allocator i64 0))
     (set! (.definition-directory state) definition-directory)
     (set! (.history state) (al-new [(slice u8)] allocator))
     (set! (.current-worker state) "")
@@ -68,7 +69,7 @@
 
 (defn execute-factory-workflow-topology [(self (ptr FactoryWorkflowTopologyTool))
                                          (call (ptr ToolCall))
-                                         (allocator (ptr Allocator))] (-> ToolResult)
+                                         (allocator (dyn Allocator))] (-> ToolResult)
   (let [state (load (field self state))]
     (match (load-factory-definition allocator (.definition-directory state))
       (FactoryInvalid [message] (factory-workflow-error call message))
@@ -109,7 +110,7 @@
                          (set! (.output result) (load output))
                          (load result)))))))
 
-(defn factory-workflow-worker-index [(allocator (ptr Allocator))
+(defn factory-workflow-worker-index [(allocator (dyn Allocator))
                                      (directory (slice u8))
                                      (target (slice u8))] (-> i64)
   (match (load-factory-definition allocator directory)
@@ -130,7 +131,7 @@
 
 (defn execute-factory-workflow-transition [(self (ptr FactoryWorkflowTransitionTool))
                                            (call (ptr ToolCall))
-                                           (allocator (ptr Allocator))] (-> ToolResult)
+                                           (allocator (dyn Allocator))] (-> ToolResult)
   (let [state (load (field self state))
         arguments (.arguments call)
         action
@@ -176,7 +177,7 @@
   (execute-tool [(self (ptr FactoryWorkflowTopologyTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-factory-workflow-topology self call allocator)))
 
@@ -184,11 +185,11 @@
   (execute-tool [(self (ptr FactoryWorkflowTransitionTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-factory-workflow-transition self call allocator)))
 
-(defn factory-workflow-empty-schema [(allocator (ptr Allocator))] (-> Json)
+(defn factory-workflow-empty-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut schema) (json-object allocator)
         (mut properties) (json-object allocator)]
     (json-put-string! (mut schema) "type" "object")
@@ -196,7 +197,7 @@
     (json-put-bool! (mut schema) "additionalProperties" false)
     (load schema)))
 
-(defn factory-workflow-transition-schema [(allocator (ptr Allocator))] (-> Json)
+(defn factory-workflow-transition-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut action) (json-object allocator)
         (mut action-enum) (json-array allocator)
         (mut target) (json-object allocator)
@@ -220,13 +221,13 @@
     (load schema)))
 
 (defn register-factory-workflow-tools! [(registry (mut ToolRegistry))
-                                        (allocator (ptr Allocator))
+                                        (allocator (dyn Allocator))
                                         (state (ptr FactoryWorkflowState))] (-> bool)
-  (let [topology-definition (alloc/stack ToolDefinition)
-        transition-definition (alloc/stack ToolDefinition)
-        topology (box allocator FactoryWorkflowTopologyTool (zeroed FactoryWorkflowTopologyTool))
+  (let [topology-definition (primitive/alloc-stack ToolDefinition)
+        transition-definition (primitive/alloc-stack ToolDefinition)
+        topology (box! allocator FactoryWorkflowTopologyTool (zeroed FactoryWorkflowTopologyTool))
         transition
-          (box allocator
+          (box! allocator
                FactoryWorkflowTransitionTool
                (zeroed FactoryWorkflowTransitionTool))]
     (set! (.state topology) state)

@@ -1,4 +1,5 @@
 (module harness-run-state-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -9,7 +10,7 @@
 (import "harness-run-state" :use *)
 (import "provider-common" :use *)
 
-(defn state-event [(allocator (ptr Allocator))
+(defn state-event [(allocator (dyn Allocator))
                    (sequence i64)
                    (kind (slice u8))
                    (run-id (slice u8))
@@ -30,7 +31,7 @@
 
 (deftest projects-terminal-and-interrupted-runs-after-restart
          (let [allocator (malloc-allocator)
-               events (alloc/stack (ArrayList Json))]
+               events (primitive/alloc-stack (ArrayList Json))]
            (store! events (al-new [Json] allocator))
            (al-push! [Json] (mut events) (state-event allocator 1 "run.created" "done" "create-1"))
            (al-push! [Json] (mut events) (state-event allocator 2 "run.started" "done" ""))
@@ -50,7 +51,7 @@
 
 (deftest rejects-invalid-durable-run-transitions
          (let [allocator (malloc-allocator)
-               events (alloc/stack (ArrayList Json))]
+               events (primitive/alloc-stack (ArrayList Json))]
            (store! events (al-new [Json] allocator))
            (al-push! [Json] (mut events) (state-event allocator 1 "run.created" "run-1" ""))
            (al-push! [Json] (mut events) (state-event allocator 2 "run.completed" "run-1" ""))

@@ -1,4 +1,5 @@
 (module harness-tui-tool-presenter)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
@@ -26,7 +27,7 @@
                               (subject (slice u8))
                               (summary (slice u8))
                               (preview (slice u8))] (-> ToolPresentation)
-  (let [presentation (alloc/stack ToolPresentation)]
+  (let [presentation (primitive/alloc-stack ToolPresentation)]
     (set! (.label presentation) label)
     (set! (.subject presentation) subject)
     (set! (.summary presentation) summary)
@@ -46,7 +47,7 @@
 ;; would render `a\nb` and `a b` identically, and those are different shell commands
 ;; -- the heading would be compact and wrong. A visible two-character escape keeps
 ;; the record on one row and still says exactly what was run.
-(defn tool-inline-text [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+(defn tool-inline-text [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] text)
         (mut out) (sb-new allocator)
         (mut i) 0]
@@ -63,7 +64,7 @@
 (const TOOL_PREVIEW_MAX_ROWS 4)
 (const TOOL_PREVIEW_MAX_CELLS 160)
 
-(defn tool-decimal [(allocator (ptr Allocator)) (value i64)] (-> (slice u8))
+(defn tool-decimal [(allocator (dyn Allocator)) (value i64)] (-> (slice u8))
   (if (<= value 0)
       "0"
       (let [(mut buffer) (sb-new allocator)
@@ -109,7 +110,7 @@
 ;; of what was left out. Newlines are KEPT here -- unlike the heading, a preview
 ;; is allowed to be several rows, and the flow layout turns each newline into a
 ;; row with the continuation indent, which is exactly the shape wanted.
-(defn tool-preview-lines [(allocator (ptr Allocator)) (text (slice u8))] (-> (slice u8))
+(defn tool-preview-lines [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] text)]
     (if (= n 0)
         ""
@@ -157,7 +158,7 @@
 ;; Bash shows what it printed. On failure stderr wins, because a non-zero exit
 ;; with empty stdout is the case where the interesting text is the one nobody
 ;; would otherwise see.
-(defn tool-bash-presentation [(allocator (ptr Allocator))
+(defn tool-bash-presentation [(allocator (dyn Allocator))
                               (arguments Json)
                               (result Json)] (-> ToolPresentation)
   (let [exit-code (tool-json-int result "exit_code")
@@ -182,7 +183,7 @@
                             summary
                             (tool-preview-lines allocator source))))
 
-(defn tool-file-presentation [(allocator (ptr Allocator))
+(defn tool-file-presentation [(allocator (dyn Allocator))
                               (label (slice u8))
                               (arguments Json)
                               (result Json)
@@ -194,7 +195,7 @@
                           ""))
 
 ;; Tool-specific extraction stays outside both the event adapter and layout engine.
-(defn present-tool [(allocator (ptr Allocator))
+(defn present-tool [(allocator (dyn Allocator))
                     (name (slice u8))
                     (arguments Json)
                     (result Json)] (-> ToolPresentation)

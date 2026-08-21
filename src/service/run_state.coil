@@ -1,4 +1,5 @@
 (module harness-run-state)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -123,7 +124,7 @@
 ;; Rebuild one run from immutable journal events without assuming a process boundary.
 (defn project-run [(events (ref (ArrayList Json)))
                    (run-id (slice u8))] (-> DurableRunView)
-  (let [view (alloc/stack DurableRunView)
+  (let [view (primitive/alloc-stack DurableRunView)
         (mut i) 0
         n (al-len [Json] (load events))]
     (set! (.valid view) true)
@@ -173,7 +174,7 @@
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-(defn run-view-json [(allocator (ptr Allocator))
+(defn run-view-json [(allocator (dyn Allocator))
                      (view (ref DurableRunView))] (-> Json)
   (let [(mut result) (json-object allocator)]
     (json-put-bool! (mut result) "valid" (.valid view))

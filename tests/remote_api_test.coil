@@ -1,4 +1,5 @@
 (module harness-remote-api-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -34,32 +35,32 @@
                       (-> RunCancellationResult)
                       (RunCancellationAccepted))
   (describe-tools [(self (ptr RemoteFakeController))
-                   (allocator (ptr Allocator))
+                   (allocator (dyn Allocator))
                    (out (ptr Json))]
                   (-> i64)
                   -1)
   (authorize-tool-call [(self (ptr RemoteFakeController))
                         (command (ptr Json))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (out (ptr Json))]
                        (-> i64)
                        -1)
   (invoke-tool [(self (ptr RemoteFakeController))
                 (command (ptr Json))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (out (ptr Json))]
                (-> i64)
                -1))
 
 (defstruct RemoteServerJob
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (listener (ptr HttpListener))
    (service (ptr RunService))
    (result (ptr i64))])
 
 (defn remote-server-thread [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr RemoteServerJob) opaque)
-        auth (alloc/stack ServiceAuth)]
+        auth (primitive/alloc-stack ServiceAuth)]
     (set! (.operator-token auth) "test-token")
     (set! (.observer-token auth) "observer-token")
     (set! (load (field job result))
@@ -70,7 +71,7 @@
     (cast (ptr i8) 0)))
 
 (defstruct RemoteShutdownServerJob
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (listener (ptr HttpListener))
    (service (ptr RunService))
    (shutdown (ptr ShutdownSignal))
@@ -78,7 +79,7 @@
 
 (defn remote-shutdown-server-thread [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr RemoteShutdownServerJob) opaque)
-        auth (alloc/stack ServiceAuth)]
+        auth (primitive/alloc-stack ServiceAuth)]
     (set! (.operator-token auth) "secret-token")
     (set! (.observer-token auth) "")
     (set! (load (field job result))
@@ -89,19 +90,19 @@
                                             (load (field job shutdown))))
     (cast (ptr i8) 0)))
 
-(defn remote-test-url [(allocator (ptr Allocator)) (port i64)] (-> (slice u8))
+(defn remote-test-url [(allocator (dyn Allocator)) (port i64)] (-> (slice u8))
   (let [number (json-stringify allocator (json-integer allocator port))
         prefix (concat-or-empty allocator "http://127.0.0.1:" number)]
     (concat-or-empty allocator prefix "/v1/runs")))
 
-(defn remote-create-request [(allocator (ptr Allocator))
+(defn remote-create-request [(allocator (dyn Allocator))
                              (port i64)
                              (token (slice u8))] (-> HttpResponse)
   (let [headers
-          (box allocator
+          (box! allocator
                (ArrayList (slice u8))
                (al-new [(slice u8)] allocator))
-        request (alloc/stack HttpRequest)]
+        request (primitive/alloc-stack HttpRequest)]
     (al-push! [(slice u8)] headers "Content-Type: application/json")
     (when (> (slice-len [u8] token) 0)
       (al-push! [(slice u8)]
@@ -121,18 +122,18 @@
 (deftest accepts-a-versioned-command-over-a-real-http-socket
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-remote-api.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack RemoteFakeController)
-               service (alloc/stack RunService)
-               listener (alloc/stack HttpListener)
-               server-result (box allocator i64 -1)
-               server-job (alloc/stack RemoteServerJob)
-               shutdown-job (alloc/stack RemoteShutdownServerJob)
-               shutdown (alloc/stack ShutdownSignal)
-               server-thread (alloc/stack Thread)]
-           (let [auth-check (alloc/stack ServiceAuth)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack RemoteFakeController)
+               service (primitive/alloc-stack RunService)
+               listener (primitive/alloc-stack HttpListener)
+               server-result (box! allocator i64 -1)
+               server-job (primitive/alloc-stack RemoteServerJob)
+               shutdown-job (primitive/alloc-stack RemoteShutdownServerJob)
+               shutdown (primitive/alloc-stack ShutdownSignal)
+               server-thread (primitive/alloc-stack Thread)]
+           (let [auth-check (primitive/alloc-stack ServiceAuth)]
              (store! (field auth-check operator-token) "test-token")
              (store! (field auth-check observer-token) "observer-token")
              (let [principal
@@ -226,7 +227,7 @@
                                             (fnptr-of remote-shutdown-server-thread)
                                             (cast (ptr i8) shutdown-job)))
                         0)
-             (let [partial-client (alloc/stack socket/TcpConnection)]
+             (let [partial-client (primitive/alloc-stack socket/TcpConnection)]
                (assert (match (socket/tcp-connect allocator
                                                   partial-client
                                                   "127.0.0.1"
@@ -245,7 +246,7 @@
                (socket/tcp-connection-close! partial-client))
              (shutdown-signal-close! shutdown)
              (http-listener-close! listener)
-             (let [reopened (alloc/stack HttpListener)]
+             (let [reopened (primitive/alloc-stack HttpListener)]
                (match (http-listener-open allocator
                                           (load (field listener port)))
                  (ListenerOpenFailed [message] (assert false))

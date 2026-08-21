@@ -1,4 +1,5 @@
 (module harness-tool-executor)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -27,7 +28,7 @@
 (defstruct ToolExecutionBatch [(results (ArrayList ToolResult))])
 
 (defstruct ToolJob
-  [(run-allocator (ptr Allocator))
+  [(run-allocator (dyn Allocator))
    (run-id (slice u8))
    (parent-operation-id (slice u8))
    (provider (slice u8))
@@ -78,7 +79,7 @@
 ;; The proposal is the authoritative immutable description of a tool call. Later
 ;; lifecycle events reference the same operation ID and do not need to duplicate or
 ;; reconstruct these facts.
-(defn tool-proposal-payload [(allocator (ptr Allocator))
+(defn tool-proposal-payload [(allocator (dyn Allocator))
                              (call (ref ToolCall))] (-> Json)
   (let [(mut payload) (json-object allocator)]
     (json-object-put! (mut payload) "name" (JsonString (.name call)))
@@ -87,7 +88,7 @@
 
 (defn tool-job-run [(opaque (ptr i8))] (-> (ptr i8))
   (let [job (cast (ptr ToolJob) opaque)
-        call-region (alloc/stack region/Region)
+        call-region (primitive/alloc-stack region/Region)
         call (field job call)
         definition (field job definition)
         result-slot
@@ -166,7 +167,7 @@
 ;; retain input order even though completion events reflect actual completion order.
 ;; Each handler receives a thread-confined child region. Only the deeply promoted
 ;; ToolResult survives in the synchronized run allocator after the worker joins.
-(defn execute-tools-parallel [(allocator (ptr Allocator)) (request (ptr ToolExecutionRequest))] (-> ToolExecutionBatch)
+(defn execute-tools-parallel [(allocator (dyn Allocator)) (request (ptr ToolExecutionRequest))] (-> ToolExecutionBatch)
   (let [(mut results) (al-new [ToolResult] allocator)
         (mut jobs) (al-new [ToolJob] allocator)
         calls (load (field request calls))
@@ -222,7 +223,7 @@
                                             (.model request)
                                             call
                                             (JsonString "tool arguments do not satisfy input schema")))
-                              (let [job (alloc/stack ToolJob)]
+                              (let [job (primitive/alloc-stack ToolJob)]
                                 (set! (.run-allocator job) allocator)
                                 (set! (.run-id job) (.run-id request))
                                 (set! (.parent-operation-id job) (.parent-operation-id request))
@@ -311,6 +312,6 @@
                               (set! j (+ (load j) 1)))))
                   (al-free! [ActiveThread] (mut active))
                   (set! start (+ (load start) batch-size))))))
-    (let [batch (alloc/stack ToolExecutionBatch)]
+    (let [batch (primitive/alloc-stack ToolExecutionBatch)]
       (set! (.results batch) (load results))
       (load batch))))

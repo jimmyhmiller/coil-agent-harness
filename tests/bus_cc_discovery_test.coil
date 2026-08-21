@@ -12,6 +12,7 @@
 ;; also what makes the realm isolation tests meaningful: they resolve their
 ;; directories the way a real process would, rather than being handed them.
 (module harness-bus-cc-discovery-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -33,7 +34,7 @@
 ;; Point every directory lookup at scratch space. XDG_RUNTIME_DIR is cleared
 ;; because it wins over both CLAUDE_CODE_TMPDIR and TMPDIR, so leaving it set on
 ;; a Linux box would silently test the wrong directories.
-(defn redirect-environment! [(allocator (ptr Allocator))] (-> i64)
+(defn redirect-environment! [(allocator (dyn Allocator))] (-> i64)
   (os/env-unset allocator "XDG_RUNTIME_DIR")
   (os/env-unset allocator "CLAUDE_CODE_MESSAGING_SOCKET")
   (os/env-unset allocator "HARNESS_BUS_SOCKET")
@@ -45,13 +46,13 @@
   0)
 
 (defn realm-for [(realm (ptr CcRealm))
-                 (allocator (ptr Allocator))
+                 (allocator (dyn Allocator))
                  (name (slice u8))] (-> i64)
   (cc-realm-init! realm allocator name)
   (cc-realm-ensure-directories! realm allocator)
   0)
 
-(defn clear-directory! [(allocator (ptr Allocator)) (path (slice u8))] (-> i64)
+(defn clear-directory! [(allocator (dyn Allocator)) (path (slice u8))] (-> i64)
   (let [names (directory-entries allocator path)
         (mut i) 0]
     (loop (if (>= (load i) (al-len [(slice u8)] names))
@@ -66,18 +67,18 @@
 
 ;; Leftovers from an earlier run look exactly like stale peers, which is a state
 ;; some of these tests assert the absence of.
-(defn reset-realm! [(realm (ptr CcRealm)) (allocator (ptr Allocator))] (-> i64)
+(defn reset-realm! [(realm (ptr CcRealm)) (allocator (dyn Allocator))] (-> i64)
   (clear-directory! allocator (.socket-dir realm))
   (clear-directory! allocator (.sessions-dir realm))
   0)
 
 (defn realm-socket-path [(realm (ptr CcRealm))
-                         (allocator (ptr Allocator))
+                         (allocator (dyn Allocator))
                          (name (slice u8))] (-> (slice u8))
   (path-join allocator (.socket-dir realm) name))
 
 (defn realm-session-path [(realm (ptr CcRealm))
-                          (allocator (ptr Allocator))
+                          (allocator (dyn Allocator))
                           (name (slice u8))] (-> (slice u8))
   (path-join allocator (.sessions-dir realm) name))
 
@@ -91,12 +92,12 @@
 ;; Bind then close, leaving the socket file behind with nothing serving it --
 ;; exactly what a SIGKILLed session leaves in the directory.
 (defn leave-stale-socket! [(path (slice u8))] (-> bool)
-  (let [listener (alloc/stack socket/UnixListener)]
+  (let [listener (primitive/alloc-stack socket/UnixListener)]
     (if (not (listen-at! listener path))
         false
         (do (socket/unix-listener-close! listener) true))))
 
-(defn write-file! [(allocator (ptr Allocator))
+(defn write-file! [(allocator (dyn Allocator))
                    (path (slice u8))
                    (contents (slice u8))] (-> bool)
   (match (fs/write-file allocator path contents)
@@ -128,10 +129,10 @@
 ;; A dead socket file with a session file: the stale entry a probe must reject.
 (deftest discovery-reports-live-sockets-and-rejects-a-stale-one
          (let [allocator (malloc-allocator)
-               realm (alloc/stack CcRealm)
-               named (alloc/stack socket/UnixListener)
-               anonymous (alloc/stack socket/UnixListener)
-               peer (alloc/stack CcPeer)]
+               realm (primitive/alloc-stack CcRealm)
+               named (primitive/alloc-stack socket/UnixListener)
+               anonymous (primitive/alloc-stack socket/UnixListener)
+               peer (primitive/alloc-stack CcPeer)]
            (redirect-environment! allocator)
            (realm-for realm allocator "claude-code")
            (reset-realm! realm allocator)
@@ -182,8 +183,8 @@
 
 (deftest a-peer-resolves-by-name-pid-session-id-and-prefix
          (let [allocator (malloc-allocator)
-               realm (alloc/stack CcRealm)
-               listener (alloc/stack socket/UnixListener)]
+               realm (primitive/alloc-stack CcRealm)
+               listener (primitive/alloc-stack socket/UnixListener)]
            (redirect-environment! allocator)
            (realm-for realm allocator "claude-code")
            (reset-realm! realm allocator)
@@ -204,7 +205,7 @@
 ;; for a peer that has no entry in it, and in any realm.
 (deftest a-raw-address-resolves-without-the-roster
          (let [allocator (malloc-allocator)
-               realm (alloc/stack CcRealm)]
+               realm (primitive/alloc-stack CcRealm)]
            (redirect-environment! allocator)
            (realm-for realm allocator "claude-code")
            (reset-realm! realm allocator)
@@ -228,7 +229,7 @@
 ;; erase a session that is about to become reachable.
 (deftest reaping-spares-an-entry-whose-process-is-still-alive
          (let [allocator (malloc-allocator)
-               realm (alloc/stack CcRealm)
+               realm (primitive/alloc-stack CcRealm)
                self (os/getpid)
                (mut buffer) (sb-new allocator)]
            (redirect-environment! allocator)
@@ -253,7 +254,7 @@
 
 (deftest an-empty-socket-directory-discovers-nothing
          (let [allocator (malloc-allocator)
-               realm (alloc/stack CcRealm)]
+               realm (primitive/alloc-stack CcRealm)]
            (redirect-environment! allocator)
            (realm-for realm allocator "claude-code")
            (reset-realm! realm allocator)
@@ -272,11 +273,11 @@
 ;; were shared or a lookup fell back to a default.
 (deftest a-private-realm-and-claude-code-cannot-see-each-other
          (let [allocator (malloc-allocator)
-               shared (alloc/stack CcRealm)
-               private (alloc/stack CcRealm)
-               shared-listener (alloc/stack socket/UnixListener)
-               private-listener (alloc/stack socket/UnixListener)
-               peer (alloc/stack CcPeer)]
+               shared (primitive/alloc-stack CcRealm)
+               private (primitive/alloc-stack CcRealm)
+               shared-listener (primitive/alloc-stack socket/UnixListener)
+               private-listener (primitive/alloc-stack socket/UnixListener)
+               peer (primitive/alloc-stack CcPeer)]
            (redirect-environment! allocator)
            (realm-for shared allocator "claude-code")
            (realm-for private allocator "lab")
@@ -316,9 +317,9 @@
 
 (deftest two-private-realms-cannot-see-each-other
          (let [allocator (malloc-allocator)
-               left (alloc/stack CcRealm)
-               right (alloc/stack CcRealm)
-               left-listener (alloc/stack socket/UnixListener)]
+               left (primitive/alloc-stack CcRealm)
+               right (primitive/alloc-stack CcRealm)
+               left-listener (primitive/alloc-stack socket/UnixListener)]
            (redirect-environment! allocator)
            (realm-for left allocator "left")
            (realm-for right allocator "right")
@@ -335,8 +336,8 @@
 ;; must be no configuration that silently merges the two.
 (deftest a-realm-name-decides-its-directories
          (let [allocator (malloc-allocator)
-               shared (alloc/stack CcRealm)
-               private (alloc/stack CcRealm)]
+               shared (primitive/alloc-stack CcRealm)
+               private (primitive/alloc-stack CcRealm)]
            (redirect-environment! allocator)
            (cc-realm-init! shared allocator "claude-code")
            (cc-realm-init! private allocator "lab")
@@ -351,7 +352,7 @@
 ;; opinion and a caller given an explicit --realm go through one path.
 (deftest an-unnamed-realm-follows-the-environment
          (let [allocator (malloc-allocator)
-               realm (alloc/stack CcRealm)]
+               realm (primitive/alloc-stack CcRealm)]
            (redirect-environment! allocator)
            (cc-realm-init! realm allocator "")
            (assert (= (load (field realm name)) "claude-code"))
@@ -371,8 +372,8 @@
 ;; ambient parent to inherit, so it must not pick one up by accident.
 (deftest self-identification-does-not-leak-across-realms
          (let [allocator (malloc-allocator)
-               shared (alloc/stack CcRealm)
-               private (alloc/stack CcRealm)]
+               shared (primitive/alloc-stack CcRealm)
+               private (primitive/alloc-stack CcRealm)]
            (redirect-environment! allocator)
            (os/env-set allocator
                        "CLAUDE_CODE_MESSAGING_SOCKET"

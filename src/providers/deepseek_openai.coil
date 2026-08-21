@@ -1,4 +1,5 @@
 (module deepseek-openai)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -21,14 +22,14 @@
    (credential ApiCredential)
    (transport (dyn StreamingHttpTransport))])
 
-(defn deepseek-openai-context-default [(allocator (ptr Allocator))] (-> DeepSeekOpenAIContext)
-  (let [context (alloc/stack DeepSeekOpenAIContext)]
+(defn deepseek-openai-context-default [(allocator (dyn Allocator))] (-> DeepSeekOpenAIContext)
+  (let [context (primitive/alloc-stack DeepSeekOpenAIContext)]
     (set! (.endpoint context) "https://api.deepseek.com/chat/completions")
     (set! (.strict-endpoint context) "https://api.deepseek.com/beta/chat/completions")
     (set! (.primary-env (.credential context)) c"DEEPSEEK_API_KEY")
     (set! (.fallback-env (.credential context)) c"DEEPSEEK_KEY")
     (store! (field context transport)
-            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+            (box! allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
 (defn registry-needs-strict? [(registry (ptr ToolRegistry))] (-> bool)
@@ -44,7 +45,7 @@
                     (set! i (+ (load i) 1))))))
     (load strict)))
 
-(defn deepseek-tool-result-message [(allocator (ptr Allocator)) (result ToolResult)] (-> Json)
+(defn deepseek-tool-result-message [(allocator (dyn Allocator)) (result ToolResult)] (-> Json)
   (let [(mut message) (json-object allocator)
         output
           (match (.status result)
@@ -59,7 +60,7 @@
 
 ;; Build OpenAI-compatible Chat Completions messages. On a tool continuation the
 ;; prior assistant object is replayed verbatim, preserving DeepSeek reasoning_content.
-(defn deepseek-chat-messages [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+(defn deepseek-chat-messages [(allocator (dyn Allocator)) (request (ptr ModelRequest))] (-> Json)
   (let [(mut messages) (messages-wire allocator (load (field request messages)))
         continuation (field request continuation)]
     (when (load (field continuation present))
@@ -81,7 +82,7 @@
       0)
     (load messages)))
 
-(defn deepseek-openai-request-json [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+(defn deepseek-openai-request-json [(allocator (dyn Allocator)) (request (ptr ModelRequest))] (-> Json)
   (let [(mut body) (json-object allocator)
         (mut thinking) (json-object allocator)]
     (json-put-string! (mut body) "model" (.model request))
@@ -125,7 +126,7 @@
     (load body)))
 
 (defn deepseek-openai-usage [(root Json)] (-> ModelUsage)
-  (let [usage (alloc/stack ModelUsage)
+  (let [usage (primitive/alloc-stack ModelUsage)
         wire (json-get root "usage")]
     (set! (.input-tokens usage) (json-number-i64 (json-get wire "prompt_tokens")))
     (set! (.output-tokens usage) (json-number-i64 (json-get wire "completion_tokens")))
@@ -135,7 +136,7 @@
     (set! (.cache-write-tokens usage) 0)
     (load usage)))
 
-(defn deepseek-openai-parse-response [(allocator (ptr Allocator)) (root Json)] (-> ModelResponse)
+(defn deepseek-openai-parse-response [(allocator (dyn Allocator)) (root Json)] (-> ModelResponse)
   (let [(mut response) (response-empty allocator)
         message (json-get (json-array-get (json-get root "choices") 0) "message")
         calls (json-get message "tool_calls")
@@ -189,7 +190,7 @@
    (arguments StrBuf)])
 
 (defstruct DeepSeekOpenAIStreamState
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (request (ptr ModelRequest))
    (emitter (ptr EventEmitter))
    (response-id (slice u8))
@@ -205,7 +206,7 @@
                              (index-value i64)] (-> (ptr DeepSeekStreamTool))
   (loop (if (> (al-len [DeepSeekStreamTool] (.tools state)) index-value)
             (break)
-            (let [tool (alloc/stack DeepSeekStreamTool)]
+            (let [tool (primitive/alloc-stack DeepSeekStreamTool)]
               (set! (.id tool) "")
               (set! (.name tool) "")
               (set! (.arguments tool) (sb-new (load (field state allocator))))
@@ -345,12 +346,12 @@
 (defn deepseek-openai-execute [(context (ptr DeepSeekOpenAIContext))
                                (request (ptr ModelRequest))
                                (emitter (ptr EventEmitter))
-                               (allocator (ptr Allocator))] (-> ModelResult)
+                               (allocator (dyn Allocator))] (-> ModelResult)
   (let [key (api-key allocator (.credential context))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-openai" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               authorization (concat-or-empty allocator "Authorization: Bearer " key)
@@ -362,7 +363,7 @@
           (al-push! [(slice u8)] headers authorization)
           (let [wire (deepseek-openai-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (alloc/stack HttpRequest)]
+                http-request (primitive/alloc-stack HttpRequest)]
             (set! (.url http-request) endpoint)
             (set! (.headers http-request) headers)
             (set! (.body http-request) body)
@@ -408,12 +409,12 @@
 (defn deepseek-openai-execute-stream [(context (ptr DeepSeekOpenAIContext))
                                       (request (ptr ModelRequest))
                                       (emitter (ptr EventEmitter))
-                                      (allocator (ptr Allocator))] (-> ModelResult)
+                                      (allocator (dyn Allocator))] (-> ModelResult)
   (let [key (api-key allocator (.credential context))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-openai" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               authorization (concat-or-empty allocator "Authorization: Bearer " key)
@@ -421,9 +422,9 @@
                 (if (registry-needs-strict? (load (field request tools)))
                     (.strict-endpoint context)
                     (.endpoint context))
-              state (alloc/stack DeepSeekOpenAIStreamState)
-              decoder (alloc/stack SseDecoder)
-              http-request (alloc/stack HttpRequest)]
+              state (primitive/alloc-stack DeepSeekOpenAIStreamState)
+              decoder (primitive/alloc-stack SseDecoder)
+              http-request (primitive/alloc-stack HttpRequest)]
           (al-push! [(slice u8)] headers "Content-Type: application/json")
           (al-push! [(slice u8)] headers "Accept: text/event-stream")
           (al-push! [(slice u8)] headers authorization)
@@ -489,6 +490,6 @@
   (execute-model [(self (ptr DeepSeekOpenAIContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (deepseek-openai-execute-stream self request emitter allocator)))

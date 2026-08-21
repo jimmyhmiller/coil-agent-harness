@@ -1,6 +1,7 @@
 (module harness-event)
+(import "coil.primitive" :as primitive)
 
-(import "coil.alloc" :as alloc :use [unwrap-ptr create])
+(import "coil.alloc" :as alloc :use [unwrap-ptr create box!])
 (import "coil.atomic" :use *)
 (import "harness-json" :use *)
 
@@ -84,11 +85,11 @@
 
 ;; Create an emitter over caller-owned sequence storage. The sequence cell must
 ;; outlive every worker that uses the emitter.
-(defn event-emitter-new [(allocator (ptr alloc/Allocator))
+(defn event-emitter-new [(allocator (dyn alloc/Allocator))
                          (sink (dyn EventSink))
                          (next-sequence (ptr i64))] (-> EventEmitter)
-  (let [emitter (alloc/stack EventEmitter)]
-    (store! (field emitter sink) (alloc/box allocator (dyn EventSink) sink))
+  (let [emitter (primitive/alloc-stack EventEmitter)]
+    (store! (field emitter sink) (alloc/box! allocator (dyn EventSink) sink))
     (set! (.next-sequence emitter) next-sequence)
     (set! (.publish-lock emitter) 0)
     (load emitter)))
@@ -96,10 +97,10 @@
 ;; Initialize long-lived emitters in their final storage. This avoids copying a
 ;; dynamic trait object through a returned aggregate at an ownership boundary.
 (defn event-emitter-init! [(emitter (ptr EventEmitter))
-                           (allocator (ptr alloc/Allocator))
+                           (allocator (dyn alloc/Allocator))
                            (sink (dyn EventSink))
                            (next-sequence (ptr i64))] (-> i64)
-  (store! (field emitter sink) (alloc/box allocator (dyn EventSink) sink))
+  (store! (field emitter sink) (alloc/box! allocator (dyn EventSink) sink))
   (set! (.next-sequence emitter) next-sequence)
   (set! (.publish-lock emitter) 0)
   0)
@@ -126,7 +127,7 @@
                             (payload Json)] (-> i64)
   (event-emitter-lock! emitter)
   (let [sequence (atomic-add (load (field emitter next-sequence)) 1)
-        event (alloc/stack Event)
+        event (primitive/alloc-stack Event)
         sink (load (field emitter sink))]
     (set! (.version event) 1)
     (set! (.sequence event) sequence)
@@ -212,7 +213,7 @@
     (CodexNotification [] "codex.notification")))
 
 ;; Canonical versioned wire envelope shared by CLI, journals, and remote transports.
-(defn event-to-json [(allocator (ptr alloc/Allocator)) (event (ptr Event))] (-> Json)
+(defn event-to-json [(allocator (dyn alloc/Allocator)) (event (ptr Event))] (-> Json)
   (let [(mut record) (json-object allocator)]
     (json-object-put! (mut record)
                       "version"

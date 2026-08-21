@@ -1,4 +1,5 @@
 (module deepseek-anthropic)
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -24,8 +25,8 @@
    (oauth bool)
    (transport (dyn StreamingHttpTransport))])
 
-(defn deepseek-anthropic-context-default [(allocator (ptr Allocator))] (-> DeepSeekAnthropicContext)
-  (let [context (alloc/stack DeepSeekAnthropicContext)]
+(defn deepseek-anthropic-context-default [(allocator (dyn Allocator))] (-> DeepSeekAnthropicContext)
+  (let [context (primitive/alloc-stack DeepSeekAnthropicContext)]
     (set! (.endpoint context) "https://api.deepseek.com/anthropic/v1/messages")
     (set! (.primary-env (.credential context)) c"DEEPSEEK_API_KEY")
     (set! (.fallback-env (.credential context)) c"DEEPSEEK_KEY")
@@ -34,10 +35,10 @@
     (set! (.credential-error context) "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
     (set! (.oauth context) false)
     (store! (field context transport)
-            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+            (box! allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
-(defn anthropic-base-messages [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
+(defn anthropic-base-messages [(allocator (dyn Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
   (let [(mut result) (json-array allocator)
         (mut i) 0
         n (al-len [Message] (load messages))]
@@ -63,7 +64,7 @@
                 (set! i (+ (load i) 1)))))
     (load result)))
 
-(defn anthropic-tool-result-block [(allocator (ptr Allocator)) (result ToolResult)] (-> Json)
+(defn anthropic-tool-result-block [(allocator (dyn Allocator)) (result ToolResult)] (-> Json)
   (let [(mut block) (json-object allocator)
         output
           (match (.status result)
@@ -78,7 +79,7 @@
 
 ;; Preserve the previous Anthropic content block array verbatim. This retains
 ;; thinking blocks and signatures while adding all parallel tool results together.
-(defn anthropic-messages [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+(defn anthropic-messages [(allocator (dyn Allocator)) (request (ptr ModelRequest))] (-> Json)
   (let [(mut messages) (anthropic-base-messages allocator (load (field request messages)))
         continuation (field request continuation)]
     (when (load (field continuation present))
@@ -106,7 +107,7 @@
       0)
     (load messages)))
 
-(defn anthropic-request-json [(allocator (ptr Allocator))
+(defn anthropic-request-json [(allocator (dyn Allocator))
                               (request (ptr ModelRequest))
                               (oauth bool)] (-> Json)
   (let [(mut body) (json-object allocator)
@@ -174,12 +175,12 @@
     (json-put-bool! (mut body) "stream" true)
     (load body)))
 
-(defn deepseek-anthropic-request-json [(allocator (ptr Allocator))
+(defn deepseek-anthropic-request-json [(allocator (dyn Allocator))
                                        (request (ptr ModelRequest))] (-> Json)
   (anthropic-request-json allocator request false))
 
 (defn deepseek-anthropic-usage [(root Json)] (-> ModelUsage)
-  (let [usage (alloc/stack ModelUsage)
+  (let [usage (primitive/alloc-stack ModelUsage)
         wire (json-get root "usage")]
     (set! (.input-tokens usage) (json-number-i64 (json-get wire "input_tokens")))
     (set! (.output-tokens usage) (json-number-i64 (json-get wire "output_tokens")))
@@ -188,7 +189,7 @@
     (set! (.cache-write-tokens usage) 0)
     (load usage)))
 
-(defn anthropic-parse-response [(allocator (ptr Allocator))
+(defn anthropic-parse-response [(allocator (dyn Allocator))
                                 (root Json)
                                 (provider (slice u8))] (-> ModelResponse)
   (let [(mut response) (response-empty allocator)
@@ -221,7 +222,7 @@
                                   (None [] ""))
                               input (json-get block "input")
                               arguments (json-stringify allocator input)
-                              call (alloc/stack ToolCall)]
+                              call (primitive/alloc-stack ToolCall)]
                           (store! (field call id) id)
                           (store! (field call name) name)
                           (store! (field call arguments) input)
@@ -234,7 +235,7 @@
     (set! (.raw-output response) root)
     (load response)))
 
-(defn deepseek-anthropic-parse-response [(allocator (ptr Allocator))
+(defn deepseek-anthropic-parse-response [(allocator (dyn Allocator))
                                          (root Json)] (-> ModelResponse)
   (anthropic-parse-response allocator root "deepseek-anthropic"))
 
@@ -267,7 +268,7 @@
    (signature StrBuf)])
 
 (defstruct DeepSeekAnthropicStreamState
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (request (ptr ModelRequest))
    (emitter (ptr EventEmitter))
    (provider (slice u8))
@@ -283,7 +284,7 @@
   (loop (if (> (al-len [AnthropicStreamBlock] (.blocks state))
                index-value)
             (break)
-            (let [block-slot (alloc/stack AnthropicStreamBlock)]
+            (let [block-slot (primitive/alloc-stack AnthropicStreamBlock)]
               (set! (.kind block-slot) "")
               (set! (.id block-slot) "")
               (set! (.name block-slot) "")
@@ -477,7 +478,7 @@
 (defn deepseek-anthropic-execute [(context (ptr DeepSeekAnthropicContext))
                                   (request (ptr ModelRequest))
                                   (emitter (ptr EventEmitter))
-                                  (allocator (ptr Allocator))] (-> ModelResult)
+                                  (allocator (dyn Allocator))] (-> ModelResult)
   (let [configured (.credential-value context)
         key
           (if (> (slice-len [u8] configured) 0)
@@ -486,7 +487,7 @@
     (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-anthropic" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               api-header (concat-or-empty allocator "x-api-key: " key)]
@@ -495,7 +496,7 @@
           (al-push! [(slice u8)] headers api-header)
           (let [wire (deepseek-anthropic-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (alloc/stack HttpRequest)]
+                http-request (primitive/alloc-stack HttpRequest)]
             (set! (.url http-request) (.endpoint context))
             (set! (.headers http-request) headers)
             (set! (.body http-request) body)
@@ -538,7 +539,7 @@
                                                           (model-completion-payload allocator request (mut response)))
                                 (ModelOk (load response))))))))))))))
 
-(defn anthropic-auth-header [(allocator (ptr Allocator))
+(defn anthropic-auth-header [(allocator (dyn Allocator))
                              (key (slice u8))
                              (oauth bool)] (-> (slice u8))
   (concat-or-empty allocator (if oauth "Authorization: Bearer " "x-api-key: ") key))
@@ -546,7 +547,7 @@
 (defn deepseek-anthropic-execute-stream [(context (ptr DeepSeekAnthropicContext))
                                          (request (ptr ModelRequest))
                                          (emitter (ptr EventEmitter))
-                                         (allocator (ptr Allocator))] (-> ModelResult)
+                                         (allocator (dyn Allocator))] (-> ModelResult)
   (let [configured (.credential-value context)
         key
           (if (> (slice-len [u8] configured) 0)
@@ -557,16 +558,16 @@
                        0
                        (.credential-error context))
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               api-header
                 (anthropic-auth-header allocator
                                        key
                                        (.oauth context))
-              state (alloc/stack DeepSeekAnthropicStreamState)
-              decoder (alloc/stack SseDecoder)
-              http-request (alloc/stack HttpRequest)]
+              state (primitive/alloc-stack DeepSeekAnthropicStreamState)
+              decoder (primitive/alloc-stack SseDecoder)
+              http-request (primitive/alloc-stack HttpRequest)]
           (al-push! [(slice u8)] headers "Content-Type: application/json")
           (al-push! [(slice u8)] headers "Accept: text/event-stream")
           (al-push! [(slice u8)] headers "anthropic-version: 2023-06-01")
@@ -665,6 +666,6 @@
   (execute-model [(self (ptr DeepSeekAnthropicContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (deepseek-anthropic-execute-stream self request emitter allocator)))

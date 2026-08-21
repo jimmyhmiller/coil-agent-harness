@@ -27,7 +27,7 @@
                 (set! at (+ (load at) 1)))))
     (load writes)))
 
-(defn input-repeated [(allocator (ptr Allocator))
+(defn input-repeated [(allocator (dyn Allocator))
                       (byte u8)
                       (count i64)] (-> (slice u8))
   (let [(mut text) (sb-new allocator)
@@ -51,7 +51,7 @@
            (assert (<= (- (slice-len [u8] huge) huge-start)
                        (* (* 26 80) 4)))))
 
-(defn test-input-layout [(allocator (ptr Allocator))
+(defn test-input-layout [(allocator (dyn Allocator))
                          (editor (ptr InputEditor))
                          (width i64)
                          (height i64)
