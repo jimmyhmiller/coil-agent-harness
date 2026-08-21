@@ -20,7 +20,7 @@
    (first-operation-id (slice u8))
    (second-operation-id (slice u8))])
 
-(defstruct FakeTool [])
+(defstruct FakeTool [(marker i8)])
 
 (defstruct SlowProvider [(delay-ms i64)])
 

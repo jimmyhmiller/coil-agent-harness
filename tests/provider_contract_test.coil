@@ -20,7 +20,7 @@
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 
-(defstruct UnusedTool [])
+(defstruct UnusedTool [(marker i8)])
 
 (defstruct FakeCodexExecutionStrategy
   [(prepare-count i64)

@@ -33,7 +33,7 @@
                      (RuntimeDependenciesReady [] true)
                      (_ false)))))
 
-(defstruct ControllerFakeProvider [])
+(defstruct ControllerFakeProvider [(marker i8)])
 
 (impl ModelProvider ControllerFakeProvider
   (provider-name [(self (ptr ControllerFakeProvider))] (-> (slice u8)) "fake")
@@ -483,7 +483,7 @@
            (json-object-put! (mut command) "timeout_ms" (json-integer allocator 3600000))
            (assert (> (runtime-command-deadline (load command)) 0))))
 
-(defstruct ToolPlaneEchoTool [])
+(defstruct ToolPlaneEchoTool [(marker i8)])
 
 (impl ToolImplementation ToolPlaneEchoTool
   (execute-tool [(self (ptr ToolPlaneEchoTool))
