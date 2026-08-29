@@ -113,6 +113,21 @@ it drops, and releases it on shutdown. Nothing has to be started beforehand.
 The name then works anywhere a provider name works, including a `factory.json`
 step. See [the guide](docs/declared-providers.md).
 
+## OpenRouter
+
+OpenRouter is a built-in OpenAI-compatible provider. Set an API key, then choose
+`OpenRouter · Ox Alpha` from the TUI `/model` picker or pin it from the CLI:
+
+```sh
+export OPENROUTER_API_KEY=sk-or-v1-...
+coil run -- run openrouter stealth/ox-alpha "Inspect this codebase"
+```
+
+Ox Alpha uses the OpenRouter model slug `stealth/ox-alpha`; it is the built-in
+OpenRouter default and currently advertises zero-dollar input and output pricing.
+OpenRouter availability, pricing, and free-tier rate limits can change independently
+of the harness.
+
 The HTTP listener binds to IPv4 loopback and the CLI exposes a long-running `serve`
 command protected by capability-bearing credentials. Operator credentials can create,
 cancel, and inspect runs; observer credentials can only inspect runs and
@@ -471,6 +486,7 @@ lint set because expression-tree depth is only a weak maintainability signal. Se
 Provider credentials are read only inside provider adapters:
 
 - OpenAI: `OPENAI_API_KEY`, with `OPENAI_KEY` as a fallback;
+- OpenRouter: `OPENROUTER_API_KEY`;
 - DeepSeek: `DEEPSEEK_API_KEY`, with `DEEPSEEK_KEY` as a fallback;
 - Codex subscription: run `./harness login codex`. Harness credentials are stored
   separately at `~/.coil-agent-harness/codex-auth.json`; an existing Codex CLI login
