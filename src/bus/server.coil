@@ -40,7 +40,7 @@
    (alive bool)])
 
 (defstruct BusServer
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (router (ptr Router))
    (observer (ptr BusObserverSink))
    (codec (ptr (dyn Codec)))
@@ -48,14 +48,14 @@
    (next-id i64)])
 
 (defn bus-server-init! [(server (ptr BusServer))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (router (ptr Router))
                         (observer (ptr BusObserverSink))
                         (codec (dyn Codec))] (-> i64)
   (set! (.allocator server) allocator)
   (set! (.router server) router)
   (set! (.observer server) observer)
-  (store! (field server codec) (alloc/box allocator (dyn Codec) codec))
+  (store! (field server codec) (alloc/box! allocator (dyn Codec) codec))
   (set! (.subscribers server) (al-new [Subscriber] allocator))
   (set! (.next-id server) 1)
   0)
@@ -80,7 +80,7 @@
 
 ;; Decimal formatting for generated subscriber identities. Same reason as in the
 ;; observer: `int->str` is comptime-only.
-(defn subscriber-name [(allocator (ptr Allocator)) (n i64)] (-> (slice u8))
+(defn subscriber-name [(allocator (dyn Allocator)) (n i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut digits) (al-new [i64] allocator)
         (mut remaining) n]
@@ -137,16 +137,16 @@
                               (listener (ptr socket/UnixListener))
                               (accept-timeout-ms i64)] (-> i64)
   (let [allocator (load (field server allocator))
-        accepted (alloc/stack socket/UnixConnection)]
+        accepted (primitive/alloc-stack socket/UnixConnection)]
     (try (let [timeout (try-or! (time/duration-millis accept-timeout-ms)
                                 -1)]
               (match (socket/unix-accept-for listener accepted timeout)
                 ;; No pending connection is the common case, not a failure.
                 (Err [_] 0)
                 (Ok [_]
-                    (let [transport (alloc/box allocator UnixTransport (zeroed UnixTransport))
-                          envelope (alloc/stack Envelope)
-                          out (alloc/stack (slice u8))]
+                    (let [transport (alloc/box! allocator UnixTransport (zeroed UnixTransport))
+                          envelope (primitive/alloc-stack Envelope)
+                          out (primitive/alloc-stack (slice u8))]
                       (unix-transport-adopt! transport (load accepted))
                       (if (not (handshake-readable? transport))
                           ;; Connected and went quiet. Refusing is the only safe
@@ -170,7 +170,7 @@
                                                             handle
                                                               (router-attach! (load (field server router))
                                                                               (Agent name))
-                                                            subscriber (alloc/stack Subscriber)]
+                                                            subscriber (primitive/alloc-stack Subscriber)]
                                                         (store! (field server next-id)
                                                                 (+ (load (field server next-id)) 1))
                                                         (router-subscribe! (load (field server router))

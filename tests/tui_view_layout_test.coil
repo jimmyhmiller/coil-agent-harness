@@ -1,5 +1,7 @@
 (module harness-tui-view-layout-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
@@ -16,7 +18,7 @@
 
 (deftest declarative-flow-layout-sanitizes-terminal-controls
          (let [allocator (malloc-allocator)
-               bytes (alloc/stack (array u8 9))]
+               bytes (primitive/alloc-stack (array u8 9))]
            (store! (index bytes 0) (cast u8 115))
            (store! (index bytes 1) (cast u8 97))
            (store! (index bytes 2) (cast u8 102))

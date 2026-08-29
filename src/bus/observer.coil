@@ -23,14 +23,14 @@
 (import "harness-bus-publisher" :use *)
 
 (defstruct BusObserverSink
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (queue (ArrayList Envelope))
    (capacity i64)
    (dropped i64)
    (next-id i64)])
 
 (defn bus-observer-init! [(sink (ptr BusObserverSink))
-                          (allocator (ptr Allocator))
+                          (allocator (dyn Allocator))
                           (capacity i64)] (-> i64)
   (set! (.allocator sink) allocator)
   (set! (.queue sink) (al-new [Envelope] allocator))
@@ -43,7 +43,7 @@
 
 ;; Decimal formatting, written out because `int->str` is a comptime primitive
 ;; and the message id is built at runtime.
-(defn decimal [(allocator (ptr Allocator)) (value i64)] (-> (slice u8))
+(defn decimal [(allocator (dyn Allocator)) (value i64)] (-> (slice u8))
   (if (= value 0)
       "0"
       (let [(mut buffer) (sb-new allocator)
@@ -110,7 +110,7 @@
                        0
                        (let [body (json-stringify allocator (event-to-json allocator event))
                              id (decimal allocator (.next-id self))
-                             envelope (alloc/stack Envelope)]
+                             envelope (primitive/alloc-stack Envelope)]
                          (set! (.next-id self) (+ (.next-id self) 1))
                          (set! envelope (event-envelope id topic body))
                          (when (>= (bus-observer-pending self) (load (field self capacity)))

@@ -1,5 +1,7 @@
 (module openai-responses)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -15,7 +17,7 @@
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
-(defn openai-latest-user-input [(allocator (ptr Allocator))
+(defn openai-latest-user-input [(allocator (dyn Allocator))
                                 (request (ptr ModelRequest))] (-> Json)
   (let [messages (load (field request messages))
         (mut i) (al-len [Message] (load messages))
@@ -41,16 +43,16 @@
    (credential ApiCredential)
    (transport (dyn StreamingHttpTransport))])
 
-(defn openai-context-default [(allocator (ptr Allocator))] (-> OpenAIResponsesContext)
-  (let [context (alloc/stack OpenAIResponsesContext)]
+(defn openai-context-default [(allocator (dyn Allocator))] (-> OpenAIResponsesContext)
+  (let [context (primitive/alloc-stack OpenAIResponsesContext)]
     (set! (.endpoint context) "https://api.openai.com/v1/responses")
     (set! (.primary-env (.credential context)) c"OPENAI_API_KEY")
     (set! (.fallback-env (.credential context)) c"OPENAI_KEY")
     (store! (field context transport)
-            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+            (box! allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
-(defn openai-tool-results [(allocator (ptr Allocator)) (results (ptr (ArrayList ToolResult)))] (-> Json)
+(defn openai-tool-results [(allocator (dyn Allocator)) (results (ptr (ArrayList ToolResult)))] (-> Json)
   (let [(mut input) (json-array allocator)
         (mut i) 0
         n (al-len [ToolResult] (load results))]
@@ -72,7 +74,7 @@
     (load input)))
 
 ;; Translate the common model request into the current Responses API shape.
-(defn openai-request-json-with-output-limit [(allocator (ptr Allocator))
+(defn openai-request-json-with-output-limit [(allocator (dyn Allocator))
                                              (request (ptr ModelRequest))
                                              (include-output-limit bool)] (-> Json)
   (let [(mut body) (json-object allocator)
@@ -130,11 +132,11 @@
     (json-put-bool! (mut body) "stream" true)
     (load body)))
 
-(defn openai-request-json [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+(defn openai-request-json [(allocator (dyn Allocator)) (request (ptr ModelRequest))] (-> Json)
   (openai-request-json-with-output-limit allocator request true))
 
 (defn openai-usage [(root Json)] (-> ModelUsage)
-  (let [usage (alloc/stack ModelUsage)
+  (let [usage (primitive/alloc-stack ModelUsage)
         wire (json-get root "usage")]
     (set! (.input-tokens usage) (json-number-i64 (json-get wire "input_tokens")))
     (set! (.output-tokens usage) (json-number-i64 (json-get wire "output_tokens")))
@@ -146,7 +148,7 @@
           (json-number-i64 (json-get (json-get wire "input_tokens_details") "cache_write_tokens")))
     (load usage)))
 
-(defn openai-parse-response [(allocator (ptr Allocator)) (root Json)] (-> ModelResponse)
+(defn openai-parse-response [(allocator (dyn Allocator)) (root Json)] (-> ModelResponse)
   (let [(mut response) (response-empty allocator)
         (mut text) (sb-new allocator)
         output (json-get root "output")
@@ -211,7 +213,7 @@
               payload))
 
 (defstruct OpenAIStreamState
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (request (ptr ModelRequest))
    (emitter (ptr EventEmitter))
    (completed bool)
@@ -271,18 +273,18 @@
 (defn openai-execute-stream [(context (ptr OpenAIResponsesContext))
                              (request (ptr ModelRequest))
                              (emitter (ptr EventEmitter))
-                             (allocator (ptr Allocator))] (-> ModelResult)
+                             (allocator (dyn Allocator))] (-> ModelResult)
   (let [key (api-key allocator (.credential context))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "openai-responses" 0 "OPENAI_API_KEY or OPENAI_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               authorization (concat-or-empty allocator "Authorization: Bearer " key)
-              state (alloc/stack OpenAIStreamState)
-              decoder (alloc/stack SseDecoder)
-              http-request (alloc/stack HttpRequest)]
+              state (primitive/alloc-stack OpenAIStreamState)
+              decoder (primitive/alloc-stack SseDecoder)
+              http-request (primitive/alloc-stack HttpRequest)]
           (al-push! [(slice u8)] headers "Content-Type: application/json")
           (al-push! [(slice u8)] headers "Accept: text/event-stream")
           (al-push! [(slice u8)] headers authorization)
@@ -330,12 +332,12 @@
 (defn openai-execute [(context (ptr OpenAIResponsesContext))
                       (request (ptr ModelRequest))
                       (emitter (ptr EventEmitter))
-                      (allocator (ptr Allocator))] (-> ModelResult)
+                      (allocator (dyn Allocator))] (-> ModelResult)
   (let [key (api-key allocator (.credential context))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "openai-responses" 0 "OPENAI_API_KEY or OPENAI_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               authorization (concat-or-empty allocator "Authorization: Bearer " key)]
@@ -343,7 +345,7 @@
           (al-push! [(slice u8)] headers authorization)
           (let [wire (openai-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (alloc/stack HttpRequest)]
+                http-request (primitive/alloc-stack HttpRequest)]
             (set! (.url http-request) (.endpoint context))
             (set! (.headers http-request) headers)
             (set! (.body http-request) body)
@@ -397,6 +399,6 @@
   (execute-model [(self (ptr OpenAIResponsesContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (openai-execute-stream self request emitter allocator)))

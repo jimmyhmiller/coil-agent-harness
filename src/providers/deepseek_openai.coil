@@ -1,5 +1,7 @@
 (module deepseek-openai)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -22,14 +24,14 @@
    (credential ApiCredential)
    (transport (dyn StreamingHttpTransport))])
 
-(defn deepseek-openai-context-default [(allocator (ptr Allocator))] (-> DeepSeekOpenAIContext)
-  (let [context (alloc/stack DeepSeekOpenAIContext)]
+(defn deepseek-openai-context-default [(allocator (dyn Allocator))] (-> DeepSeekOpenAIContext)
+  (let [context (primitive/alloc-stack DeepSeekOpenAIContext)]
     (set! (.endpoint context) "https://api.deepseek.com/chat/completions")
     (set! (.strict-endpoint context) "https://api.deepseek.com/beta/chat/completions")
     (set! (.primary-env (.credential context)) c"DEEPSEEK_API_KEY")
     (set! (.fallback-env (.credential context)) c"DEEPSEEK_KEY")
     (store! (field context transport)
-            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+            (box! allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
 (defn registry-needs-strict? [(registry (ptr ToolRegistry))] (-> bool)
@@ -45,7 +47,7 @@
                     (set! i (+ (load i) 1))))))
     (load strict)))
 
-(defn deepseek-openai-request-json [(allocator (ptr Allocator)) (request (ptr ModelRequest))] (-> Json)
+(defn deepseek-openai-request-json [(allocator (dyn Allocator)) (request (ptr ModelRequest))] (-> Json)
   (let [(mut body) (json-object allocator)
         (mut thinking) (json-object allocator)]
     (json-put-string! (mut body) "model" (.model request))
@@ -90,12 +92,12 @@
 (defn deepseek-openai-execute [(context (ptr DeepSeekOpenAIContext))
                                (request (ptr ModelRequest))
                                (emitter (ptr EventEmitter))
-                               (allocator (ptr Allocator))] (-> ModelResult)
+                               (allocator (dyn Allocator))] (-> ModelResult)
   (let [key (api-key allocator (.credential context))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-openai" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               authorization (concat-or-empty allocator "Authorization: Bearer " key)
@@ -107,7 +109,7 @@
           (al-push! [(slice u8)] headers authorization)
           (let [wire (deepseek-openai-request-json allocator request)
                 body (json-stringify allocator wire)
-                http-request (alloc/stack HttpRequest)]
+                http-request (primitive/alloc-stack HttpRequest)]
             (set! (.url http-request) endpoint)
             (set! (.headers http-request) headers)
             (set! (.body http-request) body)
@@ -153,12 +155,12 @@
 (defn deepseek-openai-execute-stream [(context (ptr DeepSeekOpenAIContext))
                                       (request (ptr ModelRequest))
                                       (emitter (ptr EventEmitter))
-                                      (allocator (ptr Allocator))] (-> ModelResult)
+                                      (allocator (dyn Allocator))] (-> ModelResult)
   (let [key (api-key allocator (.credential context))]
     (if (= (slice-len [u8] key) 0)
         (model-failure "deepseek-openai" 0 "DEEPSEEK_API_KEY or DEEPSEEK_KEY is not set")
         (let [headers
-                (box allocator
+                (box! allocator
                      (ArrayList (slice u8))
                      (al-new [(slice u8)] allocator))
               authorization (concat-or-empty allocator "Authorization: Bearer " key)
@@ -166,9 +168,9 @@
                 (if (registry-needs-strict? (load (field request tools)))
                     (.strict-endpoint context)
                     (.endpoint context))
-              state (alloc/stack OpenAIChatStreamState)
-              decoder (alloc/stack SseDecoder)
-              http-request (alloc/stack HttpRequest)]
+              state (primitive/alloc-stack OpenAIChatStreamState)
+              decoder (primitive/alloc-stack SseDecoder)
+              http-request (primitive/alloc-stack HttpRequest)]
           (al-push! [(slice u8)] headers "Content-Type: application/json")
           (al-push! [(slice u8)] headers "Accept: text/event-stream")
           (al-push! [(slice u8)] headers authorization)
@@ -224,6 +226,6 @@
   (execute-model [(self (ptr DeepSeekOpenAIContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (deepseek-openai-execute-stream self request emitter allocator)))

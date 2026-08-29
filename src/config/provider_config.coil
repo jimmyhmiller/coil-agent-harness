@@ -7,7 +7,7 @@
 ;;
 ;; The file lives at `$HARNESS_CONFIG_DIR/providers.json`, defaulting to
 ;; `~/.coil-agent-harness/providers.json` to match the directory the bus already
-;; establishes. It is machine-specific by design: a personal box behind ssh is not
+;; establishes. It is machine-specific by design: a personal box! behind ssh is not
 ;; something to commit to a repository.
 ;;
 ;;   {
@@ -35,6 +35,8 @@
 ;; Secrets stay out of this file. A provider that needs a key names the environment
 ;; variable holding it (`api_key_env`); the value is never read from configuration.
 (module harness-provider-config)
+
+(import "coil.primitive" :as primitive)
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
@@ -108,8 +110,8 @@
   (ProviderConfigLoaded [(config ProviderConfig)])
   (ProviderConfigInvalid [(message (slice u8))]))
 
-(defn provider-config-new [(allocator (ptr Allocator))] (-> ProviderConfig)
-  (let [config (alloc/stack ProviderConfig)]
+(defn provider-config-new [(allocator (dyn Allocator))] (-> ProviderConfig)
+  (let [config (primitive/alloc-stack ProviderConfig)]
     (set! (.providers config) (al-new [ConfiguredProvider] allocator))
     (load config)))
 
@@ -140,20 +142,41 @@
 ;; Names the harness resolves itself. A configuration may not claim one: routing is
 ;; by name, so shadowing a built-in would silently redirect existing work.
 (defn provider-config-reserved-name? [(name (slice u8))] (-> bool)
-  (or (= name "auto")
-      (or (= name "openai")
-          (or (= name "openai-responses")
-              (or (= name "deepseek-openai")
-                  (or (= name "deepseek-anthropic")
-                      (or (= name "codex")
-                          (or (= name "codex-app-server")
-                              (or (= name "claude")
-                                  (or (= name "claude-anthropic")
-                                      (or (= name "agent-sdk")
-                                          (or (= name "tui-fixture")
-                                              (= name "async-tool")))))))))))))
+  (cond (= name "auto") true
+        (= name "openai") true
+        (= name "openai-responses") true
+        (= name "openrouter") true
+        (= name "deepseek-openai") true
+        (= name "deepseek-anthropic") true
+        (= name "codex") true
+        (= name "codex-app-server") true
+        (= name "claude") true
+        (= name "claude-anthropic") true
+        (= name "agent-sdk") true
+        (= name "tui-fixture") true
+        (= name "async-tool") true
+        :else false))
 
-(defn provider-config-root [(allocator (ptr Allocator))] (-> (slice u8))
+;; OpenRouter is built in because it is a stable public service, not a machine-local
+;; deployment. It still uses the generic Chat Completions adapter so its wire format
+;; cannot drift from other OpenAI-compatible providers.
+(defn openrouter-config [] (-> ConfiguredProvider)
+  (let [provider (primitive/alloc-stack ConfiguredProvider)]
+    (set! (.name provider) "openrouter")
+    (set! (.kind provider) PROVIDER_KIND_OPENAI_CHAT)
+    (set! (.default-model provider) "stealth/ox-alpha")
+    (set! (.label provider) "OpenRouter · Ox Alpha")
+    (set! (.summary provider) "free preview · agentic coding")
+    (set! (.path provider) "/api/v1/chat/completions")
+    (set! (.api-key-env provider) "OPENROUTER_API_KEY")
+    (set! (.reasoning-dialect provider) PROVIDER_REASONING_OPENAI)
+    (set! (.default-effort provider) "max")
+    (set! (.cost-tier provider) 1)
+    (set! (.request-timeout-ms provider) PROVIDER_NO_TIMEOUT)
+    (set! (.transport provider) (DirectTransport "https://openrouter.ai"))
+    (load provider)))
+
+(defn provider-config-root [(allocator (dyn Allocator))] (-> (slice u8))
   (let [configured (config-env-or allocator "HARNESS_CONFIG_DIR" "")]
     (if (> (slice-len [u8] configured) 0)
         configured
@@ -161,7 +184,7 @@
                    (config-env-or allocator "HOME" "/tmp")
                    ".coil-agent-harness"))))
 
-(defn config-env-or [(allocator (ptr Allocator))
+(defn config-env-or [(allocator (dyn Allocator))
                      (name (slice u8))
                      (fallback (slice u8))] (-> (slice u8))
   (match (os/env-get allocator name)
@@ -171,7 +194,7 @@
           (None [] fallback)))
     (Err [failure] fallback)))
 
-(defn provider-config-path [(allocator (ptr Allocator))] (-> (slice u8))
+(defn provider-config-path [(allocator (dyn Allocator))] (-> (slice u8))
   (path-join allocator (provider-config-root allocator) PROVIDER_CONFIG_FILE))
 
 (defn config-string [(value Json) (key (slice u8)) (fallback (slice u8))] (-> (slice u8))
@@ -187,7 +210,7 @@
 ;; Prefix a message with the entry it came from. An operator with several providers
 ;; needs to know which one is wrong, and entries are identified by name -- or by
 ;; position when the name itself is what is missing.
-(defn config-entry-error [(allocator (ptr Allocator))
+(defn config-entry-error [(allocator (dyn Allocator))
                           (name (slice u8))
                           (at i64)
                           (message (slice u8))] (-> (slice u8))
@@ -210,7 +233,7 @@
 ;; Parse the `transport` object. Exactly one of `ssh` or `url` must be present:
 ;; accepting both would leave which one wins undefined, and accepting neither
 ;; leaves nowhere to send the request.
-(defn config-transport [(allocator (ptr Allocator))
+(defn config-transport [(allocator (dyn Allocator))
                         (entry Json)
                         (transport (mut ProviderTransport))] (-> (slice u8))
   (let [wire (json-get entry "transport")
@@ -257,7 +280,7 @@
           (= dialect PROVIDER_REASONING_NONE))))
 
 ;; Read one entry into `provider`, returning "" or the reason it was rejected.
-(defn config-provider-entry [(allocator (ptr Allocator))
+(defn config-provider-entry [(allocator (dyn Allocator))
                              (entry Json)
                              (at i64)
                              (config (ptr ProviderConfig))
@@ -317,7 +340,7 @@
 
 ;; Parse an already-read document. Separate from reading the file so the format has
 ;; tests that do not need a filesystem.
-(defn provider-config-parse [(allocator (ptr Allocator))
+(defn provider-config-parse [(allocator (dyn Allocator))
                              (source (slice u8))] (-> ProviderConfigResult)
   (let [parsed (json-parse allocator source)]
     (if (not (.ok parsed))
@@ -357,7 +380,7 @@
 ;; case and must behave exactly like having an empty one. A file that exists but
 ;; cannot be read is a failure: the operator declared providers and the harness
 ;; cannot honour them.
-(defn provider-config-load [(allocator (ptr Allocator))] (-> ProviderConfigResult)
+(defn provider-config-load [(allocator (dyn Allocator))] (-> ProviderConfigResult)
   (let [path (provider-config-path allocator)]
     (if (not (path-exists? allocator path))
         (ProviderConfigLoaded (provider-config-new allocator))
@@ -372,7 +395,7 @@
 ;; the format rather than in the adapter so routing can ask about a provider without
 ;; depending on the code that talks to it.
 (defn configured-provider-capabilities [(provider (ptr ConfiguredProvider))] (-> ProviderCapabilities)
-  (let [capabilities (alloc/stack ProviderCapabilities)]
+  (let [capabilities (primitive/alloc-stack ProviderCapabilities)]
     (set! (.streaming capabilities) true)
     ;; Tools are executed by the harness against the provider-neutral contract, so
     ;; any server that speaks Chat Completions tool calls supports them.

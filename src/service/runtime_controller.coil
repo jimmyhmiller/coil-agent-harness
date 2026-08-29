@@ -1,5 +1,7 @@
 (module harness-runtime-controller)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
@@ -58,11 +60,11 @@
 
 (deftrait RuntimeProviderFactory [Self]
   (prepare-runtime-provider [(self (ptr Self))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> i64))
   (resolve-runtime-provider [(self (ptr Self))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))))
 
@@ -73,6 +75,7 @@
   [(tui-fixture (ptr TuiFixtureProvider))
    (codex (ptr CodexProvider))
    (agent-sdk (ptr AgentSdkContext))
+   (openrouter (ptr OpenAIChatContext))
    (codex-strategy (ptr (dyn CodexExecutionStrategy)))
    (configured (ArrayList (ptr OpenAIChatContext)))
    (config ProviderConfig)
@@ -80,7 +83,7 @@
    ;; process's error output. The controller does not write to a terminal itself.
    (config-error (slice u8))])
 
-(defn default-codex-direct? [(allocator (ptr Allocator))] (-> bool)
+(defn default-codex-direct? [(allocator (dyn Allocator))] (-> bool)
   (match (os/env-get allocator "HARNESS_CODEX_STRATEGY")
     (Ok [found]
         (match found
@@ -90,29 +93,32 @@
           (None [] true)))
     (Err [failure] true)))
 
-(defn default-codex-strategy [(allocator (ptr Allocator))
+(defn default-codex-strategy [(allocator (dyn Allocator))
                               (cwd (slice u8))] (-> (ptr (dyn CodexExecutionStrategy)))
   (if (default-codex-direct? allocator)
-      (let [context (box allocator CodexDirectContext (codex-direct-context allocator))]
-        (box allocator (dyn CodexExecutionStrategy) context))
-      (let [context (box allocator CodexAppServerContext (zeroed CodexAppServerContext))]
+      (let [context (box! allocator CodexDirectContext (codex-direct-context allocator))]
+        (box! allocator (dyn CodexExecutionStrategy) context))
+      (let [context (box! allocator CodexAppServerContext (zeroed CodexAppServerContext))]
         (codex-context-init-persistent! context allocator cwd)
-        (box allocator (dyn CodexExecutionStrategy) context))))
+        (box! allocator (dyn CodexExecutionStrategy) context))))
 
 (defn default-runtime-provider-factory-init! [(factory (ptr DefaultRuntimeProviderFactory))
-                                              (allocator (ptr Allocator))] (-> i64)
+                                              (allocator (dyn Allocator))] (-> i64)
   (let [cwd-result (os/current-dir allocator)
         cwd
           (match cwd-result
             (Ok [owned] (os/owned-string-slice owned))
             (Err [failure] "."))
         strategy (default-codex-strategy allocator cwd)
-        provider (box allocator CodexProvider (zeroed CodexProvider))
-        sdk-provider (box allocator AgentSdkContext (agent-sdk-context allocator cwd))]
+        provider (box! allocator CodexProvider (zeroed CodexProvider))
+        openrouter (box! allocator OpenAIChatContext
+                         (openai-chat-context allocator (openrouter-config)))
+        sdk-provider (box! allocator AgentSdkContext (agent-sdk-context allocator cwd))]
     (set! (.strategy provider) strategy)
     (set! (.codex-strategy factory) strategy)
     (set! (.codex factory) provider)
     (set! (.agent-sdk factory) sdk-provider)
+    (set! (.openrouter factory) openrouter)
     (default-runtime-provider-factory-configure! factory allocator)))
 
 ;; Load the operator's declared providers and build a context for each.
@@ -121,7 +127,7 @@
 ;; asked for work to run somewhere specific, and starting with those providers
 ;; silently missing would send it somewhere else instead.
 (defn default-runtime-provider-factory-configure! [(factory (ptr DefaultRuntimeProviderFactory))
-                                                   (allocator (ptr Allocator))] (-> i64)
+                                                   (allocator (dyn Allocator))] (-> i64)
   (set! (.configured factory) (al-new [(ptr OpenAIChatContext)] allocator))
   (set! (.config-error factory) "")
   (match (provider-config-load allocator)
@@ -139,7 +145,7 @@
                     (do
                       (al-push! [(ptr OpenAIChatContext)]
                                 (mut (.configured factory))
-                                (box allocator
+                                (box! allocator
                                      OpenAIChatContext
                                      (openai-chat-context allocator
                                                           (load (provider-config-at (field factory config)
@@ -173,7 +179,7 @@
 
 (defn default-runtime-provider-factory-prepare! [(factory (ptr DefaultRuntimeProviderFactory))
                                                  (provider-name (slice u8))
-                                                 (allocator (ptr Allocator))] (-> i64)
+                                                 (allocator (dyn Allocator))] (-> i64)
   (if (= provider-name "codex")
       (let [strategy (load (field factory codex-strategy))]
         (if (= strategy (cast (ptr (dyn CodexExecutionStrategy)) 0))
@@ -195,30 +201,37 @@
     (when (!= strategy (cast (ptr (dyn CodexExecutionStrategy)) 0))
       (codex-strategy-close! (load strategy))
       0)
+    0)
+  (let [openrouter (load (field factory openrouter))]
+    (when (!= openrouter (cast (ptr OpenAIChatContext) 0))
+      (openai-chat-close! openrouter)
+      0)
     0))
 
 (impl RuntimeProviderFactory DefaultRuntimeProviderFactory
   (prepare-runtime-provider [(self (ptr DefaultRuntimeProviderFactory))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> i64)
                             (default-runtime-provider-factory-prepare! self
                                                                        provider-name
                                                                        allocator))
   (resolve-runtime-provider [(self (ptr DefaultRuntimeProviderFactory))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))
                             (cond (str-eq provider-name "openai")
-                                    (Some (box allocator
+                                    (Some (box! allocator
                                                OpenAIResponsesContext
                                                (openai-context-default allocator)))
+                                  (str-eq provider-name "openrouter")
+                                    (Some (load (field self openrouter)))
                                   (str-eq provider-name "deepseek-openai")
-                                    (Some (box allocator
+                                    (Some (box! allocator
                                                DeepSeekOpenAIContext
                                                (deepseek-openai-context-default allocator)))
                                   (str-eq provider-name "deepseek-anthropic")
-                                    (Some (box allocator
+                                    (Some (box! allocator
                                                DeepSeekAnthropicContext
                                                (deepseek-anthropic-context-default allocator)))
                                   (str-eq provider-name "codex")
@@ -227,7 +240,7 @@
                                           (None [(dyn ModelProvider)])
                                           (Some provider)))
                                   (str-eq provider-name "claude")
-                                    (Some (box allocator
+                                    (Some (box! allocator
                                                ClaudeAnthropicContext
                                                (claude-anthropic-context-default allocator)))
                                   (str-eq provider-name "agent-sdk")
@@ -250,13 +263,13 @@
                                   (>= (provider-config-find (field self config) provider-name) 0)
                                     (default-runtime-provider-factory-configured self provider-name)
                                   (str-eq provider-name "async-tool")
-                                    (Some (box allocator
+                                    (Some (box! allocator
                                                AsyncToolProvider
                                                (zeroed AsyncToolProvider)))
                                   :else (None [(dyn ModelProvider)]))))
 
 (defstruct RuntimeRunController
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (registry (ptr ToolRegistry))
    (provider-factory (dyn RuntimeProviderFactory))
    (emitter (ptr EventEmitter))
@@ -273,13 +286,13 @@
    (policy AgentRunPolicy)
    (max-active-runs i64)])
 
-(defn runtime-controller-new [(allocator (ptr Allocator))
+(defn runtime-controller-new [(allocator (dyn Allocator))
                               (registry (ptr ToolRegistry))
                               (provider-factory (dyn RuntimeProviderFactory))
                               (emitter (ptr EventEmitter))
                               (journal (ptr EventJournal))
                               (journal-path (slice u8))] (-> RuntimeRunController)
-  (let [controller (alloc/stack RuntimeRunController)]
+  (let [controller (primitive/alloc-stack RuntimeRunController)]
     (set! (.allocator controller) allocator)
     (set! (.registry controller) registry)
     (set! (.provider-factory controller) provider-factory)
@@ -290,8 +303,8 @@
     (set! (.pending controller) (al-new [PendingRuntimeRun] allocator))
     (set! (.cancellations controller) (al-new [PendingCancellation] allocator))
     (set! (.pending-next controller) 0)
-    (store! (field controller state-lock) (box allocator i64 0))
-    (store! (field controller stopping) (box allocator i64 0))
+    (store! (field controller state-lock) (box! allocator i64 0))
+    (store! (field controller stopping) (box! allocator i64 0))
     (set! (.scheduler-started controller) false)
     ;; Runs continue until completion, cancellation, a provider failure, or an
     ;; explicit deadline. Zero is the runner's unlimited-turn policy.
@@ -349,9 +362,9 @@
 
 (defn runtime-model-request [(controller (ptr RuntimeRunController))
                              (command Json)
-                             (allocator (ptr Allocator))] (-> (ptr ModelRequest))
-  (let [request (box allocator ModelRequest (zeroed ModelRequest))
-        messages (box allocator (ArrayList Message) (al-new [Message] allocator))]
+                             (allocator (dyn Allocator))] (-> (ptr ModelRequest))
+  (let [request (box! allocator ModelRequest (zeroed ModelRequest))
+        messages (box! allocator (ArrayList Message) (al-new [Message] allocator))]
     ;; Commands carry semantic messages as data. Keep the legacy prompt fallback
     ;; for non-conversation clients, but never flatten roles into prompt prose.
     (match (json-array-items (json-get command "messages"))
@@ -363,7 +376,7 @@
                         (let [item (al-get [Json] (load items) (load i))
                               role (command-string item "role")
                               content (command-string item "content")
-                              message (alloc/stack Message)]
+                              message (primitive/alloc-stack Message)]
                           (store! (field message role)
                                   (cond (= role "assistant") (AssistantRole)
                                         (= role "system") (SystemRole)
@@ -372,7 +385,7 @@
                           (al-push! [Message] messages (load message))
                           (set! i (+ (load i) 1)))))))
       (None []
-            (let [message (alloc/stack Message)]
+            (let [message (primitive/alloc-stack Message)]
               (set! (.role message) (UserRole))
               (set! (.content message) (command-string command "prompt"))
               (al-push! [Message] messages (load message)))))
@@ -487,9 +500,9 @@
                   (al-len [ActiveRuntimeRun]
                           (.runs controller)))
               (break)
-              (let [slot
-                      (index (load (field (field controller runs) data))
-                             (load i))]
+              (let [slot (al-elem [ActiveRuntimeRun]
+                                  (field controller runs)
+                                  (load i))]
                 (if (agent-run-finished? (field slot handle))
                     (let [last-index
                             (- (al-len [ActiveRuntimeRun]
@@ -606,7 +619,7 @@
                                         (.policy controller))]
             (if (not (.spawned handle))
                 -1
-                (let [active (alloc/stack ActiveRuntimeRun)]
+                (let [active (primitive/alloc-stack ActiveRuntimeRun)]
                   (set! (.run-id active) (.run-id request))
                   (set! (.command active) command)
                   (set! (.handle active) handle)
@@ -626,7 +639,7 @@
         -1
         (let [(mut launch-command) (json-clone allocator command)]
           (when (= (command-string (load launch-command) "actor") "agent-notification")
-            (let [temporary (alloc/stack RunService)]
+            (let [temporary (primitive/alloc-stack RunService)]
               (store! (field temporary allocator) (load (field controller allocator)))
               (store! (field temporary journal-path) (load (field controller journal-path)))
               (store! (field temporary journal) (load (field controller journal)))
@@ -741,7 +754,7 @@
               (do
                 (allocation-domain-close! (load (field controller allocator)) domain)
                 -1)
-              (let [pending (alloc/stack PendingRuntimeRun)]
+              (let [pending (primitive/alloc-stack PendingRuntimeRun)]
                 (set! (.command pending) (json-clone (allocation-domain-allocator domain) command))
                 (set! (.allocation-domain pending) domain)
                 (set! (.workflow pending) (if (> (str-len (command-string command "workflow_id")) 0) 1 0))
@@ -849,7 +862,7 @@
                                                          (runtime-controller-process-pending! controller pending)
                                                          (set! processed true)))))
                       (when (load processed)
-                        (let [removed (alloc/stack PendingRuntimeRun)]
+                        (let [removed (primitive/alloc-stack PendingRuntimeRun)]
                           (store! (field removed command) (JsonNull))
                           (store! (field removed allocation-domain)
                                   (cast (ptr AllocationDomain) 0))
@@ -916,7 +929,7 @@
                     (do
                       (allocation-domain-close! (load (field controller allocator))
                                                 (load (field pending allocation-domain)))
-                      (let [removed (alloc/stack PendingRuntimeRun)]
+                      (let [removed (primitive/alloc-stack PendingRuntimeRun)]
                         (set! (.command removed) (JsonNull))
                         (set! (.allocation-domain removed) (cast (ptr AllocationDomain) 0))
                         (set! (.workflow removed) 0)
@@ -934,9 +947,9 @@
         n (al-len [ActiveRuntimeRun] (.runs controller))]
     (loop (if (>= (load i) n)
               (break)
-              (let [slot
-                      (index (load (field (field controller runs) data))
-                             (load i))]
+              (let [slot (al-elem [ActiveRuntimeRun]
+                                  (field controller runs)
+                                  (load i))]
                 (agent-run-cancel! (field slot handle))
                 (set! i (+ (load i) 1)))))
     0))
@@ -1022,9 +1035,9 @@
         (mut result) (RunCancellationTerminalOrMissing)]
     (loop (if (>= (load i) n)
               (break)
-              (let [slot
-                      (index (load (field (field controller runs) data))
-                             (load i))]
+              (let [slot (al-elem [ActiveRuntimeRun]
+                                  (field controller runs)
+                                  (load i))]
                 (if (= (.run-id slot) run-id)
                     (let [reserve-code (agent-run-reserve-cancellation! (field slot handle))]
                       (cond (= reserve-code 0)
@@ -1095,7 +1108,7 @@
   (let [domain (allocation-domain-open (load (field controller allocator)))]
     (if (not (allocation-domain-valid? domain))
         -1
-        (let [pending (alloc/stack PendingCancellation)]
+        (let [pending (primitive/alloc-stack PendingCancellation)]
           (set! (.command pending) (json-clone (allocation-domain-allocator domain) command))
           (set! (.allocation-domain pending) domain)
           (runtime-controller-lock! controller)
@@ -1133,9 +1146,9 @@
               n (al-len [ActiveRuntimeRun] (.runs controller))]
           (loop (if (>= (load i) n)
                     (break)
-                    (let [slot
-                            (index (load (field (field controller runs) data))
-                                   (load i))]
+                    (let [slot (al-elem [ActiveRuntimeRun]
+                                        (field controller runs)
+                                        (load i))]
                       (agent-run-join (mut (.handle slot)))
                       (allocation-domain-close! (load (field controller allocator))
                                                 (load (field slot allocation-domain)))
@@ -1161,7 +1174,7 @@
 ;; harness knows about each tool -- schema, effect, idempotence -- because it is
 ;; the loop deciding how to present and parallelize the call.
 (defn runtime-controller-tools-json [(controller (ptr RuntimeRunController))
-                                     (allocator (ptr Allocator))] (-> Json)
+                                     (allocator (dyn Allocator))] (-> Json)
   (let [registry (load (field controller registry))
         definitions (field registry definitions)
         (mut body) (json-object allocator)
@@ -1193,7 +1206,7 @@
 ;; wants one denies on the effect it reads here.
 (defn runtime-controller-authorize-tool [(controller (ptr RuntimeRunController))
                                          (command Json)
-                                         (allocator (ptr Allocator))] (-> Json)
+                                         (allocator (dyn Allocator))] (-> Json)
   (let [name (command-string command "name")
         (mut body) (json-object allocator)]
     (json-object-put! (mut body) "version" (json-integer allocator 1))
@@ -1227,10 +1240,10 @@
 
 (defn runtime-controller-invoke-tool [(controller (ptr RuntimeRunController))
                                       (command Json)
-                                      (allocator (ptr Allocator))] (-> Json)
-  (let [call (alloc/stack ToolCall)
-        calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
-        execution (alloc/stack ToolExecutionRequest)
+                                      (allocator (dyn Allocator))] (-> Json)
+  (let [call (primitive/alloc-stack ToolCall)
+        calls (box! allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+        execution (primitive/alloc-stack ToolExecutionRequest)
         session-id (runtime-tool-session-id command)]
     (set! (.id call) (runtime-tool-call-id command))
     (set! (.name call) (command-string command "name"))
@@ -1286,7 +1299,7 @@
                       (-> RunCancellationResult)
                       (runtime-controller-cancel! self (load command)))
   (describe-tools [(self (ptr RuntimeRunController))
-                   (allocator (ptr Allocator))
+                   (allocator (dyn Allocator))
                    (out (ptr Json))]
                   (-> i64)
                   (do
@@ -1294,7 +1307,7 @@
                     0))
   (authorize-tool-call [(self (ptr RuntimeRunController))
                         (command (ptr Json))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (out (ptr Json))]
                        (-> i64)
                        (do
@@ -1305,7 +1318,7 @@
                          0))
   (invoke-tool [(self (ptr RuntimeRunController))
                 (command (ptr Json))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (out (ptr Json))]
                (-> i64)
                (do

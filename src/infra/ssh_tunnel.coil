@@ -74,7 +74,7 @@
 (defn ssh-tunnel-spec [(host (slice u8))
                        (remote-host (slice u8))
                        (remote-port i64)] (-> SshTunnelSpec)
-  (let [spec (alloc/stack SshTunnelSpec)]
+  (let [spec (primitive/alloc-stack SshTunnelSpec)]
     (set! (.host spec) host)
     (set! (.remote-host spec)
           (if (= (slice-len [u8] remote-host) 0) "127.0.0.1" remote-host))
@@ -110,7 +110,7 @@
    (last-error (slice u8))])
 
 (defn ssh-tunnel-new [(spec SshTunnelSpec)] (-> SshTunnel)
-  (let [tunnel (alloc/stack SshTunnel)]
+  (let [tunnel (primitive/alloc-stack SshTunnel)]
     (set! (.spec tunnel) spec)
     (set! (.local-port tunnel) 0)
     (set! (.child tunnel) (zeroed subprocess/Child))
@@ -140,8 +140,8 @@
 ;; The gap between release and ssh's bind is a real race, but it is a race we can
 ;; detect: ssh runs with ExitOnForwardFailure, so losing it is a clean child exit
 ;; with a diagnostic rather than a tunnel that silently forwards nothing.
-(defn ssh-reserve-local-port [(allocator (ptr Allocator))] (-> i64)
-  (let [listener (alloc/stack socket/TcpListener)]
+(defn ssh-reserve-local-port [(allocator (dyn Allocator))] (-> i64)
+  (let [listener (primitive/alloc-stack socket/TcpListener)]
     (match (socket/tcp-listen allocator listener "127.0.0.1" 0 false 1)
       (Ok [opened]
           (let [port
@@ -164,8 +164,8 @@
               (None [] true)))
         (Err [failure] false))))
 
-(defn ssh-tunnel-port-accepting? [(allocator (ptr Allocator)) (port i64)] (-> bool)
-  (let [connection (alloc/stack socket/TcpConnection)]
+(defn ssh-tunnel-port-accepting? [(allocator (dyn Allocator)) (port i64)] (-> bool)
+  (let [connection (primitive/alloc-stack socket/TcpConnection)]
     (match (socket/tcp-connect allocator connection "127.0.0.1" port)
       (Ok [opened]
           (do
@@ -176,7 +176,7 @@
 ;; `-L 127.0.0.1:<local>:<remote-host>:<remote-port>`. The local bind address is
 ;; explicit rather than left to ssh's default so the forwarded service is never
 ;; exposed beyond this machine.
-(defn ssh-forward-argument [(allocator (ptr Allocator))
+(defn ssh-forward-argument [(allocator (dyn Allocator))
                             (local-port i64)
                             (spec (ptr SshTunnelSpec))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
@@ -188,7 +188,7 @@
     (sb-push-i64! (mut buffer) (load (field spec remote-port)))
     (sb-str (load buffer))))
 
-(defn ssh-option-argument [(allocator (ptr Allocator))
+(defn ssh-option-argument [(allocator (dyn Allocator))
                            (name (slice u8))
                            (value i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
@@ -207,7 +207,7 @@
 ;;                             hanging requests until the HTTP timeout
 ;;   StrictHostKeyChecking     accept-new trusts first contact but still refuses a
 ;;                             changed key, so a rotated host is a loud failure
-(defn ssh-tunnel-arguments [(allocator (ptr Allocator))
+(defn ssh-tunnel-arguments [(allocator (dyn Allocator))
                             (local-port i64)
                             (spec (ptr SshTunnelSpec))] (-> (slice (slice u8)))
   (let [(mut args) (al-new [(slice u8)] allocator)]
@@ -241,11 +241,11 @@
 ;; closed and this cannot block. The pipe is left undrained while the tunnel is
 ;; healthy; `ssh -N` in batch mode emits nothing on a working connection, so the
 ;; pipe buffer is not a practical bound on tunnel lifetime.
-(defn ssh-tunnel-stderr-text [(allocator (ptr Allocator))
+(defn ssh-tunnel-stderr-text [(allocator (dyn Allocator))
                               (tunnel (ptr SshTunnel))] (-> (slice u8))
-  (let [reader (alloc/stack io/Reader)
+  (let [reader (primitive/alloc-stack io/Reader)
         (mut captured) (al-new [u8] allocator)
-        chunk (alloc/stack (array u8 256))]
+        chunk (primitive/alloc-stack (array u8 256))]
     (match (subprocess/child-stderr-reader reader (field tunnel child))
       (Some [stream]
             (loop
@@ -289,7 +289,7 @@
   0)
 
 (defn ssh-tunnel-fail! [(tunnel (ptr SshTunnel))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (message (slice u8))] (-> SshTunnelResult)
   (ssh-tunnel-close! tunnel)
   (set! (.failures tunnel) (+ (load (field tunnel failures)) 1))
@@ -301,7 +301,7 @@
 
 ;; Describe a dead child in terms an operator can act on, preferring ssh's own
 ;; words over our summary of them.
-(defn ssh-tunnel-spawn-failure-text [(allocator (ptr Allocator))
+(defn ssh-tunnel-spawn-failure-text [(allocator (dyn Allocator))
                                      (tunnel (ptr SshTunnel))
                                      (reason (slice u8))] (-> (slice u8))
   (let [detail (ssh-tunnel-stderr-text allocator tunnel)
@@ -320,7 +320,7 @@
 ;; readiness budget runs out. Every exit from this function leaves the tunnel
 ;; either genuinely usable or fully torn down -- there is no third state.
 (defn ssh-tunnel-open! [(tunnel (ptr SshTunnel))
-                        (allocator (ptr Allocator))] (-> SshTunnelResult)
+                        (allocator (dyn Allocator))] (-> SshTunnelResult)
   (let [problem (ssh-tunnel-spec-problem (field tunnel spec))]
     (if (> (slice-len [u8] problem) 0)
         (ssh-tunnel-fail! tunnel allocator problem)
@@ -391,7 +391,7 @@
 ;; backoff expires the previous error is returned verbatim, so a caller sees the
 ;; original cause rather than a fresh timeout each time.
 (defn ssh-tunnel-ensure! [(tunnel (ptr SshTunnel))
-                          (allocator (ptr Allocator))] (-> SshTunnelResult)
+                          (allocator (dyn Allocator))] (-> SshTunnelResult)
   (if (and (ssh-tunnel-child-alive? tunnel)
            (ssh-tunnel-port-accepting? allocator (load (field tunnel local-port))))
       (SshTunnelReady (load (field tunnel local-port)))
@@ -403,7 +403,7 @@
             (ssh-tunnel-open! tunnel allocator)))))
 
 ;; Loopback base URL for a ready tunnel, for a provider that builds request URLs.
-(defn ssh-tunnel-base-url [(allocator (ptr Allocator))
+(defn ssh-tunnel-base-url [(allocator (dyn Allocator))
                            (local-port i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) "http://127.0.0.1:")

@@ -1,6 +1,6 @@
 (module tui-fixture-provider)
 
-;; Deterministic streaming provider for black-box TUI verification. The default
+;; Deterministic streaming provider for black-box! TUI verification. The default
 ;; runtime factory exposes it only when HARNESS_TUI_TEST_PROVIDER=1, so it cannot
 ;; be selected accidentally in a normal harness process.
 
@@ -43,10 +43,10 @@
   (execute-model [(self (ptr TuiFixtureProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (tui-fixture-event emitter request (ModelRequestStarted) (JsonNull))
-                 ;; Leave the pre-token state observable to black-box TUI tests.
+                 ;; Leave the pre-token state observable to black-box! TUI tests.
                  (sleep-ms 250)
                  (tui-fixture-delta emitter request "It looks like ")
                  (tui-fixture-delta emitter request "that may have been ")

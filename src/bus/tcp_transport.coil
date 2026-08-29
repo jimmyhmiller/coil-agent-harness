@@ -26,7 +26,7 @@
   0)
 
 ;; Dial a peer (the client side). Returns 0, or a negative transport code.
-(defn tcp-transport-connect! [(allocator (ptr Allocator))
+(defn tcp-transport-connect! [(allocator (dyn Allocator))
                               (transport (ptr TcpTransport))
                               (host (slice u8))
                               (port i64)] (-> i64)

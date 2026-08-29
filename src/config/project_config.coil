@@ -34,6 +34,8 @@
 ;; send the work somewhere else.
 (module harness-project-config)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -68,8 +70,8 @@
   (ProjectConfigLoaded [(config ProjectConfig)])
   (ProjectConfigInvalid [(message (slice u8))]))
 
-(defn project-config-new [(allocator (ptr Allocator))] (-> ProjectConfig)
-  (let [config (alloc/stack ProjectConfig)]
+(defn project-config-new [(allocator (dyn Allocator))] (-> ProjectConfig)
+  (let [config (primitive/alloc-stack ProjectConfig)]
     (set! (.projects config) (al-new [ConfiguredProject] allocator))
     (load config)))
 
@@ -111,7 +113,7 @@
         PROJECT_DEFAULT_ISSUE_WORKFLOW
         (load (field (project-config-at config at) default-issue-workflow)))))
 
-(defn project-env-or [(allocator (ptr Allocator))
+(defn project-env-or [(allocator (dyn Allocator))
                       (name (slice u8))
                       (fallback (slice u8))] (-> (slice u8))
   (match (os/env-get allocator name)
@@ -121,7 +123,7 @@
           (None [] fallback)))
     (Err [failure] fallback)))
 
-(defn project-config-root [(allocator (ptr Allocator))] (-> (slice u8))
+(defn project-config-root [(allocator (dyn Allocator))] (-> (slice u8))
   (let [configured (project-env-or allocator "HARNESS_CONFIG_DIR" "")]
     (if (> (slice-len [u8] configured) 0)
         configured
@@ -129,7 +131,7 @@
                    (project-env-or allocator "HOME" "/tmp")
                    ".coil-agent-harness"))))
 
-(defn project-config-path [(allocator (ptr Allocator))] (-> (slice u8))
+(defn project-config-path [(allocator (dyn Allocator))] (-> (slice u8))
   (path-join allocator (project-config-root allocator) PROJECT_CONFIG_FILE))
 
 (defn project-string [(value Json) (key (slice u8)) (fallback (slice u8))] (-> (slice u8))
@@ -141,7 +143,7 @@
 ;; else is returned unchanged, including a `~user` form this does not resolve --
 ;; the entry rule below rejects that separately rather than passing a path with a
 ;; literal tilde to a subprocess.
-(defn project-expand-home [(allocator (ptr Allocator)) (path (slice u8))] (-> (slice u8))
+(defn project-expand-home [(allocator (dyn Allocator)) (path (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] path)]
     (if (or (= n 0) (not (= (primitive-byte path 0) 126)))
         path
@@ -155,7 +157,7 @@
 (defn primitive-byte [(text (slice u8)) (at i64)] (-> i64)
   (cast i64 (slice-get [u8] text at)))
 
-(defn project-entry-error [(allocator (ptr Allocator))
+(defn project-entry-error [(allocator (dyn Allocator))
                            (name (slice u8))
                            (at i64)
                            (message (slice u8))] (-> (slice u8))
@@ -195,7 +197,7 @@
     (load ok)))
 
 ;; Read one entry into `project`, returning "" or the reason it was rejected.
-(defn project-config-entry [(allocator (ptr Allocator))
+(defn project-config-entry [(allocator (dyn Allocator))
                             (entry Json)
                             (at i64)
                             (config (ptr ProjectConfig))
@@ -241,7 +243,7 @@
 
 ;; Parse an already-read document. Separate from reading the file so the format has
 ;; tests that do not need a filesystem.
-(defn project-config-parse [(allocator (ptr Allocator))
+(defn project-config-parse [(allocator (dyn Allocator))
                             (source (slice u8))] (-> ProjectConfigResult)
   (let [parsed (json-parse allocator source)]
     (if (not (.ok parsed))
@@ -280,7 +282,7 @@
 ;; case and must behave exactly like having an empty one. A file that exists but
 ;; cannot be read is a failure: the operator declared projects and the harness
 ;; cannot honour them.
-(defn project-config-load [(allocator (ptr Allocator))] (-> ProjectConfigResult)
+(defn project-config-load [(allocator (dyn Allocator))] (-> ProjectConfigResult)
   (let [path (project-config-path allocator)]
     (if (not (path-exists? allocator path))
         (ProjectConfigLoaded (project-config-new allocator))

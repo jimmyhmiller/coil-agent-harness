@@ -15,7 +15,7 @@
 
 ;; Selecting the fixture's behavior is part of building the tunnel that will run it,
 ;; so a test never has a spec and a mode that disagree.
-(defn fixture-tunnel [(allocator (ptr Allocator))
+(defn fixture-tunnel [(allocator (dyn Allocator))
                       (mode (slice u8))
                       (ready-timeout-ms i64)] (-> SshTunnel)
   (let [(mut spec) (ssh-tunnel-spec "fixture-host" "" 8080)]

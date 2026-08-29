@@ -1,5 +1,7 @@
 (module harness-factory-workspace)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.cancellation" :as native-cancellation)
 (import "coil.fs" :as fs)
@@ -17,10 +19,10 @@
   (FactorySnapshotCreated [(directory (slice u8))])
   (FactorySnapshotFailed [(message (slice u8))]))
 
-(defn initialize-workspace-repository [(allocator (ptr Allocator))
+(defn initialize-workspace-repository [(allocator (dyn Allocator))
                                        (workspace (slice u8))] (-> bool)
-  (let [args (alloc/stack (array (slice u8) 2))
-        run-result (alloc/stack subprocess/RunResult)]
+  (let [args (primitive/alloc-stack (array (slice u8) 2))
+        run-result (primitive/alloc-stack subprocess/RunResult)]
     (set! (index args 0) "init")
     (set! (index args 1) "--quiet")
     (let [options
@@ -45,7 +47,7 @@
 ;; Copy the entire reusable factory definition into a run-owned location. `cp`
 ;; receives paths as argv entries rather than shell source, so names cannot be
 ;; interpreted as commands or options.
-(defn snapshot-factory-definition [(allocator (ptr Allocator))
+(defn snapshot-factory-definition [(allocator (dyn Allocator))
                                    (source (slice u8))
                                    (workspace (slice u8))] (-> FactorySnapshotResult)
   (if (not (initialize-workspace-repository allocator workspace))
@@ -56,8 +58,8 @@
         (sb-push-str! (mut name) "definition-")
         (sb-push-str! (mut name) (json-stringify allocator (json-integer allocator (now-ms))))
         (let [destination (path-join allocator root (sb-finish! (mut name)))
-              args (alloc/stack (array (slice u8) 3))
-              run-result (alloc/stack subprocess/RunResult)]
+              args (primitive/alloc-stack (array (slice u8) 3))
+              run-result (primitive/alloc-stack subprocess/RunResult)]
           (set! (index args 0) "-R")
           (set! (index args 1) source)
           (set! (index args 2) destination)

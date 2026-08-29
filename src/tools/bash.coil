@@ -1,5 +1,7 @@
 (module harness-bash-tool)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.cancellation" :as native-cancellation)
 (import "coil.match" :use *)
@@ -91,7 +93,7 @@
 (defn execute-bash [(self (ptr BashTool))
                     (call (ptr ToolCall))
                     (context (ptr ToolExecutionContext))
-                    (allocator (ptr Allocator))] (-> ToolResult)
+                    (allocator (dyn Allocator))] (-> ToolResult)
   (let [command
           (match (json-string-at (.arguments call) "command")
             (Some [value] value)
@@ -122,8 +124,8 @@
                                      (concat-or-empty allocator
                                                       (load (field call id))
                                                       ".stderr"))
-                  args (alloc/stack (array (slice u8) 6))
-                  run-result (alloc/stack subprocess/RunResult)]
+                  args (primitive/alloc-stack (array (slice u8) 6))
+                  run-result (primitive/alloc-stack subprocess/RunResult)]
               (store! (index args 0) "-c")
               (store! (index args 1) BASH_SPOOL_SCRIPT)
               (store! (index args 2) "harness-bash")
@@ -209,11 +211,11 @@
   (execute-tool [(self (ptr BashTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-bash self call context allocator)))
 
-(defn bash-schema [(allocator (ptr Allocator))] (-> Json)
+(defn bash-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut command) (json-object allocator)
         (mut timeout-ms) (json-object allocator)
         (mut properties) (json-object allocator)
@@ -238,10 +240,10 @@
     (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
     (load schema)))
 
-(defn bash-definition [(allocator (ptr Allocator))
+(defn bash-definition [(allocator (dyn Allocator))
                        (cwd (slice u8))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator BashTool (zeroed BashTool))]
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator BashTool (zeroed BashTool))]
     (set! (.cwd implementation) cwd)
     (set! (.name (.spec definition)) "bash")
     (set! (.description (.spec definition))
@@ -259,6 +261,6 @@
     (load definition)))
 
 (defn register-bash-tool! [(registry (mut ToolRegistry))
-                           (allocator (ptr Allocator))
+                           (allocator (dyn Allocator))
                            (cwd (slice u8))] (-> bool)
   (tool-register! (mut registry) (bash-definition allocator cwd)))

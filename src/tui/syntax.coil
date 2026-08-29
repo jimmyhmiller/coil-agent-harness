@@ -12,6 +12,8 @@
 ;; that can fail is a renderer that can lose a message.
 (module harness-tui-syntax)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -61,7 +63,7 @@
 (defn syntax-language-new [(name (slice u8))
                            (comment CommentStyle)
                            (keywords (slice u8))] (-> SyntaxLanguage)
-  (let [language (alloc/stack SyntaxLanguage)]
+  (let [language (primitive/alloc-stack SyntaxLanguage)]
     (set! (.name language) name)
     (set! (.comment language) comment)
     (set! (.keywords language) keywords)
@@ -100,7 +102,7 @@
 
 ;; Membership test against the space-delimited keyword string. Both sides are
 ;; wrapped in spaces so `in` cannot match inside `int`.
-(defn syntax-keyword? [(allocator (ptr Allocator))
+(defn syntax-keyword? [(allocator (dyn Allocator))
                        (language (ref SyntaxLanguage))
                        (word (slice u8))] (-> bool)
   (let [(mut padded) (sb-new allocator)]
@@ -142,7 +144,7 @@
 ;; Classify one line into styled spans. Lines are independent: no state carries
 ;; across them, which is what makes a partially streamed block safe to render and
 ;; re-render as it grows.
-(defn syntax-highlight-line [(allocator (ptr Allocator))
+(defn syntax-highlight-line [(allocator (dyn Allocator))
                              (language (ref SyntaxLanguage))
                              (line (slice u8))] (-> (ArrayList FrameSpan))
   (let [(mut spans) (al-new [FrameSpan] allocator)

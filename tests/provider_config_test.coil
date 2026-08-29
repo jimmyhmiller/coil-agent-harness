@@ -18,13 +18,13 @@
     (Some [at] true)
     (None [] false)))
 
-(defn parse-invalid [(allocator (ptr Allocator)) (source (slice u8))] (-> (slice u8))
+(defn parse-invalid [(allocator (dyn Allocator)) (source (slice u8))] (-> (slice u8))
   (match (provider-config-parse allocator source)
     (ProviderConfigLoaded [config] "")
     (ProviderConfigInvalid [message] message)))
 
 (const SSH_PROVIDER
-  "{\"version\":1,\"providers\":[{\"name\":\"metaphysics\",\"kind\":\"openai-chat\",\"default_model\":\"qwen3.8-27b\",\"reasoning\":{\"dialect\":\"qwen-jinja\",\"default_effort\":\"medium\"},\"transport\":{\"ssh\":{\"host\":\"box.example\",\"remote_port\":8080}}}]}")
+  "{\"version\":1,\"providers\":[{\"name\":\"metaphysics\",\"kind\":\"openai-chat\",\"default_model\":\"qwen3.8-27b\",\"reasoning\":{\"dialect\":\"qwen-jinja\",\"default_effort\":\"medium\"},\"transport\":{\"ssh\":{\"host\":\"box!.example\",\"remote_port\":8080}}}]}")
 
 (deftest an-ssh-provider-round-trips-with-its-defaults
          (let [allocator (malloc-allocator)]
@@ -49,7 +49,7 @@
                      (DirectTransport [url] (assert false))
                      (SshTransport [spec]
                                    (let [(mut resolved) spec]
-                                     (assert (= (.host resolved) "box.example"))
+                                     (assert (= (.host resolved) "box!.example"))
                                      (assert-eq (.remote-port resolved) 8080)
                                      ;; The far side is loopback unless stated.
                                      (assert (= (.remote-host resolved) "127.0.0.1")))))))))))

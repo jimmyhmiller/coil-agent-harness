@@ -1,5 +1,7 @@
 (module agent-sdk-provider)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -24,8 +26,8 @@
     (Some [text] text)
     (None [] "")))
 
-(defn agent-sdk-context [(allocator (ptr Allocator)) (cwd (slice u8))] (-> AgentSdkContext)
-  (let [context (alloc/stack AgentSdkContext)]
+(defn agent-sdk-context [(allocator (dyn Allocator)) (cwd (slice u8))] (-> AgentSdkContext)
+  (let [context (primitive/alloc-stack AgentSdkContext)]
     (set! (.cwd context) cwd)
     (set! (.host context)
           (match (os/env-get allocator "HARNESS_AGENT_SDK_HOST")
@@ -45,7 +47,7 @@
               (.operation-id request)
               "" "agent-sdk" (.model request) payload))
 
-(defn agent-sdk-tools [(allocator (ptr Allocator))
+(defn agent-sdk-tools [(allocator (dyn Allocator))
                        (registry (ptr ToolRegistry))] (-> Json)
   (let [(mut tools) (json-array allocator)
         definitions (field registry definitions)
@@ -67,7 +69,7 @@
 
 (defn agent-sdk-start [(context (ptr AgentSdkContext))
                        (request (ptr ModelRequest))
-                       (allocator (ptr Allocator))] (-> Json)
+                       (allocator (dyn Allocator))] (-> Json)
   (let [(mut message) (json-object allocator)]
     (json-put-string! (mut message) "type" "start")
     (json-put-string! (mut message) "prompt" (codex-last-user-message request))
@@ -79,14 +81,14 @@
                       (agent-sdk-tools allocator (load (field request tools))))
     (load message)))
 
-(defn agent-sdk-run-tool [(allocator (ptr Allocator))
+(defn agent-sdk-run-tool [(allocator (dyn Allocator))
                           (process (ptr subprocess/Child))
                           (emitter (ptr EventEmitter))
                           (request (ptr ModelRequest))
                           (message Json)] (-> i64)
-  (let [call (alloc/stack ToolCall)
-        calls (box allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
-        execution (alloc/stack ToolExecutionRequest)]
+  (let [call (primitive/alloc-stack ToolCall)
+        calls (box! allocator (ArrayList ToolCall) (al-new [ToolCall] allocator))
+        execution (primitive/alloc-stack ToolExecutionRequest)]
     (set! (.id call) (agent-sdk-string message "id"))
     (set! (.name call) (agent-sdk-string message "name"))
     (set! (.arguments call) (json-get message "arguments"))
@@ -115,9 +117,9 @@
 (defn agent-sdk-execute [(context (ptr AgentSdkContext))
                          (request (ptr ModelRequest))
                          (emitter (ptr EventEmitter))
-                         (allocator (ptr Allocator))] (-> ModelResult)
-  (let [child (alloc/stack subprocess/Child)
-        args (alloc/stack (array (slice u8) 1))]
+                         (allocator (dyn Allocator))] (-> ModelResult)
+  (let [child (primitive/alloc-stack subprocess/Child)
+        args (primitive/alloc-stack (array (slice u8) 1))]
     (set! (index args 0) (.host context))
     (match (subprocess/spawn allocator child "node"
                              (slice-new [(slice u8)] (index args 0) 1)
@@ -171,5 +173,5 @@
   (execute-model [(self (ptr AgentSdkContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))] (-> ModelResult)
+                  (allocator (dyn Allocator))] (-> ModelResult)
                  (agent-sdk-execute self request emitter allocator)))

@@ -14,6 +14,8 @@
 ;; it is what events and parsed responses are attributed to.
 (module openai-chat-wire)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -27,7 +29,7 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-(defn chat-tool-result-message [(allocator (ptr Allocator)) (result ToolResult)] (-> Json)
+(defn chat-tool-result-message [(allocator (dyn Allocator)) (result ToolResult)] (-> Json)
   (let [(mut message) (json-object allocator)
         output
           (match (.status result)
@@ -49,7 +51,7 @@
 ;; resent each turn. Replaying only the last one left the model re-deciding from
 ;; the same starting point every turn, which is an agent that repeats itself
 ;; until its budget runs out.
-(defn chat-turn-messages! [(allocator (ptr Allocator))
+(defn chat-turn-messages! [(allocator (dyn Allocator))
                            (messages (mut Json))
                            (output Json)
                            (results (ptr (ArrayList ToolResult)))
@@ -76,7 +78,7 @@
     0)
   0)
 
-(defn chat-continuation-messages [(allocator (ptr Allocator))
+(defn chat-continuation-messages [(allocator (dyn Allocator))
                                   (request (ptr ModelRequest))] (-> Json)
   (let [(mut messages) (messages-wire allocator (load (field request messages)))
         continuation (field request continuation)
@@ -115,7 +117,7 @@
         (json-number-i64 (json-get (json-get usage "prompt_tokens_details") "cached_tokens")))))
 
 (defn chat-usage [(root Json)] (-> ModelUsage)
-  (let [usage (alloc/stack ModelUsage)
+  (let [usage (primitive/alloc-stack ModelUsage)
         wire (json-get root "usage")]
     (set! (.input-tokens usage) (json-number-i64 (json-get wire "prompt_tokens")))
     (set! (.output-tokens usage) (json-number-i64 (json-get wire "completion_tokens")))
@@ -125,7 +127,7 @@
     (set! (.cache-write-tokens usage) 0)
     (load usage)))
 
-(defn chat-parse-response [(allocator (ptr Allocator))
+(defn chat-parse-response [(allocator (dyn Allocator))
                            (provider (slice u8))
                            (root Json)] (-> ModelResponse)
   (let [(mut response) (response-empty allocator)
@@ -182,7 +184,7 @@
    (arguments StrBuf)])
 
 (defstruct OpenAIChatStreamState
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (request (ptr ModelRequest))
    (emitter (ptr EventEmitter))
    (provider (slice u8))
@@ -198,7 +200,7 @@
 ;; Initialize a stream state. Every field is set here so a provider cannot forget
 ;; one and get a silently empty buffer or an unattributed event.
 (defn openai-chat-stream-state-init! [(state (ptr OpenAIChatStreamState))
-                                      (allocator (ptr Allocator))
+                                      (allocator (dyn Allocator))
                                       (request (ptr ModelRequest))
                                       (emitter (ptr EventEmitter))
                                       (provider (slice u8))] (-> i64)
@@ -222,14 +224,14 @@
                          (index-value i64)] (-> (ptr OpenAIChatStreamTool))
   (loop (if (> (al-len [OpenAIChatStreamTool] (.tools state)) index-value)
             (break)
-            (let [tool (alloc/stack OpenAIChatStreamTool)]
+            (let [tool (primitive/alloc-stack OpenAIChatStreamTool)]
               (set! (.id tool) "")
               (set! (.name tool) "")
               (set! (.arguments tool) (sb-new (load (field state allocator))))
               (al-push! [OpenAIChatStreamTool]
                         (mut (.tools state))
                         (load tool)))))
-  (index (load (field (field state tools) data)) index-value))
+  (al-elem [OpenAIChatStreamTool] (field state tools) index-value))
 
 (defn chat-stream-tool-delta! [(state (ptr OpenAIChatStreamState))
                                (wire Json)] (-> i64)
@@ -367,7 +369,7 @@
 
 ;; The tools/tool_choice pair, added only when the run actually has tools. Some
 ;; servers reject an empty `tools` array outright.
-(defn chat-attach-tools! [(allocator (ptr Allocator))
+(defn chat-attach-tools! [(allocator (dyn Allocator))
                           (body (mut Json))
                           (request (ptr ModelRequest))] (-> i64)
   (when (> (al-len [ToolDefinition]
@@ -387,7 +389,7 @@
 
 ;; Streaming is always requested with usage included: without it a run has no token
 ;; accounting at all, and every server that streams supports asking for it.
-(defn chat-attach-stream-options! [(allocator (ptr Allocator))
+(defn chat-attach-stream-options! [(allocator (dyn Allocator))
                                    (body (mut Json))] (-> i64)
   (json-put-bool! (mut body) "stream" true)
   (let [(mut stream-options) (json-object allocator)]

@@ -1,5 +1,7 @@
 (module harness-json-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
@@ -91,7 +93,7 @@
                parsed
                  (json-parse allocator
                              "{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}},\"required\":[\"command\"],\"additionalProperties\":false}")
-               spec (alloc/stack ToolSpec)]
+               spec (primitive/alloc-stack ToolSpec)]
            (store! (field spec name) "optional-tool")
            (store! (field spec input-schema) (load (field parsed value)))
            (store! (field spec strict) true)

@@ -25,9 +25,9 @@
   (HttpRequestAccepted [(request server/Request)])
   (HttpRequestRejected [(status i64)]))
 
-(defn http-listener-open [(allocator (ptr Allocator))
+(defn http-listener-open [(allocator (dyn Allocator))
                           (port i64)] (-> ListenerOpenResult)
-  (let [listener (alloc/stack HttpListener)]
+  (let [listener (primitive/alloc-stack HttpListener)]
     (match (socket/tcp-listen allocator
                               (field listener native)
                               "127.0.0.1"
@@ -56,7 +56,7 @@
     0))
 
 (defn http-listener-accept [(listener (ptr HttpListener))] (-> i64)
-  (let [connection (alloc/stack socket/TcpConnection)]
+  (let [connection (primitive/alloc-stack socket/TcpConnection)]
     (match (socket/tcp-accept (field listener native) connection)
       (Err [failure] -1)
       (Ok [accepted] (cast i64 (.fd accepted))))))
@@ -65,10 +65,10 @@
   (sb-push-byte! (mut buffer) (cast u8 13))
   (sb-push-byte! (mut buffer) (cast u8 10)))
 
-(defn read-accepted-http [(allocator (ptr Allocator))
+(defn read-accepted-http [(allocator (dyn Allocator))
                           (client-fd i64)] (-> AcceptedHttpRequest)
   (let [(mut bytes) (al-new [u8] allocator)
-        buffer (alloc/stack (array u8 16384))]
+        buffer (primitive/alloc-stack (array u8 16384))]
     (block :done
              (loop (match (time/duration-millis 1000)
                      (Err [failure] (return-from :done (HttpRequestRejected 400)))
@@ -101,12 +101,12 @@
                                     (return-from :done (HttpRequestRejected 400))
                                     0)))))))))))
 
-(defn write-http-response [(allocator (ptr Allocator))
+(defn write-http-response [(allocator (dyn Allocator))
                            (client-fd i64)
                            (status i64)
                            (body (slice u8))] (-> i64)
   (let [(mut head) (sb-new allocator)
-        writer (alloc/stack io/Writer)]
+        writer (primitive/alloc-stack io/Writer)]
     (sb-push-str! (mut head) "HTTP/1.1 ")
     (sb-push-str! (mut head)
                   (cond (= status 200) "200 OK"

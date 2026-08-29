@@ -1,5 +1,7 @@
 (module harness-event-journal-background-fixture)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -23,7 +25,7 @@
   (execute-model [(self (ptr JournalFixtureProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (emit-event emitter 2 (ModelResponseDelta) "run" "op" "" "fixture" "model" (JsonString "delta"))
                  (let [(mut response) (response-empty allocator)]
@@ -48,14 +50,14 @@
       (JournalOpenFailed [message] 2)
       (JournalOpened [opened]
                      (do
-                       (store! journal (box service-allocator EventJournal opened))
-                       (let [registry (box allocator ToolRegistry (tool-registry-new allocator))
-                             messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-                             request (box allocator ModelRequest (zeroed ModelRequest))
-                             provider (box allocator JournalFixtureProvider (zeroed JournalFixtureProvider))
-                             sequence (box service-allocator i64 1)
-                             emitter (box service-allocator EventEmitter (zeroed EventEmitter))
-                             policy (alloc/stack AgentRunPolicy)]
+                       (store! journal (box! service-allocator EventJournal opened))
+                       (let [registry (box! allocator ToolRegistry (tool-registry-new allocator))
+                             messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+                             request (box! allocator ModelRequest (zeroed ModelRequest))
+                             provider (box! allocator JournalFixtureProvider (zeroed JournalFixtureProvider))
+                             sequence (box! service-allocator i64 1)
+                             emitter (box! service-allocator EventEmitter (zeroed EventEmitter))
+                             policy (primitive/alloc-stack AgentRunPolicy)]
                          (store! (field request run-id) "run")
                          (store! (field request operation-id) "op")
                          (store! (field request model) "model")

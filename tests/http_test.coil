@@ -15,7 +15,7 @@
 
 (impl StreamingHttpTransport FakeStreamingHttpTransport
   (send-streaming-http [(self (ptr FakeStreamingHttpTransport))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (request (ptr HttpRequest))
                         (response (mut HttpResponse))]
                        (-> i64)
@@ -45,8 +45,8 @@
 
 (deftest curl-stream-callback-delivers-bounds-capture-and-propagates-stop
          (let [allocator (malloc-allocator)
-               observed (box allocator i64 0)
-               capture (alloc/stack StreamingCapture)
+               observed (box! allocator i64 0)
+               capture (primitive/alloc-stack StreamingCapture)
                input "stream bytes"]
            (store! (field (field capture sink) context) (cast (ptr i8) observed))
            (store! (field (field capture sink) consume) (fnptr-of accept-http-chunk))
@@ -71,13 +71,13 @@
 (deftest injectable-streaming-transport-delivers-chunks-and-normalizes-failure
          (let [allocator (malloc-allocator)
                headers
-                 (box allocator
+                 (box! allocator
                       (ArrayList (slice u8))
                       (al-new [(slice u8)] allocator))
-               observed (box allocator i64 0)
-               request (alloc/stack HttpRequest)
+               observed (box! allocator i64 0)
+               request (primitive/alloc-stack HttpRequest)
                transport
-                 (box allocator
+                 (box! allocator
                       FakeStreamingHttpTransport
                       (zeroed FakeStreamingHttpTransport))]
            (store! (field request url) "https://example.invalid/stream")

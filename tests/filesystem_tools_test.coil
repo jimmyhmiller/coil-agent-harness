@@ -1,5 +1,7 @@
 (module harness-filesystem-tools-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -10,13 +12,13 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-(defn filesystem-call [(allocator (ptr Allocator))
+(defn filesystem-call [(allocator (dyn Allocator))
                        (id (slice u8))
                        (name (slice u8))
                        (path (slice u8))
                        (content (slice u8))] (-> ToolCall)
   (let [(mut arguments) (json-object allocator)
-        call (alloc/stack ToolCall)]
+        call (primitive/alloc-stack ToolCall)]
     (json-put-string! (mut arguments) "path" path)
     (when (= name "write_text_file")
       (json-put-string! (mut arguments) "content" content)
@@ -28,7 +30,7 @@
     (load call)))
 
 (deftest reads-bounded-line-windows
-         (let [window (alloc/stack LineWindow)]
+         (let [window (primitive/alloc-stack LineWindow)]
            (store! window (file-line-window "one\ntwo\nthree\nfour\n" 2 2))
            (assert (= (load (field window content)) "two\nthree\n"))
            (assert-eq (load (field window total-lines)) 4)
@@ -38,12 +40,12 @@
 
 (deftest reads-and-writes-bounded-workspace-relative-files
          (let [allocator (malloc-allocator)
-               reader (alloc/stack ReadTextFileTool)
-               writer (alloc/stack WriteTextFileTool)
-               deleter (alloc/stack DeleteFileTool)
-               context (alloc/stack ToolExecutionContext)
+               reader (primitive/alloc-stack ReadTextFileTool)
+               writer (primitive/alloc-stack WriteTextFileTool)
+               deleter (primitive/alloc-stack DeleteFileTool)
+               context (primitive/alloc-stack ToolExecutionContext)
                write-call
-                 (box allocator
+                 (box! allocator
                       ToolCall
                       (filesystem-call allocator
                                        "write-1"
@@ -51,7 +53,7 @@
                                        "coil-agent-harness-filesystem-tool.txt"
                                        "hello from a tool"))
                read-call
-                 (box allocator
+                 (box! allocator
                       ToolCall
                       (filesystem-call allocator
                                        "read-1"
@@ -79,8 +81,8 @@
              (assert (= (command-string output "content") "hello from a tool"))
              (assert-eq (json-number-i64 (json-get output "bytes")) 17))
            (let [(mut edit-arguments) (json-object allocator)
-                 editor (alloc/stack EditTextFileTool)
-                 edit-call (box allocator ToolCall (zeroed ToolCall))]
+                 editor (primitive/alloc-stack EditTextFileTool)
+                 edit-call (box! allocator ToolCall (zeroed ToolCall))]
              (store! (field editor root) "/tmp")
              (json-put-string! (mut edit-arguments)
                                "path"
@@ -101,11 +103,11 @@
 
 (deftest creates-and-removes-only-empty-relative-directories
          (let [allocator (malloc-allocator)
-               creator (alloc/stack CreateDirectoryTool)
-               remover (alloc/stack RemoveDirectoryTool)
-               context (alloc/stack ToolExecutionContext)
+               creator (primitive/alloc-stack CreateDirectoryTool)
+               remover (primitive/alloc-stack RemoveDirectoryTool)
+               context (primitive/alloc-stack ToolExecutionContext)
                call
-                 (box allocator
+                 (box! allocator
                       ToolCall
                       (filesystem-call allocator
                                        "directory-1"
@@ -125,17 +127,17 @@
 
 (deftest rejects-parent-traversal-and-registers-effect-metadata
          (let [allocator (malloc-allocator)
-               reader (alloc/stack ReadTextFileTool)
-               context (alloc/stack ToolExecutionContext)
+               reader (primitive/alloc-stack ReadTextFileTool)
+               context (primitive/alloc-stack ToolExecutionContext)
                call
-                 (box allocator
+                 (box! allocator
                       ToolCall
                       (filesystem-call allocator
                                        "read-traversal"
                                        "read_text_file"
                                        "../secret"
                                        ""))
-               registry (alloc/stack ToolRegistry)]
+               registry (primitive/alloc-stack ToolRegistry)]
            (store! (field reader root) "/tmp")
            (store! (field context cancellation)
                    (cast (ptr CancellationToken) 0))

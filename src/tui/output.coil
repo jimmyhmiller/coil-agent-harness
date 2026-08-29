@@ -1,5 +1,7 @@
 (module harness-tui-output)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.io" :as io)
@@ -15,14 +17,14 @@
 ;; Application code submits frames and output intents here. This module and the
 ;; renderer/driver layers are the only TUI code that writes presentation bytes.
 (defn tui-output-write-slice [(fd i64) (value (slice u8))] (-> i64)
-  (let [writer (alloc/stack io/Writer)]
+  (let [writer (primitive/alloc-stack io/Writer)]
     (match (io/write-all (io/fd-writer writer fd)
                          (cast (ptr i8) (slice-data [u8] value))
                          (slice-len [u8] value))
       (Ok [written] written)
       (Err [failure] -1))))
 
-(defn tui-output-write-line [(allocator (ptr Allocator))
+(defn tui-output-write-line [(allocator (dyn Allocator))
                              (fd i64)
                              (value (slice u8))] (-> i64)
   (let [(mut line) (sb-new allocator)]
@@ -33,7 +35,7 @@
     (sb-push-str! (mut line) "\n")
     (tui-output-write-slice fd (sb-finish! (mut line)))))
 
-(defn tui-output-write-frame [(allocator (ptr Allocator))
+(defn tui-output-write-frame [(allocator (dyn Allocator))
                               (frame (ptr Frame))
                               (profile (ref TerminalProfile))] (-> i64)
   (if (.interactive profile)
@@ -46,7 +48,7 @@
                                    (mut empty)))
       (tui-output-write-slice 1 (render-frame-plain allocator frame))))
 
-(defn tui-output-execute-plan! [(allocator (ptr Allocator))
+(defn tui-output-execute-plan! [(allocator (dyn Allocator))
                                 (profile (ref TerminalProfile))
                                 (operations (ptr (ArrayList TerminalOperation)))] (-> i64)
   (let [(mut at) 0
@@ -67,7 +69,7 @@
 ;; duration means the terminal never draws that walk, which is what stops the
 ;; block cursor skittering around during a stream.
 (defn tui-output-inline-update! [(renderer (ptr InlineRenderer))
-                                 (allocator (ptr Allocator))
+                                 (allocator (dyn Allocator))
                                  (profile (ref TerminalProfile))
                                  (committed (ptr Frame))
                                  (live (ptr Frame))] (-> i64)
@@ -75,10 +77,10 @@
   (let [(mut operations) (inline-renderer-plan-with! renderer allocator committed live)]
     (tui-output-execute-plan! allocator profile (mut operations))))
 
-(defn tui-output-clear-screen [(allocator (ptr Allocator))
+(defn tui-output-clear-screen [(allocator (dyn Allocator))
                                (profile (ref TerminalProfile))] (-> i64)
   (terminal-execute! allocator 1 profile (TerminalClearScreen)))
 
-(defn tui-output-reset [(allocator (ptr Allocator))
+(defn tui-output-reset [(allocator (dyn Allocator))
                         (profile (ref TerminalProfile))] (-> i64)
   (terminal-execute! allocator 1 profile (TerminalResetStyle)))

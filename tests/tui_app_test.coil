@@ -1,16 +1,21 @@
 (module harness-tui-app-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
 (import "harness-event" :use *)
+(import "harness-bus-event-sink" :use *)
+(import "harness-directory" :use *)
 (import "harness-event-journal" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
 (import "harness-system" :use *)
 (import "harness-tui-app" :use *)
+(import "harness-tui-model" :use *)
 (import "harness-provider-config" :use *)
 (import "harness-tui-input-reader" :use *)
 (import "provider-common" :use *)
@@ -28,14 +33,80 @@
            (assert (= (tui-status-model "claude" "claude-opus-5" (mut empty-config))
                       "claude-opus-5"))))
 
+(deftest session-title-is-the-first-sixty-four-characters
+         (assert (= (tui-session-title
+                      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-more")
+                    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-m")))
+
+(deftest session-title-counts-characters-without-splitting-utf8
+         (assert (= (tui-session-title
+                      "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂tail")
+                    "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂")))
+
+(deftest resume-catalog-uses-the-first-prompt-and-originating-folder
+         (let [allocator (malloc-allocator)
+               root "/tmp/coil-agent-harness-tui-resume-catalog"
+               directory (path-join allocator root "runs")
+               active (path-join allocator directory "tui.active.jsonl")
+               service (primitive/alloc-stack RunService)
+               registry (path-join allocator root "sessions.jsonl")]
+           (directory-create-all allocator directory 448)
+           (fs/write-file allocator active "")
+           (fs/write-file
+             allocator
+             registry
+             "{\"conversation_id\":\"conversation-resume\",\"title\":\"Review the harness architecture\",\"cwd\":\"/work/harness\",\"journal\":\"/tmp/old.jsonl\",\"updated\":1}\n{\"conversation_id\":\"conversation-newest\",\"title\":\"Newest work\",\"cwd\":\"/work/newest\",\"journal\":\"/tmp/new.jsonl\",\"updated\":2}\n")
+           (store! (field service journal-path) active)
+           (let [sessions (tui-sessions allocator service)]
+             (assert-eq (al-len [TuiSession] sessions) 2)
+             (let [session (al-get [TuiSession] sessions 0)]
+               (assert (= (.conversation-id session) "conversation-newest"))
+               (assert (= (.title session) "Newest work"))
+               (assert (= (.cwd session) "/work/newest")))
+             (let [session (al-get [TuiSession] sessions 1)]
+               (assert (= (.conversation-id session) "conversation-resume"))
+               (assert (= (.title session) "Review the harness architecture"))
+               (assert (= (.cwd session) "/work/harness"))))))
+
+(deftest resumed-session-rebuilds-visible-user-and-assistant-history
+         (let [allocator (malloc-allocator)
+               path "/tmp/coil-agent-harness-tui-resume-history.jsonl"
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               session (primitive/alloc-stack TuiSession)
+               (mut command) (json-object allocator)]
+           (fs/write-file allocator path "")
+           (match (event-journal-open allocator path true)
+             (JournalOpenFailed [message] (assert false))
+             (JournalOpened [opened] (store! journal opened)))
+           (store! emitter (event-emitter-new allocator journal sequence))
+           (json-put-string! (mut command) "actor" "tui-user")
+           (json-put-string! (mut command) "conversation_id" "conversation-history")
+           (json-put-string! (mut command) "prompt" "What happened?")
+           (emit-event emitter (now-ms) (RunCreated) "history-run" "history-run" "" "fake" "model" (load command))
+           (emit-event emitter (now-ms) (ModelRequestStarted) "history-run" "model-1" "" "fake" "model" (JsonNull))
+           (emit-event emitter (now-ms) (ModelResponseDelta) "history-run" "model-1" "" "fake" "model" (JsonString "Everything happened."))
+           (emit-event emitter (now-ms) (ModelRequestCompleted) "history-run" "model-1" "" "fake" "model" (JsonString "response-1"))
+           (event-journal-close! journal)
+           (store! (field session conversation-id) "conversation-history")
+           (store! (field session journal) path)
+           (let [model (tui-session-model allocator session)]
+             (assert-eq (al-len [PresentationBlock] (.blocks model)) 2)
+             (let [user (al-get [PresentationBlock] (.blocks model) 0)
+                   assistant (al-get [PresentationBlock] (.blocks model) 1)]
+               (assert (= (.body user) "What happened?"))
+               (assert (= (.body assistant) "Everything happened."))))))
+
 (deftest idle-composer-discovers-an-addressed-notification-run
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-tui-notification.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               service (alloc/stack RunService)
-               source (alloc/stack TuiNotificationSource)
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               service (primitive/alloc-stack RunService)
+               source (primitive/alloc-stack TuiNotificationSource)
+               tee (primitive/alloc-stack TeeEventSink)
                (mut command) (json-object allocator)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
@@ -46,6 +117,17 @@
            (store! (field service journal-path) path)
            (store! (field service journal) journal)
            (store! (field service emitter) emitter)
+           (store! (field source service) service)
+           (store! (field source allocator) allocator)
+           (store! (field source conversation-id) "conversation-1")
+           (store! (field source lock) 0)
+           (store! (field source pending) (al-new [(slice u8)] allocator))
+           (store! (field source pending-next) 0)
+           (tee-event-sink-init! tee
+                                 allocator
+                                 (load (load (field emitter sink)))
+                                 source)
+           (store! (field emitter sink) (box! allocator (dyn EventSink) tee))
            (json-put-string! (mut command) "actor" "agent-notification")
            (json-put-string! (mut command) "conversation_id" "conversation-1")
            (emit-event emitter
@@ -57,12 +139,22 @@
                        "fake"
                        "fake-model"
                        (load command))
-           (store! (field source service) service)
-           (store! (field source allocator) allocator)
-           (store! (field source conversation-id) "conversation-1")
-           (store! (field source cursor) 0)
-           (store! (field source pending) (al-new [(slice u8)] allocator))
-           (store! (field source pending-next) 0)
            (assert (input-idle-notification? source))
            (assert (= (tui-notification-current source) "notification:child-1"))
            (event-journal-close! journal)))
+
+(deftest idle-composer-ignores-unaddressed-live-events
+         (let [allocator (malloc-allocator)
+               source (primitive/alloc-stack TuiNotificationSource)
+               event (primitive/alloc-stack Event)]
+           (store! (field source allocator) allocator)
+           (store! (field source conversation-id) "conversation-1")
+           (store! (field source lock) 0)
+           (store! (field source pending) (al-new [(slice u8)] allocator))
+           (store! (field source pending-next) 0)
+           (store! (field event kind) (ModelResponseDelta))
+           (store! (field event run-id) "ordinary-run")
+           (store! (field event payload) (JsonString "delta"))
+           (assert-eq (publish-event source event) 0)
+           (assert (not (input-idle-notification? source)))
+           ))

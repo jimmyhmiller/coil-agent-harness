@@ -21,6 +21,8 @@
 ;; conversation can honestly take one.
 (module harness-run-inbox)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -41,7 +43,7 @@
 ;; rather than delivered in half.
 (defstruct RunInbox [(path (slice u8)) (consumed i64)])
 
-(defn inbox-env-or [(allocator (ptr Allocator))
+(defn inbox-env-or [(allocator (dyn Allocator))
                     (name (slice u8))
                     (fallback (slice u8))] (-> (slice u8))
   (match (os/env-get allocator name)
@@ -51,19 +53,19 @@
           (None [] fallback)))
     (Err [failure] fallback)))
 
-(defn inbox-root [(allocator (ptr Allocator))] (-> (slice u8))
+(defn inbox-root [(allocator (dyn Allocator))] (-> (slice u8))
   (inbox-env-or allocator "HARNESS_INBOX_DIR" INBOX_DIRECTORY))
 
 ;; The inbox of one run. Run ids are already file-safe: they are built from a
 ;; factory name and a timestamp.
-(defn inbox-path [(allocator (ptr Allocator)) (run-id (slice u8))] (-> (slice u8))
+(defn inbox-path [(allocator (dyn Allocator)) (run-id (slice u8))] (-> (slice u8))
   (let [(mut name) (sb-new allocator)]
     (sb-push-str! (mut name) run-id)
     (sb-push-str! (mut name) ".jsonl")
     (path-join allocator (inbox-root allocator) (sb-finish! (mut name)))))
 
 (defn inbox-open [(path (slice u8))] (-> RunInbox)
-  (let [inbox (alloc/stack RunInbox)]
+  (let [inbox (primitive/alloc-stack RunInbox)]
     (set! (.path inbox) path)
     (set! (.consumed inbox) 0)
     (load inbox)))
@@ -71,7 +73,7 @@
 ;; Put a message in a run's inbox. Appending is the whole protocol: no lock, no
 ;; handshake, and nothing to clean up if the run has already finished -- an
 ;; unread inbox is just a file nobody opened.
-(defn inbox-send! [(allocator (ptr Allocator))
+(defn inbox-send! [(allocator (dyn Allocator))
                    (path (slice u8))
                    (text (slice u8))] (-> bool)
   (if (= (slice-len [u8] text) 0)
@@ -109,7 +111,7 @@
 ;; Everything written since the last drain, oldest first. A malformed line is
 ;; skipped rather than failing the drain: a run must not die because something
 ;; wrote nonsense into its mailbox.
-(defn inbox-drain! [(allocator (ptr Allocator))
+(defn inbox-drain! [(allocator (dyn Allocator))
                     (inbox (ptr RunInbox))] (-> (ArrayList (slice u8)))
   (let [(mut out) (al-new [(slice u8)] allocator)]
     (if (not (path-exists? allocator (.path inbox)))

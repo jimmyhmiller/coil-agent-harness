@@ -1,5 +1,7 @@
 (module harness-tui-layout-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -51,7 +53,7 @@
 (deftest visibly-escapes-controls-and-replaces-malformed-utf8
          (let [allocator (malloc-allocator)
                (mut model) (presentation-model-new allocator)
-               malformed (alloc/stack (array u8 3))
+               malformed (primitive/alloc-stack (array u8 3))
                options (layout-options 40 false false)]
            (store! (index malformed 0) (cast u8 65))
            (store! (index malformed 1) (cast u8 27))
@@ -65,7 +67,7 @@
 (deftest keeps-every-rendered-line-within-the-requested-width-matrix
          (let [allocator (malloc-allocator)
                (mut model) (presentation-model-new allocator)
-               widths (alloc/stack (array i64 3))]
+               widths (primitive/alloc-stack (array i64 3))]
            (store! (index widths 0) 12)
            (store! (index widths 1) 40)
            (store! (index widths 2) 120)

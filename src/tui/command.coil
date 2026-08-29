@@ -14,6 +14,8 @@
 ;; else about this file changes.
 (module harness-tui-command)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.slice" :use *)
@@ -36,14 +38,14 @@
 (defn command-spec [(name (slice u8))
                     (summary (slice u8))
                     (argument CommandArgument)] (-> CommandSpec)
-  (let [spec (alloc/stack CommandSpec)]
+  (let [spec (primitive/alloc-stack CommandSpec)]
     (set! (.name spec) name)
     (set! (.summary spec) summary)
     (set! (.argument spec) argument)
     (load spec)))
 
-(defn command-registry-new [(allocator (ptr Allocator))] (-> CommandRegistry)
-  (let [registry (alloc/stack CommandRegistry)]
+(defn command-registry-new [(allocator (dyn Allocator))] (-> CommandRegistry)
+  (let [registry (primitive/alloc-stack CommandRegistry)]
     (set! (.commands registry) (al-new [CommandSpec] allocator))
     (load registry)))
 
@@ -60,7 +62,7 @@
 
 ;; Registration order is display order: the list a user reads in `/help` and the
 ;; list they arrow through in the menu are the same list in the same order.
-(defn command-registry-builtin [(allocator (ptr Allocator))] (-> CommandRegistry)
+(defn command-registry-builtin [(allocator (dyn Allocator))] (-> CommandRegistry)
   (let [(mut registry) (command-registry-new allocator)]
     (command-register! (mut registry)
                        (command-spec "/help" "list the commands" (CommandNoArgument)))
@@ -90,6 +92,10 @@
                        (command-spec "/conversation"
                                      "show the durable conversation ID"
                                      (CommandNoArgument)))
+    (command-register! (mut registry)
+                       (command-spec "/resume"
+                                     "resume a previous session"
+                                     (CommandPrompts "a session")))
     (command-register! (mut registry)
                        (command-spec "/new" "start a new conversation" (CommandNoArgument)))
     (command-register! (mut registry)
@@ -133,7 +139,7 @@
   (or (>= (command-exact registry name) 0) (= name "/exit")))
 
 ;; Indices of every command whose name starts with `prefix`, in registration order.
-(defn command-matches [(allocator (ptr Allocator))
+(defn command-matches [(allocator (dyn Allocator))
                        (registry (ptr CommandRegistry))
                        (prefix (slice u8))] (-> (ArrayList i64))
   (let [(mut out) (al-new [i64] allocator)
@@ -152,7 +158,7 @@
 ;; The longest prefix shared by every match, which is what Tab should extend to
 ;; when the matches have not narrowed to one. Returns `prefix` unchanged when the
 ;; matches diverge immediately, so Tab is a no-op rather than a wrong guess.
-(defn command-common-prefix [(allocator (ptr Allocator))
+(defn command-common-prefix [(allocator (dyn Allocator))
                              (registry (ptr CommandRegistry))
                              (matches (ref (ArrayList i64)))] (-> (slice u8))
   (let [count (al-len [i64] (load matches))]

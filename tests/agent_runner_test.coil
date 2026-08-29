@@ -1,5 +1,7 @@
 (module harness-agent-runner-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
@@ -21,7 +23,7 @@
    (first-operation-id (slice u8))
    (second-operation-id (slice u8))])
 
-(defstruct FakeTool [])
+(defstruct FakeTool [(reserved u8)])
 
 (defstruct SlowProvider [(delay-ms i64)])
 
@@ -38,7 +40,7 @@
   (execute-model [(self (ptr FlakyProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (let [call (+ (atomic-add (load (field self calls)) 1) 1)]
                    (if (<= call (.failures-before-success self))
@@ -60,7 +62,7 @@
   (execute-model [(self (ptr SlowProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (do
                    (sleep-ms (.delay-ms self))
@@ -73,7 +75,7 @@
 
 (defn execute-fake-tool [(self (ptr FakeTool))
                          (call (ptr ToolCall))
-                         (allocator (ptr Allocator))] (-> ToolResult)
+                         (allocator (dyn Allocator))] (-> ToolResult)
   (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
     (set! (.output result) (.arguments call))
     (load result)))
@@ -82,16 +84,16 @@
   (execute-tool [(self (ptr FakeTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-fake-tool self call allocator)))
 
-(defn fake-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
+(defn fake-definition [(allocator (dyn Allocator))] (-> ToolDefinition)
   (let [parsed
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{},\"required\":[],\"additionalProperties\":false}")
-        definition (alloc/stack ToolDefinition)
-        implementation (box allocator FakeTool (zeroed FakeTool))]
+        definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator FakeTool (zeroed FakeTool))]
     (set! (.name (.spec definition)) "fake")
     (set! (.description (.spec definition)) "fake")
     (set! (.input-schema (.spec definition)) (.value parsed))
@@ -102,8 +104,8 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn fake-call [(allocator (ptr Allocator)) (id (slice u8))] (-> ToolCall)
-  (let [call (alloc/stack ToolCall)]
+(defn fake-call [(allocator (dyn Allocator)) (id (slice u8))] (-> ToolCall)
+  (let [call (primitive/alloc-stack ToolCall)]
     (set! (.id call) id)
     (set! (.name call) "fake")
     (set! (.arguments call) (json-object allocator))
@@ -113,7 +115,7 @@
 (defn fake-provider-execute [(state (ptr FakeProviderState))
                              (request (ptr ModelRequest))
                              (emitter (ptr EventEmitter))
-                             (allocator (ptr Allocator))] (-> ModelResult)
+                             (allocator (dyn Allocator))] (-> ModelResult)
   (let [call-number (+ (atomic-add (load (field state calls)) 1) 1)
         (mut response) (response-empty allocator)]
     (if (= call-number 1)
@@ -154,7 +156,7 @@
   (execute-model [(self (ptr FakeProviderState))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (fake-provider-execute self request emitter allocator)))
 
@@ -188,7 +190,7 @@
          (let [allocator (malloc-allocator)
                (mut calls) (al-new [ToolCall] allocator)
                (mut results) (al-new [ToolResult] allocator)
-               call (alloc/stack ToolCall)
+               call (primitive/alloc-stack ToolCall)
                (mut arguments) (json-object allocator)
                (mut result) (tool-result-empty "spawn-call" (ToolSucceeded))]
            (json-object-put! (mut arguments) "notify_parent" (JsonBool false))
@@ -209,18 +211,18 @@
 
 (deftest unlimited-background-run-executes-tools-and-continues-the-model
          (let [allocator (malloc-allocator)
-               calls (box allocator i64 0)
-               observed (box allocator i64 0)
-               events (box allocator i64 0)
-               terminals (box allocator i64 0)
-               sequence (box allocator i64 1)
-               state (box allocator FakeProviderState (zeroed FakeProviderState))
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-               request (box allocator ModelRequest (zeroed ModelRequest))
-               sink (alloc/stack TerminalEventSink)
-               emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)]
+               calls (box! allocator i64 0)
+               observed (box! allocator i64 0)
+               events (box! allocator i64 0)
+               terminals (box! allocator i64 0)
+               sequence (box! allocator i64 1)
+               state (box! allocator FakeProviderState (zeroed FakeProviderState))
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+               request (box! allocator ModelRequest (zeroed ModelRequest))
+               sink (primitive/alloc-stack TerminalEventSink)
+               emitter (box! allocator EventEmitter (zeroed EventEmitter))
+               policy (primitive/alloc-stack AgentRunPolicy)]
            (store! (field state calls) calls)
            (store! (field state observed-continuation) observed)
            (tool-register! registry (fake-definition allocator))
@@ -236,7 +238,7 @@
            (store! (field request timeout-ms) 1000)
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
-           (store! (field emitter sink) (box allocator (dyn EventSink) sink))
+           (store! (field emitter sink) (box! allocator (dyn EventSink) sink))
            (store! (field emitter next-sequence) sequence)
            ;; Zero is the production default: continue until the model finishes.
            (store! (field policy max-model-turns) 0)
@@ -265,15 +267,15 @@
 
 (deftest retries-transient-provider-failure-without-consuming-model-turn
          (let [allocator (malloc-allocator)
-               calls (box allocator i64 0)
-               provider (box allocator FlakyProvider (zeroed FlakyProvider))
-               request (box allocator ModelRequest (zeroed ModelRequest))
-               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-               events (box allocator i64 0)
-               sequence (box allocator i64 1)
-               sink (alloc/stack CountingEventSink)
-               emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)]
+               calls (box! allocator i64 0)
+               provider (box! allocator FlakyProvider (zeroed FlakyProvider))
+               request (box! allocator ModelRequest (zeroed ModelRequest))
+               messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+               events (box! allocator i64 0)
+               sequence (box! allocator i64 1)
+               sink (primitive/alloc-stack CountingEventSink)
+               emitter (box! allocator EventEmitter (zeroed EventEmitter))
+               policy (primitive/alloc-stack AgentRunPolicy)]
            (store! (field provider calls) calls)
            (store! (field provider failures-before-success) 2)
            (store! (field provider status) 503)
@@ -296,15 +298,15 @@
 
 (deftest does-not-retry-nontransient-provider-failure
          (let [allocator (malloc-allocator)
-               calls (box allocator i64 0)
-               provider (box allocator FlakyProvider (zeroed FlakyProvider))
-               request (box allocator ModelRequest (zeroed ModelRequest))
-               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-               events (box allocator i64 0)
-               sequence (box allocator i64 1)
-               sink (alloc/stack CountingEventSink)
-               emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)]
+               calls (box! allocator i64 0)
+               provider (box! allocator FlakyProvider (zeroed FlakyProvider))
+               request (box! allocator ModelRequest (zeroed ModelRequest))
+               messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+               events (box! allocator i64 0)
+               sequence (box! allocator i64 1)
+               sink (primitive/alloc-stack CountingEventSink)
+               emitter (box! allocator EventEmitter (zeroed EventEmitter))
+               policy (primitive/alloc-stack AgentRunPolicy)]
            (store! (field provider calls) calls)
            (store! (field provider failures-before-success) 2)
            (store! (field provider status) 400)
@@ -327,14 +329,14 @@
 
 (deftest background-run-cancellation-wins-over-a-late-model-response
          (let [allocator (malloc-allocator)
-               provider (box allocator SlowProvider (zeroed SlowProvider))
-               request (box allocator ModelRequest (zeroed ModelRequest))
-               events (box allocator i64 0)
-               terminals (box allocator i64 0)
-               sequence (box allocator i64 1)
-               sink (alloc/stack TerminalEventSink)
-               emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)]
+               provider (box! allocator SlowProvider (zeroed SlowProvider))
+               request (box! allocator ModelRequest (zeroed ModelRequest))
+               events (box! allocator i64 0)
+               terminals (box! allocator i64 0)
+               sequence (box! allocator i64 1)
+               sink (primitive/alloc-stack TerminalEventSink)
+               emitter (box! allocator EventEmitter (zeroed EventEmitter))
+               policy (primitive/alloc-stack AgentRunPolicy)]
            (store! (field provider delay-ms) 30)
            (store! (field request run-id) "cancel-test")
            (store! (field request operation-id) "model")
@@ -364,14 +366,14 @@
 
 (deftest run-deadline-wins-over-a-late-model-response
          (let [allocator (malloc-allocator)
-               provider (box allocator SlowProvider (zeroed SlowProvider))
-               request (box allocator ModelRequest (zeroed ModelRequest))
-               events (box allocator i64 0)
-               terminals (box allocator i64 0)
-               sequence (box allocator i64 1)
-               sink (alloc/stack TerminalEventSink)
-               emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)]
+               provider (box! allocator SlowProvider (zeroed SlowProvider))
+               request (box! allocator ModelRequest (zeroed ModelRequest))
+               events (box! allocator i64 0)
+               terminals (box! allocator i64 0)
+               sequence (box! allocator i64 1)
+               sink (primitive/alloc-stack TerminalEventSink)
+               emitter (box! allocator EventEmitter (zeroed EventEmitter))
+               policy (primitive/alloc-stack AgentRunPolicy)]
            (store! (field provider delay-ms) 20)
            (store! (field request run-id) "deadline-test")
            (store! (field request operation-id) "model")
@@ -434,7 +436,7 @@
   (execute-model [(self (ptr SpeakingProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (let [call (+ (atomic-add (load (field self calls)) 1) 1)
                        (mut response) (response-empty allocator)]
@@ -459,18 +461,18 @@
 
 (deftest a-message-sent-mid-run-reaches-the-next-turn
          (let [allocator (malloc-allocator)
-               calls (box allocator i64 0)
-               heard (box allocator i64 0)
-               events (box allocator i64 0)
-               terminals (box allocator i64 0)
-               sequence (box allocator i64 1)
-               provider (box allocator SpeakingProvider (zeroed SpeakingProvider))
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-               request (box allocator ModelRequest (zeroed ModelRequest))
-               sink (alloc/stack TerminalEventSink)
-               emitter (box allocator EventEmitter (zeroed EventEmitter))
-               policy (alloc/stack AgentRunPolicy)
+               calls (box! allocator i64 0)
+               heard (box! allocator i64 0)
+               events (box! allocator i64 0)
+               terminals (box! allocator i64 0)
+               sequence (box! allocator i64 1)
+               provider (box! allocator SpeakingProvider (zeroed SpeakingProvider))
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+               request (box! allocator ModelRequest (zeroed ModelRequest))
+               sink (primitive/alloc-stack TerminalEventSink)
+               emitter (box! allocator EventEmitter (zeroed EventEmitter))
+               policy (primitive/alloc-stack AgentRunPolicy)
                inbox "/tmp/harness-inbox-test/mid-run.jsonl"]
            (path-remove allocator inbox)
            (store! (field provider calls) calls)
@@ -490,7 +492,7 @@
            (store! (field request inbox) inbox)
            (store! (field sink count) events)
            (store! (field sink terminal-count) terminals)
-           (store! (field emitter sink) (box allocator (dyn EventSink) sink))
+           (store! (field emitter sink) (box! allocator (dyn EventSink) sink))
            (store! (field emitter next-sequence) sequence)
            (store! (field policy max-model-turns) 0)
            (store! (field policy max-parallel-tools) 2)

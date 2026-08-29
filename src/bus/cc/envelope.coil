@@ -27,6 +27,8 @@
 ;; and one before the close tag -- and the body is not XML-escaped.
 (module harness-bus-cc-envelope)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.result" :use *)
@@ -196,7 +198,7 @@
 ;; Strip format and control code points, trim, and clamp to 64 code points with
 ;; an ellipsis. Mirrors the receiver's own normalization so that a name we send
 ;; survives its round-trip check unchanged.
-(defn cc-sanitize-name [(allocator (ptr Allocator)) (name (slice u8))] (-> (slice u8))
+(defn cc-sanitize-name [(allocator (dyn Allocator)) (name (slice u8))] (-> (slice u8))
   (let [(mut stripped) (sb-new allocator)
         (mut i) 0
         n (slice-len [u8] name)]
@@ -279,7 +281,7 @@
 ;; cannot terminate the envelope. Case-insensitive, and only when the tag name
 ;; is followed by `>`, whitespace, `/`, or end of input -- otherwise
 ;; `</cross-session-messages` would be needlessly mangled.
-(defn cc-scrub-close-tag [(allocator (ptr Allocator)) (body (slice u8))] (-> (slice u8))
+(defn cc-scrub-close-tag [(allocator (dyn Allocator)) (body (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         n (slice-len [u8] body)
         tag-length (slice-len [u8] CC_TAG)
@@ -336,7 +338,7 @@
 
 ;; Render the envelope. This is the normative form -- the parser validates by
 ;; calling it, and the receiver validates by doing the same on its side.
-(defn cc-envelope-render [(allocator (ptr Allocator))
+(defn cc-envelope-render [(allocator (dyn Allocator))
                           (envelope (ptr CcEnvelope))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) CC_OPEN)
@@ -428,7 +430,7 @@
 ;; The final check is the important one: everything above only proposes a
 ;; reading, and the reading is accepted only if re-rendering it reproduces the
 ;; input exactly.
-(defn cc-envelope-parse [(allocator (ptr Allocator))
+(defn cc-envelope-parse [(allocator (dyn Allocator))
                          (text (slice u8))
                          (out (ptr CcEnvelope))] (-> bool)
   (let [n (slice-len [u8] text)
@@ -440,8 +442,8 @@
                 (not (= (substr text (- n close-length) n) CC_CLOSE))))
         false
         (let [(mut at) open-length
-              value (alloc/stack (slice u8))
-              next (alloc/stack i64)]
+              value (primitive/alloc-stack (slice u8))
+              next (primitive/alloc-stack i64)]
           (when (cc-read-attribute text (load at) "from" value next 0)
             (store! (field out from) (Some (load value)))
             (store! at (load next))
@@ -481,12 +483,12 @@
 
 ;; Wrap a body for sending. The common path: our address, our name, and the
 ;; permission mode we attest to.
-(defn cc-envelope-wrap [(allocator (ptr Allocator))
+(defn cc-envelope-wrap [(allocator (dyn Allocator))
                         (from (slice u8))
                         (from-name (slice u8))
                         (from-mode (slice u8))
                         (body (slice u8))] (-> (slice u8))
-  (let [envelope (alloc/stack CcEnvelope)]
+  (let [envelope (primitive/alloc-stack CcEnvelope)]
     (cc-envelope-init! envelope)
     (when (> (slice-len [u8] from) 0)
       (store! (field envelope from) (Some from))

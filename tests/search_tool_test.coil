@@ -1,5 +1,7 @@
 (module harness-search-tool-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.str" :use *)
@@ -10,9 +12,9 @@
 
 (deftest search-text-returns-focused-line-numbered-matches
   (let [allocator (malloc-allocator)
-        tool (alloc/stack SearchTextTool)
-        call (alloc/stack ToolCall)
-        context (alloc/stack ToolExecutionContext)
+        tool (primitive/alloc-stack SearchTextTool)
+        call (primitive/alloc-stack ToolCall)
+        context (primitive/alloc-stack ToolExecutionContext)
         (mut arguments) (json-object allocator)]
     (store! (field tool root) ".")
     (json-put-string! (mut arguments) "query" "module harness-search-tool")

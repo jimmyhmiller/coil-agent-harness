@@ -7,6 +7,8 @@
 ;; per provider.
 (module harness-openai-chat-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -21,11 +23,11 @@
 (import "openai-chat" :use *)
 (import "provider-common" :use *)
 
-(defn chat-request [(allocator (ptr Allocator)) (effort (slice u8))] (-> (ptr ModelRequest))
-  (let [messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        registry (box allocator ToolRegistry (tool-registry-new allocator))
-        request (box allocator ModelRequest (zeroed ModelRequest))
-        message (alloc/stack Message)]
+(defn chat-request [(allocator (dyn Allocator)) (effort (slice u8))] (-> (ptr ModelRequest))
+  (let [messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+        registry (box! allocator ToolRegistry (tool-registry-new allocator))
+        request (box! allocator ModelRequest (zeroed ModelRequest))
+        message (primitive/alloc-stack Message)]
     (set! (.role message) (UserRole))
     (set! (.content message) "Say hello.")
     (al-push! [Message] messages (load message))
@@ -43,12 +45,12 @@
 
 ;; A declared provider built from the configuration parser rather than by hand, so
 ;; these tests exercise the same path an operator's file takes.
-(defn declared [(allocator (ptr Allocator)) (source (slice u8))] (-> (ptr OpenAIChatContext))
+(defn declared [(allocator (dyn Allocator)) (source (slice u8))] (-> (ptr OpenAIChatContext))
   (match (provider-config-parse allocator source)
     (ProviderConfigInvalid [message] (cast (ptr OpenAIChatContext) 0))
     (ProviderConfigLoaded [loaded]
       (let [(mut config) loaded]
-        (box allocator
+        (box! allocator
              OpenAIChatContext
              (openai-chat-context allocator
                                   (load (provider-config-at (mut config) 0))))))))
@@ -66,6 +68,20 @@
 
 (const PLAIN_PROVIDER
   "{\"providers\":[{\"name\":\"plain\",\"reasoning\":{\"dialect\":\"none\"},\"transport\":{\"url\":\"http://127.0.0.1:9\"}}]}")
+
+(deftest openrouter-has-a-working-built-in-chat-configuration
+         (let [allocator (malloc-allocator)
+               config (openrouter-config)
+               context (primitive/alloc-stack OpenAIChatContext)]
+           (store! context (openai-chat-context allocator config))
+           (assert (= (.name config) "openrouter"))
+           (assert (= (.default-model config) "stealth/ox-alpha"))
+           (assert (= (.api-key-env config) "OPENROUTER_API_KEY"))
+           (assert (= (.default-effort config) "max"))
+           (match (openai-chat-endpoint context allocator)
+             (ChatEndpointUnavailable [message] (assert false))
+             (ChatEndpointReady [url]
+                                (assert (= url "https://openrouter.ai/api/v1/chat/completions"))))))
 
 (deftest a-qwen-template-server-gets-effort-where-it-actually-reads-it
          (let [allocator (malloc-allocator)
@@ -169,9 +185,9 @@
                context
                  (declared allocator
                            "{\"providers\":[{\"name\":\"keyed\",\"api_key_env\":\"HARNESS_TEST_ABSENT_KEY\",\"transport\":{\"url\":\"http://127.0.0.1:9\"}}]}")
-               sink (box allocator NoopEventSink (zeroed NoopEventSink))
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
+               sink (box! allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))]
            (match (os/env-set allocator "HARNESS_TEST_ABSENT_KEY" "" true)
              (Ok [value] 0)
              (Err [failure] 0))
@@ -197,31 +213,23 @@
              (ChatCredentialAbsent [] (assert true))
              (_ (assert false)))))
 
-(deftest a-declared-timeout-raises-the-transport-budget
+(deftest a-declared-timeout-controls-the-transport-budget
          (let [allocator (malloc-allocator)
                context
                  (declared allocator
-                           "{\"providers\":[{\"name\":\"slow\",\"request_timeout_ms\":600000,\"transport\":{\"url\":\"http://127.0.0.1:9\"}}]}")
-               request (chat-request allocator "medium")]
-           ;; The caller's budget is set without knowing which server the run landed
-           ;; on. A local model needs minutes to emit a file, and a request cut off
-           ;; mid-generation reads as a refusal rather than a timeout.
-           (assert-eq (load (field request timeout-ms)) 10000)
-           (assert-eq (openai-chat-timeout-ms context request) 600000)))
+                           "{\"providers\":[{\"name\":\"slow\",\"request_timeout_ms\":600000,\"transport\":{\"url\":\"http://127.0.0.1:9\"}}]}")]
+           (assert-eq (openai-chat-timeout-ms context) 600000)))
 
-(deftest a-caller-with-a-longer-budget-still-wins
+(deftest a-declared-timeout-is-a-ceiling-not-a-caller-floor
          (let [allocator (malloc-allocator)
                context
                  (declared allocator
-                           "{\"providers\":[{\"name\":\"quick\",\"request_timeout_ms\":1000,\"transport\":{\"url\":\"http://127.0.0.1:9\"}}]}")
-               request (chat-request allocator "medium")]
-           ;; The declared value is a floor, not a ceiling: it must never shorten a
-           ;; deadline the caller deliberately set.
-           (assert-eq (openai-chat-timeout-ms context request) 10000)))
+                           "{\"providers\":[{\"name\":\"quick\",\"request_timeout_ms\":1000,\"transport\":{\"url\":\"http://127.0.0.1:9\"}}]}")]
+           ;; The provider owns this transport limit; callers still cancel stalled
+           ;; work through the request cancellation token.
+           (assert-eq (openai-chat-timeout-ms context) 1000)))
 
-(deftest an-unset-timeout-defaults-to-minutes-not-seconds
+(deftest an-unset-timeout-leaves-the-transport-unbounded
          (let [allocator (malloc-allocator)
-               context (declared allocator QWEN_PROVIDER)
-               request (chat-request allocator "medium")]
-           (assert-eq (openai-chat-timeout-ms context request) PROVIDER_DEFAULT_TIMEOUT_MS)
-           (assert (> PROVIDER_DEFAULT_TIMEOUT_MS 120000))))
+               context (declared allocator QWEN_PROVIDER)]
+           (assert-eq (openai-chat-timeout-ms context) 0)))

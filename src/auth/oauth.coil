@@ -109,11 +109,11 @@
                                 (primitive/ior (primitive/ishl (oauth-padded-byte message total (+ index 2)) 8)
                                                (oauth-padded-byte message total (+ index 3))))))
 
-(defn oauth-sha256 [(message (slice u8)) (output (ptr u8))] (-> i64)
+(defn oauth-sha256 [(message (slice u8)) (output (slice u8))] (-> i64)
   (let [length (slice-len [u8] message)
         total (* (/ (+ length 72) 64) 64)
-        words (alloc/stack (array i64 64))
-        hash (alloc/stack (array i64 8))
+        words (primitive/alloc-stack (array i64 64))
+        hash (primitive/alloc-stack (array i64 8))
         (mut block) 0]
     (set! (index hash 0) 1779033703)
     (set! (index hash 1) 3144134277)
@@ -205,11 +205,15 @@
       (loop (if (>= (load index) 32)
                 (break)
                 (do
-                  (set! (index output (load index))
-                        (cast u8
-                              (primitive/iand (primitive/ishr (load (index hash (/ (load index) 4)))
-                                                              (* 8 (- 3 (% (load index) 4))))
-                                              255)))
+                  (slice-set! [u8]
+                              output
+                              (load index)
+                              (cast u8
+                                    (primitive/iand
+                                      (primitive/ishr
+                                        (load (index hash (/ (load index) 4)))
+                                        (* 8 (- 3 (% (load index) 4))))
+                                      255)))
                   (set! index (+ (load index) 1))))))
     0))
 
@@ -220,7 +224,7 @@
         (= value 62) (cast u8 (if url-safe 45 43))
         :else (cast u8 (if url-safe 95 47))))
 
-(defn oauth-base64-encode [(allocator (ptr Allocator))
+(defn oauth-base64-encode [(allocator (dyn Allocator))
                            (value (slice u8))
                            (url-safe bool)
                            (padding bool)] (-> (slice u8))
@@ -251,20 +255,20 @@
                 (set! index (+ (load index) 3)))))
     (sb-finish! (mut output))))
 
-(defn oauth-pkce-challenge [(allocator (ptr Allocator))
+(defn oauth-pkce-challenge [(allocator (dyn Allocator))
                             (verifier (slice u8))] (-> (slice u8))
-  (let [digest (alloc/stack (array u8 32))]
-    (oauth-sha256 verifier (cast (ptr u8) digest))
+  (let [digest (primitive/alloc-stack (array u8 32))]
+    (oauth-sha256 verifier (slice-new [u8] (index digest 0) 32))
     (oauth-base64-encode allocator (slice-new [u8] (index digest 0) 32) true false)))
 
-(defn oauth-random-token [(allocator (ptr Allocator)) (byte-count i64)] (-> (slice u8))
-  (let [bytes (alloc/stack (array u8 64))]
+(defn oauth-random-token [(allocator (dyn Allocator)) (byte-count i64)] (-> (slice u8))
+  (let [bytes (primitive/alloc-stack (array u8 64))]
     (if (or (> byte-count 64)
             (match (fs/file-open (str->cstr allocator "/dev/urandom") OAUTH-O-RDONLY 0)
               (Err [failure] true)
               (Ok [opened]
-                  (let [file (alloc/stack fs/File)
-                        reader (alloc/stack io/Reader)]
+                  (let [file (primitive/alloc-stack fs/File)
+                        reader (primitive/alloc-stack io/Reader)]
                     (set! file opened)
                     (let [result
                             (io/read-exact (fs/file-reader reader file)
@@ -287,7 +291,7 @@
 (defn oauth-hex-upper [(value i64)] (-> u8)
   (cast u8 (if (< value 10) (+ 48 value) (+ 55 value))))
 
-(defn oauth-url-encode [(allocator (ptr Allocator)) (value (slice u8))] (-> (slice u8))
+(defn oauth-url-encode [(allocator (dyn Allocator)) (value (slice u8))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut index) 0
         length (slice-len [u8] value)]
@@ -309,7 +313,7 @@
         (and (>= byte 97) (<= byte 102)) (+ (- byte 97) 10)
         :else -1))
 
-(defn oauth-url-decode [(allocator (ptr Allocator)) (value (slice u8))] (-> (slice u8))
+(defn oauth-url-decode [(allocator (dyn Allocator)) (value (slice u8))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut index) 0
         length (slice-len [u8] value)]
@@ -336,7 +340,7 @@
                           (store! index (+ (load index) 1)))))))
     (sb-finish! (mut output))))
 
-(defn oauth-query-value [(allocator (ptr Allocator))
+(defn oauth-query-value [(allocator (dyn Allocator))
                          (target (slice u8))
                          (wanted (slice u8))] (-> (slice u8))
   (let [length (slice-len [u8] target)
@@ -402,7 +406,7 @@
         (or (= byte 47) (= byte 95)) 63
         :else -1))
 
-(defn oauth-base64-decode [(allocator (ptr Allocator))
+(defn oauth-base64-decode [(allocator (dyn Allocator))
                            (value (slice u8))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut accumulator) 0
@@ -431,7 +435,7 @@
                             (set! index (+ (load index) 1)))))))))
     (if (load valid) (sb-finish! (mut output)) "")))
 
-(defn oauth-jwt-claims [(allocator (ptr Allocator)) (token (slice u8))] (-> Json)
+(defn oauth-jwt-claims [(allocator (dyn Allocator)) (token (slice u8))] (-> Json)
   (let [length (slice-len [u8] token)
         (mut first) -1
         (mut second) -1
@@ -454,7 +458,7 @@
           (if (.ok parsed) (.value parsed) (JsonNull))))))
 
 (defn oauth-write-line [(fd i64) (value (slice u8))] (-> i64)
-  (let [writer (alloc/stack io/Writer)
+  (let [writer (primitive/alloc-stack io/Writer)
         output (io/fd-writer writer fd)]
     (match (io/print-str output value)
       (Err [failure] -1)
@@ -463,11 +467,11 @@
             (Err [failure] -1)
             (Ok [newline] (+ written newline)))))))
 
-(defn oauth-open-browser-with [(allocator (ptr Allocator))
+(defn oauth-open-browser-with [(allocator (dyn Allocator))
                                (command (slice u8))
                                (url (slice u8))] (-> i64)
-  (let [child (alloc/stack subprocess/Child)
-        args (alloc/stack (array (slice u8) 1))]
+  (let [child (primitive/alloc-stack subprocess/Child)
+        args (primitive/alloc-stack (array (slice u8) 1))]
     (set! (index args 0) url)
     (match (subprocess/spawn allocator
                              child
@@ -483,14 +487,14 @@
             (subprocess/child-close child)
             0)))))
 
-(defn oauth-open-browser [(allocator (ptr Allocator)) (url (slice u8))] (-> i64)
+(defn oauth-open-browser [(allocator (dyn Allocator)) (url (slice u8))] (-> i64)
   (let [opened (oauth-open-browser-with allocator "open" url)]
     (if (= opened 0) 0 (oauth-open-browser-with allocator "xdg-open" url))))
 
-(defn oauth-manual-code [(allocator (ptr Allocator))
+(defn oauth-manual-code [(allocator (dyn Allocator))
                          (expected-state (slice u8))] (-> (slice u8))
   (oauth-write-line 2 "Paste the final redirect URL or authorization code:")
-  (let [reader (alloc/stack io/Reader)]
+  (let [reader (primitive/alloc-stack io/Reader)]
     (match (io/read-line-alloc allocator (io/fd-reader reader 0) 1048576)
       (Err [failure] "")
       (Ok [owned]
@@ -508,7 +512,7 @@
                                 ""))
                       (None [] value))))))))
 
-(defn oauth-await-code [(allocator (ptr Allocator))
+(defn oauth-await-code [(allocator (dyn Allocator))
                         (port i64)
                         (path (slice u8))
                         (expected-state (slice u8))

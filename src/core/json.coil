@@ -29,27 +29,27 @@
 (defstruct JsonParser
   [(source (slice u8))
    (position i64)
-   (allocator (ptr Allocator))
+   (allocator (dyn Allocator))
    (ok bool)
    (error (slice u8))
    (error-pos i64)])
 
 ;; Construct an empty JSON array owned by `allocator`.
-(defn json-array [(allocator (ptr Allocator))] (-> Json)
-  (JsonArray (box allocator (ArrayList Json) (al-new [Json] allocator))))
+(defn json-array [(allocator (dyn Allocator))] (-> Json)
+  (JsonArray (box! allocator (ArrayList Json) (al-new [Json] allocator))))
 
 ;; Construct an empty insertion-ordered JSON object owned by `allocator`.
-(defn json-object [(allocator (ptr Allocator))] (-> Json)
-  (JsonObject (box allocator (ArrayList (slice u8)) (al-new [(slice u8)] allocator))
-              (box allocator (ArrayList Json) (al-new [Json] allocator))))
+(defn json-object [(allocator (dyn Allocator))] (-> Json)
+  (JsonObject (box! allocator (ArrayList (slice u8)) (al-new [(slice u8)] allocator))
+              (box! allocator (ArrayList Json) (al-new [Json] allocator))))
 
-(defn json-copy-string [(allocator (ptr Allocator))
+(defn json-copy-string [(allocator (dyn Allocator))
                         (value (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) value)
     (sb-str (load buffer))))
 
-(defn json-clone [(allocator (ptr Allocator)) (value Json)] (-> Json)
+(defn json-clone [(allocator (dyn Allocator)) (value Json)] (-> Json)
   (match value
     (JsonNull [] (JsonNull))
     (JsonBool [boolean] (JsonBool boolean))
@@ -279,7 +279,7 @@
     (- (load at) start)))
 
 (defn parser-string [(parser (ptr JsonParser))] (-> (slice u8))
-  (let [(mut buffer) (sb-new (load (field parser allocator)))]
+  (let [(mut buffer) (sb-new (.allocator parser))]
     (al-reserve! [u8]
                  (mut (.bytes buffer))
                  (parser-string-capacity parser))
@@ -395,7 +395,7 @@
 
 (defn parser-array [(parser (ptr JsonParser))] (-> Json)
   (parser-advance parser)
-  (let [(mut result) (json-array (load (field parser allocator)))]
+  (let [(mut result) (json-array (.allocator parser))]
     (match (load result) (JsonArray [items] (al-reserve! [Json] items 8)) (_ 0))
     (parser-skip-whitespace parser)
     (if (= (parser-peek parser) 93)
@@ -409,7 +409,7 @@
     (load result)))
 
 ;; Construct an integer JSON number without converting through floating point.
-(defn json-integer [(allocator (ptr Allocator)) (number i64)] (-> Json)
+(defn json-integer [(allocator (dyn Allocator)) (number i64)] (-> Json)
   (if (= number 0)
       (JsonNumber "0")
       (let [(mut reversed) (sb-new allocator)
@@ -437,7 +437,7 @@
 
 (defn parser-object [(parser (ptr JsonParser))] (-> Json)
   (parser-advance parser)
-  (let [(mut result) (json-object (load (field parser allocator)))]
+  (let [(mut result) (json-object (.allocator parser))]
     (match (load result)
            (JsonObject [keys values]
                        (do
@@ -463,9 +463,9 @@
     (load result)))
 
 ;; Parse exactly one JSON value. Trailing non-whitespace bytes are rejected.
-(defn json-parse [(allocator (ptr Allocator)) (source (slice u8))] (-> JsonParseResult)
-  (let [parser (alloc/stack JsonParser)
-        result (alloc/stack JsonParseResult)]
+(defn json-parse [(allocator (dyn Allocator)) (source (slice u8))] (-> JsonParseResult)
+  (let [parser (primitive/alloc-stack JsonParser)
+        result (primitive/alloc-stack JsonParseResult)]
     (set! (.source parser) source)
     (set! (.position parser) 0)
     (set! (.allocator parser) allocator)
@@ -545,7 +545,7 @@
   0)
 
 ;; Serialize a JSON tree into an owned byte slice allocated by `allocator`.
-(defn json-stringify [(allocator (ptr Allocator)) (value Json)] (-> (slice u8))
+(defn json-stringify [(allocator (dyn Allocator)) (value Json)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (json-write! (mut buffer) value)
     (sb-finish! (mut buffer))))

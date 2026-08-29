@@ -1,5 +1,7 @@
 (module harness-run-service-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
@@ -32,24 +34,24 @@
   ;; No registry behind this double, which is the case the service reports as
   ;; 501 rather than pretending an empty tool list is the truth.
   (describe-tools [(self (ptr FakeRunController))
-                   (allocator (ptr Allocator))
+                   (allocator (dyn Allocator))
                    (out (ptr Json))]
                   (-> i64)
                   -1)
   (authorize-tool-call [(self (ptr FakeRunController))
                         (command (ptr Json))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (out (ptr Json))]
                        (-> i64)
                        -1)
   (invoke-tool [(self (ptr FakeRunController))
                 (command (ptr Json))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (out (ptr Json))]
                (-> i64)
                -1))
 
-(defn service-command [(allocator (ptr Allocator))
+(defn service-command [(allocator (dyn Allocator))
                        (command-id (slice u8))] (-> Json)
   (let [(mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
@@ -60,7 +62,7 @@
     (json-put-string! (mut command) "prompt" "hello")
     (load command)))
 
-(defn run-command [(allocator (ptr Allocator))
+(defn run-command [(allocator (dyn Allocator))
                    (command-id (slice u8))
                    (run-id (slice u8))] (-> Json)
   (let [(mut command) (service-command allocator command-id)]
@@ -74,7 +76,7 @@
                             (principal (slice u8))
                             (can-observe bool)
                             (can-control bool)] (-> ServiceResponse)
-  (let [request (alloc/stack ServiceHttpRequest)]
+  (let [request (primitive/alloc-stack ServiceHttpRequest)]
     (set! (.method request) method)
     (set! (.target request) target)
     (set! (.body request) body)
@@ -95,11 +97,11 @@
 (deftest subagents-have-private-clean-slate-conversations
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-private-subagent-conversations.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack FakeRunController)
-               service (alloc/stack RunService)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack FakeRunController)
+               service (primitive/alloc-stack RunService)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -171,11 +173,11 @@
 (deftest worker-claims-and-completes-a-durable-run-without-local-execution
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-worker-service.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack FakeRunController)
-               service (alloc/stack RunService)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack FakeRunController)
+               service (primitive/alloc-stack RunService)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -255,11 +257,11 @@
 (deftest persists-idempotent-create-cancel-and-cursor-queries
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-run-service.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack FakeRunController)
-               service (alloc/stack RunService)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack FakeRunController)
+               service (primitive/alloc-stack RunService)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -492,11 +494,11 @@
 (deftest http-boundary-rejects-invalid-json-and-run-id-mismatch
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-run-service-errors.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack FakeRunController)
-               service (alloc/stack RunService)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack FakeRunController)
+               service (primitive/alloc-stack RunService)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path false)
              (JournalOpenFailed [message] (assert false))
@@ -529,11 +531,11 @@
 (deftest restart-launches-only-queued-work-and-terminalizes-in-flight-work
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-run-service-restart.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack FakeRunController)
-               service (alloc/stack RunService)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack FakeRunController)
+               service (primitive/alloc-stack RunService)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -613,11 +615,11 @@
 (deftest tool-plane-routes-are-capability-gated
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-tool-plane-routes.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               controller (alloc/stack FakeRunController)
-               service (alloc/stack RunService)]
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               controller (primitive/alloc-stack FakeRunController)
+               service (primitive/alloc-stack RunService)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))

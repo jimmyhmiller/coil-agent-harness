@@ -1,5 +1,7 @@
 (module harness-json-clone-model-provider-fixture)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
@@ -21,7 +23,7 @@
                  (-> i64)
                  (atomic-add (load (field self count)) 1)))
 
-(defn clone-provider-request [(allocator (ptr Allocator))
+(defn clone-provider-request [(allocator (dyn Allocator))
                               (registry (ptr ToolRegistry))] (-> Json)
   (let [(mut params) (json-object allocator)
         (mut tools) (json-array allocator)
@@ -52,7 +54,7 @@
   (execute-model [(self (ptr CloneProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (let [wire (clone-provider-request allocator (load (field request tools)))
                        encoded (json-stringify allocator wire)
@@ -68,15 +70,15 @@
   (let [owner (malloc-allocator)
         domain (allocation-domain-open owner)
         allocator (allocation-domain-allocator domain)
-        registry (box allocator ToolRegistry (tool-registry-new allocator))
-        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        request (box allocator ModelRequest (zeroed ModelRequest))
-        provider (box allocator CloneProvider (zeroed CloneProvider))
-        count (box allocator i64 0)
-        sink (alloc/stack CountSink)
-        sequence (box allocator i64 1)
-        emitter (box allocator EventEmitter (zeroed EventEmitter))
-        policy (alloc/stack AgentRunPolicy)]
+        registry (box! allocator ToolRegistry (tool-registry-new allocator))
+        messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+        request (box! allocator ModelRequest (zeroed ModelRequest))
+        provider (box! allocator CloneProvider (zeroed CloneProvider))
+        count (box! allocator i64 0)
+        sink (primitive/alloc-stack CountSink)
+        sequence (box! allocator i64 1)
+        emitter (box! allocator EventEmitter (zeroed EventEmitter))
+        policy (primitive/alloc-stack AgentRunPolicy)]
     (register-filesystem-tools! registry allocator ".")
     (register-bash-tool! registry allocator ".")
     (store! (field request run-id) "run")
@@ -88,7 +90,7 @@
     (store! (field request reasoning) "")
     (store! (field request timeout-ms) 10000)
     (store! (field sink count) count)
-    (store! (field emitter sink) (box allocator (dyn EventSink) sink))
+    (store! (field emitter sink) (box! allocator (dyn EventSink) sink))
     (store! (field emitter next-sequence) sequence)
     (store! (field policy max-model-turns) 1)
     (store! (field policy max-parallel-tools) 1)

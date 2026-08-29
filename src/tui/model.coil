@@ -1,5 +1,7 @@
 (module harness-tui-model)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -39,7 +41,7 @@
    (detail (slice u8))])
 
 (defstruct PresentationModel
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (blocks (ArrayList PresentationBlock))
    (last-sequence i64)
    (terminal bool)])
@@ -66,8 +68,8 @@
   (FailRun [(id (slice u8)) (detail (slice u8))])
   (CancelRun [(id (slice u8))]))
 
-(defn presentation-model-new [(allocator (ptr Allocator))] (-> PresentationModel)
-  (let [model (alloc/stack PresentationModel)]
+(defn presentation-model-new [(allocator (dyn Allocator))] (-> PresentationModel)
+  (let [model (primitive/alloc-stack PresentationModel)]
     (set! (.allocator model) allocator)
     (set! (.blocks model) (al-new [PresentationBlock] allocator))
     (set! (.last-sequence model) 0)
@@ -114,7 +116,7 @@
                           (arguments Json)
                           (result Json)
                           (detail (slice u8))] (-> i64)
-  (let [block (alloc/stack PresentationBlock)]
+  (let [block (primitive/alloc-stack PresentationBlock)]
     (set! (.id block) (json-copy-string (load (field model allocator)) id))
     (set! (.kind block) kind)
     (set! (.state block) state)
@@ -128,9 +130,9 @@
 
 (defn presentation-block-slot [(model (ptr PresentationModel))
                                (index-value i64)] (-> (ptr PresentationBlock))
-  (index (load (field (field model blocks) data)) index-value))
+  (al-elem [PresentationBlock] (field model blocks) index-value))
 
-(defn presentation-append [(allocator (ptr Allocator))
+(defn presentation-append [(allocator (dyn Allocator))
                            (left (slice u8))
                            (right (slice u8))] (-> (slice u8))
   (let [(mut builder) (sb-new allocator)]
@@ -148,7 +150,7 @@
               (set! end (- (load end) 1))))
     (load end)))
 
-(defn presentation-append-bounded [(allocator (ptr Allocator))
+(defn presentation-append-bounded [(allocator (dyn Allocator))
                                    (left (slice u8))
                                    (right (slice u8))
                                    (limit i64)] (-> (slice u8))

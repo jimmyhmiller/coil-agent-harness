@@ -1,5 +1,7 @@
 (module harness-factory-status)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.atomic" :use *)
 (import "coil.match" :use *)
@@ -18,7 +20,8 @@
    (evidence (slice u8))
    ;; Where to copy those into. The tool runs in a per-run allocator that is
    ;; closed before the coordinator reads any of this.
-   (allocator (ptr Allocator))])
+   (allocator (dyn Allocator))
+   (has-allocator bool)])
 
 (defstruct FactoryStatusTool
   [(status (ptr FactoryWorkerStatus))])
@@ -54,12 +57,13 @@
   (match value
     (None [] "")
     (Some [text]
-          (let [owner (load (field status allocator))]
-            (if (= (cast i64 owner) 0) "" (json-copy-string owner text))))))
+          (if (.has-allocator status)
+              (json-copy-string (load (field status allocator)) text)
+              ""))))
 
 (defn execute-factory-status [(self (ptr FactoryStatusTool))
                               (call (ptr ToolCall))
-                              (allocator (ptr Allocator))] (-> ToolResult)
+                              (allocator (dyn Allocator))] (-> ToolResult)
   (match (json-bool-value (json-get (.arguments call) "ready"))
     (None [] (factory-status-error call "ready must be true or false"))
     (Some [ready]
@@ -81,11 +85,11 @@
   (execute-tool [(self (ptr FactoryStatusTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-factory-status self call allocator)))
 
-(defn factory-status-schema [(allocator (ptr Allocator))] (-> Json)
+(defn factory-status-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut ready) (json-object allocator)
         (mut summary) (json-object allocator)
         (mut evidence) (json-object allocator)
@@ -108,10 +112,10 @@
     (load schema)))
 
 (defn register-factory-status-tool! [(registry (mut ToolRegistry))
-                                     (allocator (ptr Allocator))
+                                     (allocator (dyn Allocator))
                                      (status (ptr FactoryWorkerStatus))] (-> bool)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator FactoryStatusTool (zeroed FactoryStatusTool))]
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator FactoryStatusTool (zeroed FactoryStatusTool))]
     (set! (.status implementation) status)
     (set! (.name (.spec definition)) "report_worker_status")
     (set! (.description (.spec definition))

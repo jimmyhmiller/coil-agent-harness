@@ -1,5 +1,7 @@
 (module harness-tui-render-inline)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "harness-allocation-domain" :use *)
@@ -18,7 +20,8 @@
 ;; hashes.
 (defstruct InlineRenderer
   [(previous-live-height i64)
-   (owner (ptr Allocator))
+   (owner (dyn Allocator))
+   (retaining bool)
    (retained Frame)
    (retained-domain (ptr AllocationDomain))
    (has-retained bool)])
@@ -29,14 +32,14 @@
 (defn inline-renderer-retain! [(renderer (ptr InlineRenderer))
                                (live (ptr Frame))] (-> i64)
   (let [owner (load (field renderer owner))]
-    (if (= owner (cast (ptr Allocator) 0))
+    (if (not (.retaining renderer))
         0
         (let [domain (allocation-domain-open owner)]
           (if (not (allocation-domain-valid? domain))
               (do (set! (.has-retained renderer) false) 0)
               (let [previous-domain (load (field renderer retained-domain))
                     had-previous (.has-retained renderer)
-                    clone (alloc/stack Frame)]
+                    clone (primitive/alloc-stack Frame)]
                 (frame-clone! (allocation-domain-allocator domain) live clone)
                 (set! (.retained renderer) (load clone))
                 (set! (.retained-domain renderer) domain)
@@ -57,21 +60,23 @@
   0)
 
 ;; A renderer that diffs consecutive live frames instead of repainting them.
-(defn inline-renderer-new-retaining [(owner (ptr Allocator))] (-> InlineRenderer)
-  (let [renderer (alloc/stack InlineRenderer)]
+(defn inline-renderer-new-retaining [(owner (dyn Allocator))] (-> InlineRenderer)
+  (let [renderer (primitive/alloc-stack InlineRenderer)]
     (set! (.previous-live-height renderer) 0)
     (set! (.owner renderer) owner)
+    (set! (.retaining renderer) true)
     (set! (.has-retained renderer) false)
     (load renderer)))
 
 (defn inline-renderer-new [] (-> InlineRenderer)
-  (let [renderer (alloc/stack InlineRenderer)]
+  (let [renderer (primitive/alloc-stack InlineRenderer)]
     (set! (.previous-live-height renderer) 0)
-    (set! (.owner renderer) (cast (ptr Allocator) 0))
+    (set! (.owner renderer) (zeroed (dyn Allocator)))
+    (set! (.retaining renderer) false)
     (set! (.has-retained renderer) false)
     (load renderer)))
 
-(defn inline-operations-new [(allocator (ptr Allocator))] (-> (ArrayList TerminalOperation))
+(defn inline-operations-new [(allocator (dyn Allocator))] (-> (ArrayList TerminalOperation))
   (al-new [TerminalOperation] allocator))
 
 (defn inline-push! [(operations (ptr (ArrayList TerminalOperation)))
@@ -190,7 +195,7 @@
 ;; A committed frame is written once after the old live region is erased. The new
 ;; live frame is then drawn beneath it and remains the only mutable terminal area.
 (defn inline-renderer-plan-with! [(renderer (ptr InlineRenderer))
-                                  (scratch (ptr Allocator))
+                                  (scratch (dyn Allocator))
                                   (committed (ptr Frame))
                                   (live (ptr Frame))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)

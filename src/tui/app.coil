@@ -1,8 +1,11 @@
 (module harness-tui-app)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
+(import "coil.fs" :as fs)
 (import "coil.io" :as io)
 (import "coil.match" :use *)
 (import "coil.os" :as os)
@@ -13,6 +16,9 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-bus-event-sink" :use *)
+(import "harness-directory" :use *)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
 (import "harness-model-catalog" :use *)
@@ -21,6 +27,7 @@
 (import "harness-run-service" :use *)
 (import "harness-system" :use *)
 (import "harness-tui-busy-input" :use *)
+(import "harness-tui-cells" :use *)
 (import "harness-tui-command" :use *)
 (import "harness-tui-event-adapter" :use *)
 (import "harness-tui-frame" :use *)
@@ -43,71 +50,96 @@
 (import "provider-common" :use *)
 
 (const TUI_COMMIT_BLOCK_BATCH 128)
-(defstruct TuiConversation [(conversation-id (slice u8))])
+(defstruct TuiConversation
+  [(conversation-id (slice u8))
+   ;; A resumed conversation is imported from this journal on its first new
+   ;; turn. The resulting run.created command carries the complete semantic
+   ;; history, so later turns recover from the active journal normally.
+   (resume-journal (slice u8))
+   (title (slice u8))
+   (cwd (slice u8))])
+
+(defstruct TuiSession
+  [(conversation-id (slice u8))
+   (title (slice u8))
+   (cwd (slice u8))
+   (journal (slice u8))
+   (started i64)
+   (updated i64)])
 
 (defstruct TuiNotificationSource
   [(service (ptr RunService))
-   (allocator (ptr Allocator))
+   (allocator (dyn Allocator))
    (conversation-id (slice u8))
-   (cursor i64)
+   (lock i64)
    (pending (ArrayList (slice u8)))
    (pending-next i64)])
+
+;; Notifications are emitted by background run threads. Keep their tiny queue
+;; behind its own lock so the input thread never races an append or a /new.
+(defn tui-notification-lock! [(source (ptr TuiNotificationSource))] (-> i64)
+  (loop (if (= (atomic-cas (field source lock) 0 1) 0) (break) 0))
+  0)
+
+(defn tui-notification-unlock! [(source (ptr TuiNotificationSource))] (-> i64)
+  (atomic-store (field source lock) 0))
+
+(impl EventSink TuiNotificationSource
+  (publish-event [(self (ptr TuiNotificationSource)) (event (ptr Event))]
+                 (-> i64)
+                 (when (match (.kind event) (RunCreated [] true) (_ false))
+                   (let [payload (.payload event)]
+                     (when (= (command-string payload "actor") "agent-notification")
+                       (tui-notification-lock! self)
+                       (when (= (command-string payload "conversation_id")
+                                (.conversation-id self))
+                         (al-push! [(slice u8)]
+                                   (mut (.pending self))
+                                   (json-copy-string (.allocator self) (.run-id event)))
+                         0)
+                       (tui-notification-unlock! self)
+                       0))
+                   0)
+                 0))
 
 (impl InputIdleObserver TuiNotificationSource
   (input-idle-notification? [(self (ptr TuiNotificationSource))]
                             (-> bool)
-                            (if (< (.pending-next self)
-                                   (al-len [(slice u8)] (.pending self)))
-                                true
-                                (let [recovery
-                                        (service-recover-into (load (field self service))
-                                                              (load (field self allocator)))]
-                                  (if (not (.ok recovery))
-                                      false
-                                      (let [events (field recovery events)
-                                            (mut i) 0
-                                            n (al-len [Json] (load events))]
-                                        (loop (if (>= (load i) n)
-                                                  (break)
-                                                  (let [event (al-get [Json] (load events) (load i))
-                                                        sequence (json-number-i64 (json-get event "sequence"))
-                                                        payload (json-get event "payload")]
-                                                    (when (and (> sequence (load (field self cursor)))
-                                                               (and (str-eq (command-string event "event")
-                                                                            "run.created")
-                                                                    (and (str-eq (command-string payload "actor")
-                                                                                 "agent-notification")
-                                                                         (str-eq (command-string payload
-                                                                                                 "conversation_id")
-                                                                                 (load (field self conversation-id))))))
-                                                      (al-push! [(slice u8)]
-                                                                (mut (field self pending))
-                                                                (json-copy-string (load (field self allocator))
-                                                                                  (command-string event "run_id")))
-                                                      0)
-                                                    (set! i (+ (load i) 1)))))
-                                        (set! (.cursor self) (.last-sequence recovery))
-                                        (< (.pending-next self)
-                                           (al-len [(slice u8)] (.pending self)))))))))
+                            (do
+                              (tui-notification-lock! self)
+                              (let [ready (< (.pending-next self)
+                                             (al-len [(slice u8)] (.pending self)))]
+                                (tui-notification-unlock! self)
+                                ready))))
 
 (defn tui-notification-current [(source (ptr TuiNotificationSource))] (-> (slice u8))
-  (al-get [(slice u8)]
-          (.pending source)
-          (.pending-next source)))
+  (tui-notification-lock! source)
+  (let [current (al-get [(slice u8)] (.pending source) (.pending-next source))]
+    (tui-notification-unlock! source)
+    current))
 
 (defn tui-notification-consume! [(source (ptr TuiNotificationSource))] (-> i64)
+  (tui-notification-lock! source)
   (set! (.pending-next source) (+ (.pending-next source) 1))
+  (tui-notification-unlock! source)
   0)
 
-(defn tui-read [(allocator (ptr Allocator))
+(defn tui-notification-conversation! [(source (ptr TuiNotificationSource))
+                                      (conversation-id (slice u8))] (-> i64)
+  (tui-notification-lock! source)
+  (set! (.conversation-id source) conversation-id)
+  (tui-notification-unlock! source)
+  0)
+
+(defn tui-read [(allocator (dyn Allocator))
                 (prompt (slice u8))] (-> (slice u8))
   (tui-output-write-slice 1 prompt)
-  (let [reader (alloc/stack io/Reader)]
+  (let [reader (primitive/alloc-stack io/Reader)]
     (match (io/read-line-alloc allocator (io/fd-reader reader 0) 65536)
       (Ok [owned] (io/owned-bytes-slice owned))
       (Err [failure] ""))))
 
-(defn tui-command [(allocator (ptr Allocator))
+(defn tui-command [(allocator (dyn Allocator))
                    (run-id (slice u8))
                    (provider (slice u8))
                    (model (slice u8))
@@ -133,7 +165,7 @@
     (json-put-string! (mut command) "prompt" prompt)
     (load command)))
 
-(defn tui-dependencies [(allocator (ptr Allocator))
+(defn tui-dependencies [(allocator (dyn Allocator))
                         (source (slice u8))] (-> Json)
   (let [(mut result) (json-array allocator)
         (mut remaining) source
@@ -163,7 +195,7 @@
                                         (slice-len [u8] (load remaining)))))))))
     (load result)))
 
-(defn tui-print-response [(allocator (ptr Allocator))
+(defn tui-print-response [(allocator (dyn Allocator))
                           (response ServiceResponse)
                           (profile (ref TerminalProfile))] (-> i64)
   (tui-render-view allocator
@@ -173,7 +205,7 @@
                                          (.body response)
                                          (.unicode profile))))
 
-(defn tui-print-run-response [(allocator (ptr Allocator))
+(defn tui-print-run-response [(allocator (dyn Allocator))
                               (response ServiceResponse)
                               (profile (ref TerminalProfile))] (-> i64)
   (tui-render-view allocator
@@ -183,7 +215,7 @@
                                      (.body response)
                                      (.unicode profile))))
 
-(defn tui-print-workflow-response [(allocator (ptr Allocator))
+(defn tui-print-workflow-response [(allocator (dyn Allocator))
                                    (response ServiceResponse)
                                    (profile (ref TerminalProfile))] (-> i64)
   (tui-render-view allocator
@@ -193,7 +225,7 @@
                                           (.body response)
                                           (.unicode profile))))
 
-(defn tui-read-secondary [(allocator (ptr Allocator))
+(defn tui-read-secondary [(allocator (dyn Allocator))
                           (profile (ref TerminalProfile))
                           (prompt (slice u8))] (-> (slice u8))
   (if (.interactive profile)
@@ -226,13 +258,13 @@
 (defn tui-entered-or [(entered (slice u8)) (current (slice u8))] (-> (slice u8))
   (if (= (slice-len [u8] entered) 0) current entered))
 
-(defn tui-model-prompt [(allocator (ptr Allocator))
+(defn tui-model-prompt [(allocator (dyn Allocator))
                         (default-model (slice u8))] (-> (slice u8))
   (concat-or-empty allocator
                    "  model ["
                    (concat-or-empty allocator default-model "]: ")))
 
-(defn tui-report-selection [(allocator (ptr Allocator))
+(defn tui-report-selection [(allocator (dyn Allocator))
                             (profile (ref TerminalProfile))
                             (provider (slice u8))
                             (model (slice u8))
@@ -263,9 +295,9 @@
 ;; effort parameter, so the menu never offers a control that does nothing.
 ;; ---------------------------------------------------------------------------
 
-(defn tui-model-entries [(allocator (ptr Allocator))
+(defn tui-model-entries [(allocator (dyn Allocator))
                          (catalog (ptr ModelCatalog))] (-> (ptr (ArrayList ChoiceEntry)))
-  (let [entries (box allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+  (let [entries (box! allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
         n (model-catalog-count catalog)
         (mut i) 0]
     (loop (if (>= (load i) n)
@@ -278,12 +310,12 @@
                 (set! i (+ (load i) 1)))))
     entries))
 
-(defn tui-effort-entries [(allocator (ptr Allocator))] (-> (ptr (ArrayList ChoiceEntry)))
-  (let [entries (box allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+(defn tui-effort-entries [(allocator (dyn Allocator))] (-> (ptr (ArrayList ChoiceEntry)))
+  (let [entries (box! allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
         (mut i) 0]
     (loop (if (>= (load i) EFFORT_CHOICE_COUNT)
               (break)
-              (let [choice (alloc/stack EffortChoice)]
+              (let [choice (primitive/alloc-stack EffortChoice)]
                 (set! choice (effort-choice-at (load i)))
                 (al-push! [ChoiceEntry]
                           entries
@@ -293,7 +325,7 @@
     entries))
 
 (defn tui-create [(service (ptr RunService))
-                  (allocator (ptr Allocator))
+                  (allocator (dyn Allocator))
                   (mode (slice u8))
                   (profile (ref TerminalProfile))] (-> i64)
   (let [run-id (tui-read-secondary allocator profile "Run ID: ")
@@ -325,10 +357,10 @@
                         (service-submit-run service (mut command) "tui-operator")
                         profile)))
 
-(defn tui-render-view [(session-allocator (ptr Allocator))
+(defn tui-render-view [(session-allocator (dyn Allocator))
                        (profile (ref TerminalProfile))
                        (root ViewNode)] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle session-allocator)
     (let [scratch (region/region-allocator cycle)
           view (terminal-view root)
@@ -340,7 +372,7 @@
       (region/region-close! cycle)
       result)))
 
-(defn tui-header [(allocator (ptr Allocator))
+(defn tui-header [(allocator (dyn Allocator))
                   (profile (ref TerminalProfile))] (-> i64)
   (let [(mut root) (view-stack allocator 0)]
     (view-stack-push! (mut root)
@@ -353,7 +385,7 @@
     (view-stack-push! (mut root) (view-spacer 1))
     (tui-render-view allocator profile (load root))))
 
-(defn tui-help [(allocator (ptr Allocator))
+(defn tui-help [(allocator (dyn Allocator))
                 (registry (ptr CommandRegistry))
                 (profile (ref TerminalProfile))] (-> i64)
   (let [(mut root) (view-stack allocator 0)
@@ -397,7 +429,7 @@
     (or (= event-run-id run-id)
         (>= (presentation-block-index model event-run-id (AgentBlock)) 0))))
 
-(defn tui-write-model-range [(allocator (ptr Allocator))
+(defn tui-write-model-range [(allocator (dyn Allocator))
                              (model (ptr PresentationModel))
                              (start i64)
                              (end i64)
@@ -420,7 +452,7 @@
                 (set! at next))))
     0))
 
-(defn tui-render-presentation-cycle! [(allocator (ptr Allocator))
+(defn tui-render-presentation-cycle! [(allocator (dyn Allocator))
                                       (model (ptr PresentationModel))
                                       (policy (ptr TranscriptPolicy))
                                       (rendered-count (ptr i64))
@@ -560,7 +592,7 @@
     (set! rendered-count after)
     0))
 
-(defn tui-render-presentation! [(session-allocator (ptr Allocator))
+(defn tui-render-presentation! [(session-allocator (dyn Allocator))
                                 (model (ptr PresentationModel))
                                 (policy (ptr TranscriptPolicy))
                                 (rendered-count (ptr i64))
@@ -571,7 +603,7 @@
                                 (height i64)
                                 (busy bool)
                                 (cancelling bool)] (-> i64)
-  (let [cycle (alloc/stack region/Region)]
+  (let [cycle (primitive/alloc-stack region/Region)]
     (region/region-init cycle session-allocator)
     (let [result
             (tui-render-presentation-cycle! (region/region-allocator cycle)
@@ -589,7 +621,7 @@
       result)))
 
 (defn tui-request-cancel! [(service (ptr RunService))
-                           (allocator (ptr Allocator))
+                           (allocator (dyn Allocator))
                            (run-id (slice u8))] (-> i64)
   (let [(mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
@@ -602,7 +634,7 @@
     (service-request-cancel-durable-run service (load command))))
 
 (defn tui-watch-run [(service (ptr RunService))
-                     (allocator (ptr Allocator))
+                     (allocator (dyn Allocator))
                      (run-id (slice u8))
                      (assistant (ptr StrBuf))
                      (profile (ref TerminalProfile))] (-> i64)
@@ -634,7 +666,7 @@
       0)
     (loop (if (load done)
               (break)
-              (let [cycle (alloc/stack scratch/ScratchArena)
+              (let [cycle (primitive/alloc-stack scratch/ScratchArena)
                     queried-width (terminal-query-width (cast i32 1))
                     queried-height (terminal-query-height (cast i32 1))
                     resized
@@ -792,9 +824,9 @@
     0))
 
 (defn tui-run-id-counter [] (-> (ptr i64))
-  (alloc/static i64))
+  (primitive/alloc-static i64))
 
-(defn tui-new-run-id [(allocator (ptr Allocator))] (-> (slice u8))
+(defn tui-new-run-id [(allocator (dyn Allocator))] (-> (slice u8))
   (let [timestamp (json-stringify allocator (json-integer allocator (now-ms)))
         process-id (json-stringify allocator (json-integer allocator (process/id)))
         counter
@@ -813,7 +845,7 @@
                                                                                          "-"
                                                                                          counter)))))))
 
-(defn tui-conversation-id [(allocator (ptr Allocator))] (-> (slice u8))
+(defn tui-conversation-id [(allocator (dyn Allocator))] (-> (slice u8))
   (match (os/env-get allocator "HARNESS_CONVERSATION_ID")
     (Ok [found]
         (match found
@@ -829,8 +861,261 @@
           (None [] (tui-new-run-id allocator))))
     (Err [failure] (tui-new-run-id allocator))))
 
+(defn tui-path-parent [(path (slice u8))] (-> (slice u8))
+  (let [(mut at) (slice-len [u8] path)]
+    (loop (if (<= (load at) 0)
+              (break)
+              (if (= (cast i64 (slice-get [u8] path (- (load at) 1))) 47)
+                  (break)
+                  (set! at (- (load at) 1)))))
+    (if (<= (load at) 1) "/" (substr path 0 (- (load at) 1)))))
+
+(defn tui-session-title [(text (slice u8))] (-> (slice u8))
+  (let [(mut at) 0
+        (mut characters) 0
+        count (slice-len [u8] text)]
+    (loop (if (or (>= (load at) count) (>= (load characters) 64))
+              (break)
+              (let [scalar (utf8-decode text (load at))]
+                (set! at (+ (load at) (.length scalar)))
+                (set! characters (+ (load characters) 1)))))
+    (substr text 0 (load at))))
+
+(defn tui-session-index [(sessions (ref (ArrayList TuiSession)))
+                         (conversation-id (slice u8))] (-> i64)
+  (let [(mut i) 0
+        n (al-len [TuiSession] (load sessions))
+        (mut found) -1]
+    (loop (if (or (>= (load found) 0) (>= (load i) n))
+              (break)
+              (let [session (al-get [TuiSession] (load sessions) (load i))]
+                (when (= (.conversation-id session) conversation-id)
+                  (store! found (load i))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn tui-session-registry-path [(allocator (dyn Allocator))
+                                 (service (ptr RunService))] (-> (slice u8))
+  (path-join allocator
+             (tui-path-parent (tui-path-parent (.journal-path service)))
+             "sessions.jsonl"))
+
+(defn tui-record-session! [(allocator (dyn Allocator))
+                           (service (ptr RunService))
+                           (history (ptr TuiConversation))] (-> bool)
+  (let [(mut record) (json-object allocator)]
+    (json-object-put! (mut record) "version" (json-integer allocator 1))
+    (json-put-string! (mut record) "conversation_id" (.conversation-id history))
+    (json-put-string! (mut record) "title" (.title history))
+    (json-put-string! (mut record) "cwd" (.cwd history))
+    (json-put-string! (mut record) "journal" (.journal-path service))
+    (json-object-put! (mut record) "updated" (json-integer allocator (now-ms)))
+    (>= (event-journal-append-bytes!
+          allocator
+          (tui-session-registry-path allocator service)
+          (concat-or-empty allocator (json-stringify allocator (load record)) "\n"))
+        0)))
+
+(defn tui-sort-sessions! [(sessions (mut (ArrayList TuiSession)))] (-> i64)
+  (let [(mut i) 1
+        n (al-len [TuiSession] (load sessions))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [picked (al-get [TuiSession] (load sessions) (load i))
+                    (mut at) (load i)]
+                (loop (if (<= (load at) 0)
+                          (break)
+                          (let [previous (al-get [TuiSession]
+                                                 (load sessions)
+                                                 (- (load at) 1))]
+                            (if (>= (.updated previous) (.updated picked))
+                                (break)
+                                (do
+                                  (al-set! [TuiSession] (mut sessions) (load at) previous)
+                                  (set! at (- (load at) 1)))))))
+                (al-set! [TuiSession] (mut sessions) (load at) picked)
+                (set! i (+ (load i) 1)))))
+    0))
+
+;; The menu reads one compact summary stream. No run journal is opened or parsed
+;; until the person selects a session.
+(defn tui-indexed-sessions [(allocator (dyn Allocator))
+                            (service (ptr RunService))] (-> (ArrayList TuiSession))
+  (let [(mut sessions) (al-new [TuiSession] allocator)]
+    (match (fs/read-file allocator (tui-session-registry-path allocator service))
+      (Err [failure] 0)
+      (Ok [bytes]
+          (let [lines (str-split allocator bytes "\n")
+                (mut i) 0
+                n (al-len [(slice u8)] (load lines))]
+            (loop (if (>= (load i) n)
+                      (break)
+                      (let [line (al-get [(slice u8)] (load lines) (load i))]
+                        (when (> (slice-len [u8] line) 0)
+                          (let [parsed (json-parse allocator line)]
+                            (when (.ok parsed)
+                              (let [record (.value parsed)
+                                    conversation-id (command-string record "conversation_id")
+                                    existing (tui-session-index (mut sessions) conversation-id)
+                                    updated (json-number-i64 (json-get record "updated"))]
+                                (if (< existing 0)
+                                    (let [session (primitive/alloc-stack TuiSession)]
+                                      (set! (.conversation-id session)
+                                            (json-copy-string allocator conversation-id))
+                                      (set! (.title session)
+                                            (json-copy-string allocator
+                                                              (command-string record "title")))
+                                      (set! (.cwd session)
+                                            (json-copy-string allocator
+                                                              (command-string record "cwd")))
+                                      (set! (.journal session)
+                                            (json-copy-string allocator
+                                                              (command-string record "journal")))
+                                      (set! (.started session) updated)
+                                      (set! (.updated session) updated)
+                                      (al-push! [TuiSession] (mut sessions) (load session)))
+                                    (let [session (al-elem [TuiSession] (mut sessions) existing)]
+                                      (when (> updated (.updated session))
+                                        (set! (.updated session) updated)
+                                        (set! (.journal session)
+                                              (json-copy-string allocator
+                                                                (command-string record "journal")))
+                                        0)))
+                                0))
+                            0))
+                        (set! i (+ (load i) 1)))))
+            0)))
+    (tui-sort-sessions! (mut sessions))
+    (load sessions)))
+
+;; Every default TUI invocation owns a journal, so sessions can be enumerated
+;; without a second index that might drift from the durable record. The first
+;; tui-user run is both the session's title source and its originating folder.
+(defn tui-sessions [(allocator (dyn Allocator))
+                    (service (ptr RunService))] (-> (ArrayList TuiSession))
+  (tui-indexed-sessions allocator service))
+
+(defn tui-session-entries [(allocator (dyn Allocator))
+                           (sessions (ref (ArrayList TuiSession)))]
+  (-> (ptr (ArrayList ChoiceEntry)))
+  (let [entries (box! allocator (ArrayList ChoiceEntry) (al-new [ChoiceEntry] allocator))
+        (mut i) 0
+        n (al-len [TuiSession] (load sessions))]
+    (loop (if (>= (load i) n)
+              (break)
+              (let [session (al-get [TuiSession] (load sessions) (load i))]
+                (al-push! [ChoiceEntry]
+                          entries
+                          (choice-entry (.title session) (.cwd session)))
+                (set! i (+ (load i) 1)))))
+    entries))
+
+(defn tui-enrich-from-journal! [(allocator (dyn Allocator))
+                                (journal-path (slice u8))
+                                (command (mut Json))] (-> bool)
+  (let [journal (primitive/alloc-stack EventJournal)
+        temporary (primitive/alloc-stack RunService)
+        (mut ok) false]
+    (match (event-journal-open allocator journal-path false)
+      (JournalOpenFailed [message] 0)
+      (JournalOpened [opened]
+                     (do
+                       (store! journal opened)
+                       (store! (field temporary allocator) allocator)
+                       (store! (field temporary journal-path) journal-path)
+                       (store! (field temporary journal) journal)
+                       (let [(mut enriched) (load command)]
+                         (store! ok (= (service-enrich-conversation! temporary (mut enriched)) 0))
+                         (when (load ok) (set! command (load enriched)) 0))
+                       (event-journal-close! journal))))
+    (load ok)))
+
+(defn tui-run-id-member? [(run-ids (ref (ArrayList (slice u8))))
+                          (run-id (slice u8))] (-> bool)
+  (let [(mut i) 0
+        n (al-len [(slice u8)] (load run-ids))
+        (mut found) false]
+    (loop (if (or (load found) (>= (load i) n))
+              (break)
+              (do
+                (when (= (al-get [(slice u8)] (load run-ids) (load i)) run-id)
+                  (store! found true)
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn tui-session-model [(allocator (dyn Allocator))
+                         (session (ptr TuiSession))] (-> PresentationModel)
+  (let [recovery (event-journal-recover allocator (.journal session))
+        (mut model) (presentation-model-new allocator)]
+    (when (.ok recovery)
+      (let [events (field recovery events)
+            (mut run-ids) (al-new [(slice u8)] allocator)
+            (mut i) 0
+            n (al-len [Json] (load events))]
+        (loop (if (>= (load i) n)
+                  (break)
+                  (let [event (al-get [Json] (load events) (load i))
+                        payload (json-get event "payload")]
+                    (when (and (= (command-string event "event") "run.created")
+                               (= (command-string payload "conversation_id")
+                                  (.conversation-id session)))
+                      (al-push! [(slice u8)] (mut run-ids)
+                                (json-copy-string allocator (command-string event "run_id")))
+                      0)
+                    (set! i (+ (load i) 1)))))
+        (set! i 0)
+        (loop (if (>= (load i) n)
+                  (break)
+                  (let [event (al-get [Json] (load events) (load i))
+                        run-id (command-string event "run_id")]
+                    (when (or (tui-run-id-member? (mut run-ids) run-id)
+                              (>= (presentation-block-index (mut model) run-id (AgentBlock)) 0))
+                      ;; Journals have their own sequence spaces. This replay is
+                      ;; one journal in order, so apply the semantic action
+                      ;; directly and leave cursor deduplication to live watches.
+                      (presentation-apply-action!
+                        (mut model)
+                        (presentation-event-action-for-model (mut model) event))
+                      0)
+                    (set! i (+ (load i) 1)))))
+        0))
+    (load model)))
+
+;; Rebuild the selected conversation with the same event adapter and layout used
+;; by a live run. Resuming therefore restores visible scrollback before the next
+;; composer opens instead of only restoring invisible model context.
+(defn tui-replay-session! [(allocator (dyn Allocator))
+                           (session (ptr TuiSession))
+                           (profile (ref TerminalProfile))] (-> i64)
+  (let [(mut model) (tui-session-model allocator session)
+        end (al-len [PresentationBlock] (.blocks model))]
+    (if (.interactive profile)
+        (let [options
+                (layout-options-profile (.width profile)
+                                        (.unicode profile)
+                                        (.compact profile)
+                                        (.expanded profile))
+              (mut at) 0]
+          (loop (if (>= (load at) end)
+                    (break)
+                    (let [next (if (> end (+ (load at) TUI_COMMIT_BLOCK_BATCH))
+                                   (+ (load at) TUI_COMMIT_BLOCK_BATCH)
+                                   end)]
+                      (tui-render-view allocator
+                                       profile
+                                       (layout-model-range-view allocator
+                                                                (mut model)
+                                                                (load at)
+                                                                next
+                                                                options))
+                      (set! at next))))
+          0)
+        (tui-write-model-range allocator (mut model) 0 end profile))))
+
 (defn tui-submit-prompt [(service (ptr RunService))
-                         (allocator (ptr Allocator))
+                         (allocator (dyn Allocator))
                          (provider (slice u8))
                          (model (slice u8))
                          (effort (slice u8))
@@ -840,16 +1125,34 @@
   (let [run-id (tui-new-run-id allocator)
         (mut command) (tui-command allocator run-id provider model effort prompt)]
     (json-put-string! (mut command) "conversation_id" (.conversation-id history))
+    (when (= (slice-len [u8] (.title history)) 0)
+      (set! (.title history) (json-copy-string allocator (tui-session-title prompt)))
+      0)
+    (match (os/current-dir allocator)
+      (Ok [cwd]
+          (let [(mut owned) cwd]
+            (json-put-string! (mut command) "cwd" (os/owned-string-slice (load owned)))
+            (when (= (slice-len [u8] (.cwd history)) 0)
+              (set! (.cwd history)
+                    (json-copy-string allocator (os/owned-string-slice (load owned))))
+              0)
+            (os/owned-string-free allocator (mut owned))))
+      (Err [failure] 0))
+    (when (> (slice-len [u8] (.resume-journal history)) 0)
+      (tui-enrich-from-journal! allocator (.resume-journal history) (mut command))
+      0)
     (let [response (service-submit-run service (mut command) "tui-user")]
       (if (and (>= (.status response) 200)
                (< (.status response) 300))
           (do
+            (set! (.resume-journal history) "")
+            (tui-record-session! allocator service history)
             (let [(mut assistant) (sb-new allocator)]
               (tui-watch-run service allocator run-id (mut assistant) profile)
               run-id))
           (do (tui-print-response allocator response profile) "")))))
 
-(defn tui-primary-prompt [(allocator (ptr Allocator))
+(defn tui-primary-prompt [(allocator (dyn Allocator))
                           (provider (slice u8))
                           (model (slice u8))
                           (effort (slice u8))
@@ -880,7 +1183,7 @@
       (route-default-model (tui-status-provider provider) config)
       model))
 
-(defn tui-read-primary [(allocator (ptr Allocator))
+(defn tui-read-primary [(allocator (dyn Allocator))
                         (editor (ptr InputEditor))
                         (profile (ref TerminalProfile))
                         (provider (slice u8))
@@ -908,7 +1211,7 @@
         (InputReadSubmitted text))))
 
 (defn tui-loop [(service (ptr RunService))
-                (allocator (ptr Allocator))
+                (allocator (dyn Allocator))
                 (profile (ref TerminalProfile))] (-> i64)
   (let [fixture-provider (terminal-env-eq? allocator "HARNESS_TUI_TEST_PROVIDER" "1")
         (mut done) false
@@ -920,17 +1223,29 @@
         (mut catalog) (model-catalog-default allocator)
         (mut current-run) ""
         (mut history) (zeroed TuiConversation)
-        notifications (box allocator TuiNotificationSource (zeroed TuiNotificationSource))
+        notifications (box! allocator TuiNotificationSource (zeroed TuiNotificationSource))
+        notification-sink (box! allocator TeeEventSink (zeroed TeeEventSink))
         (mut commands) (command-registry-builtin allocator)
         (mut editor) (input-editor-new-with-commands allocator (mut commands))]
     (set! (.conversation-id history) (tui-conversation-id allocator))
+    (set! (.resume-journal history) "")
+    (set! (.title history) "")
+    (set! (.cwd history) "")
     (set! (.service notifications) service)
     (set! (.allocator notifications) allocator)
     (set! (.conversation-id notifications) (.conversation-id history))
+    (set! (.lock notifications) 0)
     (set! (.pending notifications) (al-new [(slice u8)] allocator))
     (set! (.pending-next notifications) 0)
-    (let [initial (service-recover-into service allocator)]
-      (set! (.cursor notifications) (if (.ok initial) (.last-sequence initial) 0)))
+    ;; The journal remains the durable first sink. The notification source is a
+    ;; live in-process observer, so idle input checks a small queue rather than
+    ;; recovering any part of the journal.
+    (tee-event-sink-init! notification-sink
+                          allocator
+                          (load (load (field (load (field service emitter)) sink)))
+                          notifications)
+    (store! (field (load (field service emitter)) sink)
+            (box! allocator (dyn EventSink) notification-sink))
     (tui-header allocator profile)
     ;; The balanced TUI route currently selects Codex. Prepare its execution
     ;; strategy after rendering the header but before accepting the first prompt,
@@ -963,12 +1278,60 @@
                                                                                     "  conversation "
                                                                                     (load (field history
                                                                                                  conversation-id))))
+                                          (= action "/resume")
+                                            (let [(mut sessions) (tui-sessions allocator service)]
+                                              (if (= (al-len [TuiSession] (load sessions)) 0)
+                                                  (tui-output-write-line allocator 1 "  no sessions to resume")
+                                                  (match (input-read-choice allocator
+                                                                            profile
+                                                                            "  resume: "
+                                                                            (tui-session-entries allocator
+                                                                                                 (mut sessions))
+                                                                            0)
+                                                    (ChoiceSelected [index]
+                                                                    (let [session
+                                                                            (al-elem [TuiSession]
+                                                                                     (mut sessions)
+                                                                                     index)]
+                                                                      (store! (field history conversation-id)
+                                                                              (.conversation-id session))
+                                                                      (store! (field history resume-journal)
+                                                                              (.journal session))
+                                                                      (store! (field history title)
+                                                                              (.title session))
+                                                                      (store! (field history cwd)
+                                                                              (.cwd session))
+                                                                      (tui-notification-conversation!
+                                                                        notifications
+                                                                        (.conversation-id session))
+                                                                      (tui-output-write-line allocator 1 "")
+                                                                      (tui-replay-session! allocator
+                                                                                           session
+                                                                                           profile)
+                                                                      (tui-output-write-line
+                                                                        allocator
+                                                                        1
+                                                                        (concat-or-empty
+                                                                          allocator
+                                                                          "  resumed "
+                                                                          (concat-or-empty
+                                                                            allocator
+                                                                            (.title session)
+                                                                            (concat-or-empty
+                                                                              allocator
+                                                                              " · "
+                                                                              (.cwd session)))))))
+                                                    (_ 0))))
                                           (= action "/new")
                                             (do
                                               (store! (field history conversation-id)
                                                       (tui-new-run-id allocator))
-                                              (store! (field notifications conversation-id)
-                                                      (load (field history conversation-id)))
+                                              (store! (field history resume-journal) "")
+                                              (store! (field history title) "")
+                                              (store! (field history cwd) "")
+                                              (tui-notification-conversation!
+                                                notifications
+                                                (load (field history conversation-id)))
                                               (tui-output-write-line allocator
                                                                      1
                                                                      (concat-or-empty allocator
@@ -1004,7 +1367,7 @@
                                                                                                                            default-effort))))
                                                                         (ChoiceSelected [level]
                                                                                         (let [picked
-                                                                                                (alloc/stack EffortChoice)]
+                                                                                                (primitive/alloc-stack EffortChoice)]
                                                                                           (store! picked
                                                                                                   (effort-choice-at level))
                                                                                           (store! effort

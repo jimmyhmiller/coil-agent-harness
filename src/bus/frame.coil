@@ -91,10 +91,10 @@
 ;; in a hex dump.
 (defn header-encode! [(header (ptr FrameHeader)) (length i64)] (-> i64)
   (let [bytes (primitive/cast (ptr u8) (field header bytes))]
-    (set! (primitive/index bytes 0) (primitive/cast u8 (primitive/iand (primitive/ishr length 24) 255)))
-    (set! (primitive/index bytes 1) (primitive/cast u8 (primitive/iand (primitive/ishr length 16) 255)))
-    (set! (primitive/index bytes 2) (primitive/cast u8 (primitive/iand (primitive/ishr length 8) 255)))
-    (set! (primitive/index bytes 3) (primitive/cast u8 (primitive/iand length 255)))
+    (store! (primitive/index bytes 0) (primitive/cast u8 (primitive/iand (primitive/ishr length 24) 255)))
+    (store! (primitive/index bytes 1) (primitive/cast u8 (primitive/iand (primitive/ishr length 16) 255)))
+    (store! (primitive/index bytes 2) (primitive/cast u8 (primitive/iand (primitive/ishr length 8) 255)))
+    (store! (primitive/index bytes 3) (primitive/cast u8 (primitive/iand length 255)))
     0))
 
 (defn header-decode [(header (ptr FrameHeader))] (-> i64)
@@ -107,7 +107,7 @@
 ;; Write one frame. Returns FRAME_OK or a negative code.
 (defn frame-write! [(transport (dyn Transport)) (payload (slice u8))] (-> i64)
   (let [length (slice-len payload)
-        header (alloc/stack FrameHeader)]
+        header (primitive/alloc-stack FrameHeader)]
     (if (> length MAX_FRAME_BYTES)
         FRAME_TOO_LARGE
         (do
@@ -129,9 +129,9 @@
 ;; Read one frame into `out`. Returns FRAME_OK, FRAME_EOF when the peer closed
 ;; cleanly between frames, or a negative code.
 (defn frame-read [(transport (dyn Transport))
-                  (allocator (ptr Allocator))
+                  (allocator (dyn Allocator))
                   (out (ptr (slice u8)))] (-> i64)
-  (let [header (alloc/stack FrameHeader)
+  (let [header (primitive/alloc-stack FrameHeader)
         head
           (read-exactly transport
                         (primitive/cast (ptr i8) (field header bytes))
@@ -145,18 +145,18 @@
                     (store! out (slice-new [u8] (primitive/cast (ptr u8) 0) 0))
                     FRAME_OK)
                 :else
-                  (let [buffer (unwrap-ptr [u8] (alloc-slice [u8] allocator length))]
-                    (if (= (primitive/cast i64 buffer) 0)
-                        FRAME_OOM
-                        (let [body
-                                (read-exactly transport
-                                              (primitive/cast (ptr i8) buffer)
-                                              length)]
-                          (if (!= body FRAME_OK)
-                              ;; A peer that closes here has already committed to
-                              ;; a length, so this is truncation even though the
-                              ;; read itself saw a clean close.
-                              (if (= body FRAME_EOF) FRAME_TRUNCATED body)
-                              (do
-                                (store! out (slice-new [u8] buffer length))
-                                FRAME_OK))))))))))
+                  (match (alloc [u8] allocator length)
+                    (None [] FRAME_OOM)
+                    (Some [memory]
+                      (let [body
+                              (read-exactly transport
+                                            (primitive/cast (ptr i8) (slice-data memory))
+                                            length)]
+                        (if (!= body FRAME_OK)
+                            ;; A peer that closes here has already committed to
+                            ;; a length, so this is truncation even though the
+                            ;; read itself saw a clean close.
+                            (if (= body FRAME_EOF) FRAME_TRUNCATED body)
+                            (do
+                              (store! out memory)
+                              FRAME_OK))))))))))

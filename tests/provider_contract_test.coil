@@ -21,7 +21,7 @@
 (import "openai-responses" :use *)
 (import "provider-common" :use *)
 
-(defstruct UnusedTool [])
+(defstruct UnusedTool [(reserved u8)])
 
 (defstruct FakeCodexExecutionStrategy
   [(prepare-count i64)
@@ -33,7 +33,7 @@
                        (-> (slice u8))
                        "fake-codex-strategy")
   (codex-strategy-prepare! [(self (ptr FakeCodexExecutionStrategy))
-                            (allocator (ptr Allocator))]
+                            (allocator (dyn Allocator))]
                            (-> i64)
                            (do
                              (set! (.prepare-count self) (+ (.prepare-count self) 1))
@@ -41,7 +41,7 @@
   (codex-strategy-execute [(self (ptr FakeCodexExecutionStrategy))
                            (request (ptr ModelRequest))
                            (emitter (ptr EventEmitter))
-                           (allocator (ptr Allocator))]
+                           (allocator (dyn Allocator))]
                           (-> ModelResult)
                           (do
                             (set! (.execute-count self) (+ (.execute-count self) 1))
@@ -62,7 +62,7 @@
 
 (impl StreamingHttpTransport FixtureStreamingTransport
   (send-streaming-http [(self (ptr FixtureStreamingTransport))
-                        (allocator (ptr Allocator))
+                        (allocator (dyn Allocator))
                         (request (ptr HttpRequest))
                         (response (mut HttpResponse))]
                        (-> i64)
@@ -127,7 +127,7 @@
 
 (impl CodexTransport FakeCodexTransport
   (codex-transport-send [(self (ptr FakeCodexTransport))
-                         (allocator (ptr Allocator))
+                         (allocator (dyn Allocator))
                          (message (ptr Json))]
                         (-> i64)
                         (do
@@ -136,7 +136,7 @@
                                 (match (load message) (JsonObject [keys values] true) (_ false)))
                           (.send-code self)))
   (codex-transport-read [(self (ptr FakeCodexTransport))
-                         (allocator (ptr Allocator))
+                         (allocator (dyn Allocator))
                          (timeout-ms i64)
                          (result (mut CodexRead))]
                         (-> i64)
@@ -154,16 +154,16 @@
   (execute-tool [(self (ptr UnusedTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (tool-result-empty (.id call) (ToolSucceeded))))
 
-(defn test-tool [(allocator (ptr Allocator))] (-> ToolDefinition)
+(defn test-tool [(allocator (dyn Allocator))] (-> ToolDefinition)
   (let [parsed
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"additionalProperties\":false}")
-        definition (alloc/stack ToolDefinition)
-        implementation (box allocator UnusedTool (zeroed UnusedTool))]
+        definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator UnusedTool (zeroed UnusedTool))]
     (set! (.name (.spec definition)) "city_fact")
     (set! (.description (.spec definition)) "Return one city fact")
     (set! (.input-schema (.spec definition)) (.value parsed))
@@ -174,16 +174,16 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn test-request [(allocator (ptr Allocator))] (-> (ptr ModelRequest))
-  (let [messages (box allocator (ArrayList Message) (al-new [Message] allocator))
+(defn test-request [(allocator (dyn Allocator))] (-> (ptr ModelRequest))
+  (let [messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
         (mut registry-value) (tool-registry-new allocator)
-        request (box allocator ModelRequest (zeroed ModelRequest))
-        message (alloc/stack Message)]
+        request (box! allocator ModelRequest (zeroed ModelRequest))
+        message (primitive/alloc-stack Message)]
     (set! (.role message) (UserRole))
     (set! (.content message) "Use the tool twice.")
     (al-push! [Message] messages (load message))
     (tool-register! (mut registry-value) (test-tool allocator))
-    (let [registry (box allocator ToolRegistry (load registry-value))]
+    (let [registry (box! allocator ToolRegistry (load registry-value))]
       (set! (.run-id request) "test-run")
       (set! (.operation-id request) "test-operation")
       (set! (.model request) "test-model")
@@ -201,14 +201,14 @@
 (deftest shared-streaming-transport-drives-every-http-provider
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               sink (box allocator NoopEventSink (zeroed NoopEventSink))
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
-               transport (box allocator FixtureStreamingTransport (zeroed FixtureStreamingTransport))
-               openai (alloc/stack OpenAIResponsesContext)
-               deepseek-openai (alloc/stack DeepSeekOpenAIContext)
-               deepseek-anthropic (alloc/stack DeepSeekAnthropicContext)
-               claude (alloc/stack ClaudeAnthropicContext)]
+               sink (box! allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))
+               transport (box! allocator FixtureStreamingTransport (zeroed FixtureStreamingTransport))
+               openai (primitive/alloc-stack OpenAIResponsesContext)
+               deepseek-openai (primitive/alloc-stack DeepSeekOpenAIContext)
+               deepseek-anthropic (primitive/alloc-stack DeepSeekAnthropicContext)
+               claude (primitive/alloc-stack ClaudeAnthropicContext)]
            (store! openai (openai-context-default allocator))
            (store! deepseek-openai (deepseek-openai-context-default allocator))
            (store! deepseek-anthropic (deepseek-anthropic-context-default allocator))
@@ -297,11 +297,11 @@
 (deftest openai-stream-emits-deltas-and-retains-the-terminal-response
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               sink (alloc/stack DeltaEventSink)
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
-               state (alloc/stack OpenAIStreamState)
-               decoder (alloc/stack SseDecoder)]
+               sink (primitive/alloc-stack DeltaEventSink)
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))
+               state (primitive/alloc-stack OpenAIStreamState)
+               decoder (primitive/alloc-stack SseDecoder)]
            (store! (field sink deltas) 0)
            (store! (field sink valid) true)
            (store! (field state allocator) allocator)
@@ -348,8 +348,8 @@
                previous-result
                  (json-parse allocator
                              "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"reasoning_content\":\"opaque reasoning\",\"tool_calls\":[]}}]}")
-               results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
-               result (alloc/stack ToolResult)]
+               results (box! allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+               result (primitive/alloc-stack ToolResult)]
            (store! (field result call-id) "call-1")
            (store! (field result status) (ToolSucceeded))
            (store! (field result output) (JsonString "ok"))
@@ -377,11 +377,11 @@
 (deftest deepseek-openai-stream-reconstructs-reasoning-tools-and-usage
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               sink (alloc/stack DeltaEventSink)
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
-               state (alloc/stack OpenAIChatStreamState)
-               decoder (alloc/stack SseDecoder)]
+               sink (primitive/alloc-stack DeltaEventSink)
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))
+               state (primitive/alloc-stack OpenAIChatStreamState)
+               decoder (primitive/alloc-stack SseDecoder)]
            (store! (field sink deltas) 0)
            (store! (field sink valid) true)
            (openai-chat-stream-state-init! state allocator request emitter "deepseek-openai")
@@ -435,11 +435,11 @@
 (deftest deepseek-anthropic-stream-reconstructs-content-tools-and-usage
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               sink (alloc/stack DeltaEventSink)
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
-               state (alloc/stack DeepSeekAnthropicStreamState)
-               decoder (alloc/stack SseDecoder)]
+               sink (primitive/alloc-stack DeltaEventSink)
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))
+               state (primitive/alloc-stack DeepSeekAnthropicStreamState)
+               decoder (primitive/alloc-stack SseDecoder)]
            (store! (field sink deltas) 0)
            (store! (field sink valid) true)
            (store! (field state allocator) allocator)
@@ -490,7 +490,7 @@
 (deftest codex-app-server-control-contract
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               context (alloc/stack CodexAppServerContext)
+               context (primitive/alloc-stack CodexAppServerContext)
                capabilities-model (provider-capabilities-for "codex-app-server")
                initialize (codex-initialize-request allocator)
                capabilities (json-get (json-get initialize "params") "capabilities")
@@ -570,8 +570,8 @@
          (let [allocator (malloc-allocator)
                request (test-request allocator)
                messages (load (field request messages))
-               assistant (alloc/stack Message)
-               user (alloc/stack Message)]
+               assistant (primitive/alloc-stack Message)
+               user (primitive/alloc-stack Message)]
            (store! (field assistant role) (AssistantRole))
            (store! (field assistant content) "The code is in src/main.coil.")
            (al-push! [Message] messages (load assistant))
@@ -610,14 +610,14 @@
          (let [allocator (malloc-allocator)
                request (test-request allocator)
                parsed (json-parse allocator "{\"id\":1,\"result\":{}}")
-               read-result (alloc/stack CodexRead)
-               successful (box allocator FakeCodexTransport (zeroed FakeCodexTransport))
-               failed (box allocator FakeCodexTransport (zeroed FakeCodexTransport))
-               successful-connection (box allocator CodexConnection (zeroed CodexConnection))
-               failed-connection (box allocator CodexConnection (zeroed CodexConnection))
-               sink (box allocator NoopEventSink (zeroed NoopEventSink))
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
+               read-result (primitive/alloc-stack CodexRead)
+               successful (box! allocator FakeCodexTransport (zeroed FakeCodexTransport))
+               failed (box! allocator FakeCodexTransport (zeroed FakeCodexTransport))
+               successful-connection (box! allocator CodexConnection (zeroed CodexConnection))
+               failed-connection (box! allocator CodexConnection (zeroed CodexConnection))
+               sink (box! allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))]
            (store! (field read-result ok) true)
            (store! (field read-result eof) false)
            (store! (field read-result message) (load (field parsed value)))
@@ -655,15 +655,15 @@
 (deftest codex-provider-delegates-through-pluggable-execution-strategy
          (let [allocator (malloc-allocator)
                strategy
-                 (box allocator
+                 (box! allocator
                       FakeCodexExecutionStrategy
                       (zeroed FakeCodexExecutionStrategy))
-               strategy-view (box allocator (dyn CodexExecutionStrategy) strategy)
-               provider (alloc/stack CodexProvider)
+               strategy-view (box! allocator (dyn CodexExecutionStrategy) strategy)
+               provider (primitive/alloc-stack CodexProvider)
                request (test-request allocator)
-               sink (box allocator NoopEventSink (zeroed NoopEventSink))
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))]
+               sink (box! allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))]
            (store! provider (zeroed CodexProvider))
            (store! (field provider strategy) strategy-view)
            (assert-eq (codex-strategy-prepare! (load strategy-view) allocator) 0)
@@ -679,13 +679,13 @@
 
 (deftest codex-direct-wire-contract-is-explicitly-subscription-shaped
          (let [allocator (malloc-allocator)
-               context (alloc/stack CodexDirectContext)
+               context (primitive/alloc-stack CodexDirectContext)
                request (test-request allocator)
                previous
                  (json-parse allocator
                              "{\"output\":[{\"type\":\"reasoning\",\"encrypted_content\":\"opaque\"},{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"city_fact\",\"arguments\":\"{}\"}]}")
-               results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
-               result (alloc/stack ToolResult)]
+               results (box! allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+               result (primitive/alloc-stack ToolResult)]
            (store! context (codex-direct-context allocator))
            (store! (field request prompt-cache-key) "conversation-cache-key")
            (store! (field result call-id) "call-1")
@@ -733,9 +733,9 @@
                                  "{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"first\",\"arguments\":\"{}\"}]}")
                current (json-parse allocator
                                    "{\"id\":\"resp-2\",\"model\":\"gpt-test\",\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-2\",\"name\":\"second\",\"arguments\":\"{}\"}],\"usage\":{}}")
-               response (alloc/stack ModelResponse)
-               results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
-               result (alloc/stack ToolResult)]
+               response (primitive/alloc-stack ModelResponse)
+               results (box! allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+               result (primitive/alloc-stack ToolResult)]
            (store! response (openai-parse-response allocator (load (field current value))))
            (store! (field result call-id) "call-1")
            (store! (field result status) (ToolSucceeded))
@@ -761,13 +761,13 @@
 
 (deftest codex-connection-closes-and-emits-one-terminal-failure
          (let [allocator (malloc-allocator)
-               context (alloc/stack CodexAppServerContext)
+               context (primitive/alloc-stack CodexAppServerContext)
                request (test-request allocator)
-               transport (box allocator FakeCodexTransport (zeroed FakeCodexTransport))
-               connection (box allocator CodexConnection (zeroed CodexConnection))
-               counts (box allocator CodexEventCounts (zeroed CodexEventCounts))
-               sequence (box allocator i64 1)
-               emitter (box allocator EventEmitter (event-emitter-new allocator counts sequence))]
+               transport (box! allocator FakeCodexTransport (zeroed FakeCodexTransport))
+               connection (box! allocator CodexConnection (zeroed CodexConnection))
+               counts (box! allocator CodexEventCounts (zeroed CodexEventCounts))
+               sequence (box! allocator i64 1)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator counts sequence))]
            (store! context (codex-context "."))
            (store! (field transport send-code) -1)
            (store! (field connection transport) transport)
@@ -792,13 +792,13 @@
 ;; A wire with no server-side history has to carry the whole conversation. When
 ;; it carried only the last turn, a model re-decided from the same starting point
 ;; every turn: the agent read the same file over and over and never did the work.
-(defn turn-of [(allocator (ptr Allocator))
+(defn turn-of [(allocator (dyn Allocator))
                (output (slice u8))
                (call-id (slice u8))
                (text (slice u8))] (-> ContinuationTurn)
   (let [parsed (json-parse allocator output)
-        results (box allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
-        result (alloc/stack ToolResult)
+        results (box! allocator (ArrayList ToolResult) (al-new [ToolResult] allocator))
+        result (primitive/alloc-stack ToolResult)
         (mut turn) (zeroed ContinuationTurn)]
     (store! (field result call-id) call-id)
     (store! (field result status) (ToolSucceeded))
@@ -812,7 +812,7 @@
 (deftest chat-completions-resends-every-turn-not-only-the-last
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+               turns (box! allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
            (al-push! [ContinuationTurn]
                      turns
                      (turn-of allocator
@@ -841,7 +841,7 @@
 (deftest anthropic-resends-every-turn-not-only-the-last
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+               turns (box! allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
            (al-push! [ContinuationTurn]
                      turns
                      (turn-of allocator
@@ -893,7 +893,7 @@
 (deftest an-operator-message-lands-in-the-wire-where-it-was-said
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+               turns (box! allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
            (al-push! [ContinuationTurn]
                      turns
                      (turn-of allocator
@@ -925,7 +925,7 @@
 (deftest an-operator-message-survives-into-the-subscription-wire
          (let [allocator (malloc-allocator)
                request (test-request allocator)
-               turns (box allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
+               turns (box! allocator (ArrayList ContinuationTurn) (al-new [ContinuationTurn] allocator))]
            (al-push! [ContinuationTurn]
                      turns
                      (turn-of allocator

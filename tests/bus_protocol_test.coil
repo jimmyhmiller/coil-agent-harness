@@ -4,6 +4,8 @@
 ;; peer that speaks the other one.
 (module harness-bus-protocol-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
 (import "coil.match" :use *)
@@ -21,9 +23,9 @@
 ;; Round-trip through one codec and assert every field survived. Taking the
 ;; codec as a trait object is the point: the body of this function cannot tell
 ;; which format it is exercising.
-(defn round-trips? [(allocator (ptr Allocator)) (codec (dyn Codec))] (-> bool)
-  (let [original (alloc/stack Envelope)
-        slot (alloc/stack Envelope)]
+(defn round-trips? [(allocator (dyn Allocator)) (codec (dyn Codec))] (-> bool)
+  (let [original (primitive/alloc-stack Envelope)
+        slot (primitive/alloc-stack Envelope)]
     (set! original (sample-envelope))
     (try (let [encoded (try-or! (codec-encode codec allocator original) false)]
               (match (codec-decode codec allocator encoded slot)
@@ -38,21 +40,21 @@
 
 (deftest an-envelope-survives-a-messagepack-round-trip
          (let [allocator (malloc-allocator)
-               codec (alloc/stack MessagePackCodec)]
+               codec (primitive/alloc-stack MessagePackCodec)]
            (assert (round-trips? allocator codec))))
 
 (deftest an-envelope-survives-a-json-round-trip
          (let [allocator (malloc-allocator)
-               codec (alloc/stack JsonCodec)]
+               codec (primitive/alloc-stack JsonCodec)]
            (assert (round-trips? allocator codec))))
 
 ;; Two codecs producing identical bytes would mean one of them is not really
 ;; being used -- the round-trip tests above would then pass vacuously.
 (deftest the-two-codecs-produce-different-wire-bytes
          (let [allocator (malloc-allocator)
-               msgpack (alloc/stack MessagePackCodec)
-               json (alloc/stack JsonCodec)
-               envelope (alloc/stack Envelope)]
+               msgpack (primitive/alloc-stack MessagePackCodec)
+               json (primitive/alloc-stack JsonCodec)
+               envelope (primitive/alloc-stack Envelope)]
            (store! envelope (sample-envelope))
            (match (codec-encode msgpack allocator envelope)
              (Err [_] (assert false))
@@ -72,9 +74,9 @@
          (assert (not (address-matches? (Agent "a") (Topic "a")))))
 
 (deftest a-reply-carries-the-id-of-the-message-it-answers
-         (let [request (alloc/stack Envelope)]
+         (let [request (primitive/alloc-stack Envelope)]
            (store! request (sample-envelope))
-           (let [reply (alloc/stack Envelope)]
+           (let [reply (primitive/alloc-stack Envelope)]
              (store! reply
                      (envelope-reply "msg-2" request (Service) "done"))
              ;; The reply goes back to the requester, not to the topic the

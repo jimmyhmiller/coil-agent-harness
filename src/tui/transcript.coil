@@ -1,5 +1,7 @@
 (module harness-tui-transcript)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -10,7 +12,7 @@
 (defstruct TranscriptPolicy [(committed-count i64)])
 
 (defn transcript-policy-new [] (-> TranscriptPolicy)
-  (let [policy (alloc/stack TranscriptPolicy)]
+  (let [policy (primitive/alloc-stack TranscriptPolicy)]
     (set! (.committed-count policy) 0)
     (load policy)))
 

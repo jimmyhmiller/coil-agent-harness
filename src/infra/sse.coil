@@ -1,5 +1,7 @@
 (module harness-sse)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -17,16 +19,16 @@
 (defstruct SseBoundary [(found bool) (block-end i64) (consumed i64)])
 
 (defstruct SseDecoder
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (buffer (ArrayList u8))
    (sink (dyn SseEventSink))
    (max-buffer-bytes i64)
    (failed bool)])
 
-(defn sse-decoder-new [(allocator (ptr Allocator))
+(defn sse-decoder-new [(allocator (dyn Allocator))
                        (sink (dyn SseEventSink))
                        (max-buffer-bytes i64)] (-> SseDecoder)
-  (let [decoder (alloc/stack SseDecoder)]
+  (let [decoder (primitive/alloc-stack SseDecoder)]
     (set! (.allocator decoder) allocator)
     (set! (.buffer decoder) (al-new [u8] allocator))
     (set! (.sink decoder) sink)
@@ -35,7 +37,7 @@
     (load decoder)))
 
 (defn sse-boundary [(bytes (slice u8))] (-> SseBoundary)
-  (let [result (alloc/stack SseBoundary)
+  (let [result (primitive/alloc-stack SseBoundary)
         n (slice-len [u8] bytes)
         (mut i) 0
         (mut last-was-newline) false

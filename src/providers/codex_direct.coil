@@ -1,5 +1,7 @@
 (module codex-direct)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -27,23 +29,23 @@
    (credentials CodexDirectCredentials)
    (transport (dyn StreamingHttpTransport))])
 
-(defn codex-direct-login [(allocator (ptr Allocator))] (-> i64)
+(defn codex-direct-login [(allocator (dyn Allocator))] (-> i64)
   (subscription/codex-login-native allocator))
 
-(defn codex-direct-logout [(allocator (ptr Allocator))] (-> i64)
+(defn codex-direct-logout [(allocator (dyn Allocator))] (-> i64)
   (subscription/codex-logout-native allocator))
 
-(defn codex-direct-context [(allocator (ptr Allocator))] (-> CodexDirectContext)
-  (let [context (alloc/stack CodexDirectContext)]
+(defn codex-direct-context [(allocator (dyn Allocator))] (-> CodexDirectContext)
+  (let [context (primitive/alloc-stack CodexDirectContext)]
     (set! (.endpoint context) "https://chatgpt.com/backend-api/codex/responses")
     (set! (.access-token (.credentials context)) "")
     (set! (.account-id (.credentials context)) "")
     (store! (field context transport)
-            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+            (box! allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
 (defn codex-direct-load-credentials! [(self (ptr CodexDirectContext))
-                                      (allocator (ptr Allocator))] (-> bool)
+                                      (allocator (dyn Allocator))] (-> bool)
   (match (subscription/codex-load-native allocator)
     (subscription/CodexCredentialsFailed [message] false)
     (subscription/CodexCredentialsLoaded [loaded]
@@ -71,7 +73,7 @@
               payload))
 
 (defstruct CodexDirectStreamState
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (request (ptr ModelRequest))
    (emitter (ptr EventEmitter))
    (completed bool)
@@ -128,7 +130,7 @@
                                            (str-eq kind "response.failed") (do (store! (field self failed) true) false)
                                            :else true))))))))
 
-(defn codex-direct-input [(allocator (ptr Allocator))
+(defn codex-direct-input [(allocator (dyn Allocator))
                           (request (ptr ModelRequest))] (-> Json)
   (let [(mut input) (messages-wire allocator (load (field request messages)))
         continuation (field request continuation)]
@@ -162,7 +164,7 @@
 
 ;; Direct requests use store=false, so retain the complete replay chain rather
 ;; than only the immediately previous response and tool result.
-(defn codex-direct-cumulative-raw-output [(allocator (ptr Allocator))
+(defn codex-direct-cumulative-raw-output [(allocator (dyn Allocator))
                                           (request (ptr ModelRequest))
                                           (response (ptr ModelResponse))] (-> Json)
   (let [(mut combined) (json-array allocator)
@@ -200,10 +202,10 @@
       (json-object-put! (mut envelope) "output" (load combined))
       (load envelope))))
 
-(defn codex-direct-request-json [(allocator (ptr Allocator))
+(defn codex-direct-request-json [(allocator (dyn Allocator))
                                  (request (ptr ModelRequest))] (-> Json)
   (let [request-value (load request)
-        local (alloc/stack ModelRequest)]
+        local (primitive/alloc-stack ModelRequest)]
     (set! local request-value)
     ;; Prevent the generic stored-Responses continuation shape. Direct mode
     ;; reconstructs input above because this endpoint requires store=false.
@@ -226,13 +228,13 @@
 (defn codex-direct-execute [(self (ptr CodexDirectContext))
                             (request (ptr ModelRequest))
                             (emitter (ptr EventEmitter))
-                            (allocator (ptr Allocator))] (-> ModelResult)
+                            (allocator (dyn Allocator))] (-> ModelResult)
   (if (not (codex-direct-load-credentials! self allocator))
       (model-failure "codex-direct"
                      0
                      "Codex credentials are unavailable; run codex login")
       (let [headers
-              (box allocator
+              (box! allocator
                    (ArrayList (slice u8))
                    (al-new [(slice u8)] allocator))
             authorization
@@ -243,9 +245,9 @@
               (concat-or-empty allocator
                                "ChatGPT-Account-Id: "
                                (.account-id (.credentials self)))
-            state (alloc/stack CodexDirectStreamState)
-            decoder (alloc/stack SseDecoder)
-            http-request (alloc/stack HttpRequest)]
+            state (primitive/alloc-stack CodexDirectStreamState)
+            decoder (primitive/alloc-stack SseDecoder)
+            http-request (primitive/alloc-stack HttpRequest)]
         (al-push! [(slice u8)] headers "Content-Type: application/json")
         (al-push! [(slice u8)] headers "Accept: text/event-stream")
         (al-push! [(slice u8)] headers "originator: coil-agent-harness")
@@ -345,13 +347,13 @@
                        (-> (slice u8))
                        "codex-direct")
   (codex-strategy-prepare! [(self (ptr CodexDirectContext))
-                            (allocator (ptr Allocator))]
+                            (allocator (dyn Allocator))]
                            (-> i64)
                            (if (codex-direct-load-credentials! self allocator) 0 -1))
   (codex-strategy-execute [(self (ptr CodexDirectContext))
                            (request (ptr ModelRequest))
                            (emitter (ptr EventEmitter))
-                           (allocator (ptr Allocator))]
+                           (allocator (dyn Allocator))]
                           (-> ModelResult)
                           (codex-direct-execute self request emitter allocator))
   (codex-strategy-close! [(self (ptr CodexDirectContext))] (-> i64) 0))

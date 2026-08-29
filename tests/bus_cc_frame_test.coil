@@ -6,6 +6,8 @@
 ;; dropped silently by the receiver, which looks exactly like a network problem.
 (module harness-bus-cc-frame-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
 (import "coil.match" :use *)
@@ -15,7 +17,7 @@
 (import "harness-json" :use *)
 (import "harness-bus-cc-frame" :use *)
 
-(defn user-frame-json [(allocator (ptr Allocator))
+(defn user-frame-json [(allocator (dyn Allocator))
                        (from (slice u8))
                        (session-id (slice u8))] (-> Json)
   (cc-user-frame allocator "id-1" "hello" from "next" session-id))
@@ -99,7 +101,7 @@
 
 (deftest a-user-frame-parses-back
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcFrame)
+               parsed (primitive/alloc-stack CcFrame)
                line
                  (cc-frame-line allocator
                                 (cc-user-frame allocator "id-1" "hello" "uds:/tmp/x.sock" "next" ""))]
@@ -111,7 +113,7 @@
 
 (deftest a-control-frame-parses-back
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcFrame)
+               parsed (primitive/alloc-stack CcFrame)
                line
                  (cc-frame-line allocator
                                 (cc-status-frame allocator "id-3" "held" "" "uds:/tmp/x.sock" "id-1"))]
@@ -124,7 +126,7 @@
 ;; msg_id, no from. It must work, because that is what a shell one-liner sends.
 (deftest the-minimal-documented-injection-parses
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcFrame)]
+               parsed (primitive/alloc-stack CcFrame)]
            (assert (cc-frame-parse allocator
                                    "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hello\"}}"
                                    parsed))
@@ -134,7 +136,7 @@
 ;; the connection over one would make us fail against a newer Claude Code.
 (deftest an-unknown-frame-type-is-accepted-and-ignored
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcFrame)]
+               parsed (primitive/alloc-stack CcFrame)]
            (assert (cc-frame-parse allocator "{\"type\":\"future-thing\"}" parsed))
            (match (load (field parsed kind))
              (CcUnknownFrame [] (assert true))
@@ -143,7 +145,7 @@
 
 (deftest malformed-input-is-rejected-rather-than-guessed
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcFrame)]
+               parsed (primitive/alloc-stack CcFrame)]
            (assert (not (cc-frame-parse allocator "not json" parsed)))
            (assert (not (cc-frame-parse allocator "" parsed)))
            ;; No type: nothing to dispatch on.

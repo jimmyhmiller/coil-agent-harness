@@ -1,5 +1,7 @@
 (module harness-tui-frame)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.str" :use *)
@@ -33,11 +35,11 @@
    (spans (ArrayList FrameSpan))])
 
 (defstruct Frame
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (lines (ArrayList FrameLine))])
 
-(defn frame-new [(allocator (ptr Allocator))] (-> Frame)
-  (let [frame (alloc/stack Frame)]
+(defn frame-new [(allocator (dyn Allocator))] (-> Frame)
+  (let [frame (primitive/alloc-stack Frame)]
     (set! (.allocator frame) allocator)
     (set! (.lines frame) (al-new [FrameLine] allocator))
     (load frame)))
@@ -46,12 +48,12 @@
                         (text (slice u8))
                         (cells i64)
                         (role StyleRole)] (-> i64)
-  (let [line (alloc/stack FrameLine)]
+  (let [line (primitive/alloc-stack FrameLine)]
     (set! (.text line) text)
     (set! (.cells line) cells)
     (set! (.role line) role)
     (set! (.spans line) (al-new [FrameSpan] (load (field frame allocator))))
-    (let [span (alloc/stack FrameSpan)]
+    (let [span (primitive/alloc-stack FrameSpan)]
       (set! (.text span) text)
       (set! (.cells span) cells)
       (set! (.role span) role)
@@ -71,7 +73,7 @@
                 (sb-push-str! (mut text) (.text span))
                 (set! cells (+ (load cells) (.cells span)))
                 (set! at (+ (load at) 1)))))
-    (let [line (alloc/stack FrameLine)]
+    (let [line (primitive/alloc-stack FrameLine)]
       (set! (.text line) (sb-finish! (mut text)))
       (set! (.cells line) (load cells))
       (set! (.role line) (RolePrimary))
@@ -82,7 +84,7 @@
 (defn frame-span [(text (slice u8))
                   (cells i64)
                   (role StyleRole)] (-> FrameSpan)
-  (let [span (alloc/stack FrameSpan)]
+  (let [span (primitive/alloc-stack FrameSpan)]
     (set! (.text span) text)
     (set! (.cells span) cells)
     (set! (.role span) role)
@@ -91,7 +93,7 @@
 (defn frame-set-line-spans! [(frame (ptr Frame))
                              (line-index i64)
                              (spans (ref (ArrayList FrameSpan)))] (-> i64)
-  (let [line (index (load (field (field frame lines) data)) line-index)
+  (let [line (al-elem [FrameLine] (field frame lines) line-index)
         (mut text) (sb-new (load (field frame allocator)))
         (mut cells) 0
         (mut at) 0
@@ -114,7 +116,7 @@
 ;; -- and the tail that is still changing. Appending text to a flow only ever
 ;; rewrites its last rows, so a leading row that has left the window will not
 ;; change again and is safe to make permanent.
-(defn frame-range [(allocator (ptr Allocator))
+(defn frame-range [(allocator (dyn Allocator))
                    (source (ref Frame))
                    (start i64)
                    (end i64)] (-> Frame)
@@ -130,16 +132,16 @@
                                   (.text line)
                                   (.cells line)
                                   (.role line))
-                (let [slot
-                        (index (load (field (field result lines) data))
-                               (- (al-len [FrameLine] (.lines result)) 1))]
+                (let [slot (al-elem [FrameLine]
+                                    (mut (.lines result))
+                                    (- (al-len [FrameLine] (.lines result)) 1))]
                   (set! (.spans slot) (.spans line)))
                 (set! at (+ (load at) 1)))))
     (load result)))
 
 ;; Bound a mutable footer to rows the process can continue to address. Committed
 ;; transcript frames are never passed through this projection.
-(defn frame-tail-bounded [(allocator (ptr Allocator))
+(defn frame-tail-bounded [(allocator (dyn Allocator))
                           (source (ref Frame))
                           (maximum i64)] (-> Frame)
   (let [count (al-len [FrameLine] (.lines source))]
@@ -162,11 +164,9 @@
                                           (.cells line)
                                           (.role line))
                         ;; Preserve the source semantic spans in the bounded view.
-                        (let [slot
-                                (index (load (field (field result lines) data))
-                                       (- (al-len [FrameLine]
-                                                  (.lines result))
-                                          1))]
+                        (let [slot (al-elem [FrameLine]
+                                           (mut (.lines result))
+                                           (- (al-len [FrameLine] (.lines result)) 1))]
                           (set! (.spans slot) (.spans line)))
                         0)
                       (set! at (+ (load at) 1)))))

@@ -1,5 +1,7 @@
 (module harness-factory-coordinator-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :use * :as alloc)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -18,8 +20,8 @@
 
 (deftest factory-request-preserves-opaque-reasoning
          (let [allocator (malloc-allocator)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               request (alloc/stack ModelRequest)]
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               request (primitive/alloc-stack ModelRequest)]
            (store! request
                    (factory-request allocator
                                     registry
@@ -49,12 +51,12 @@
 (deftest workflow-decisions-can-complete-skip-and-jump-backward
          (let [allocator (malloc-allocator)
                state
-                 (box allocator
+                 (box! allocator
                       FactoryWorkflowState
                       (factory-workflow-state-new allocator "factories/architecture-3"))
-               stage (box allocator i64 0)
-               finished (box allocator bool false)
-               result (box allocator i64 0)]
+               stage (box! allocator i64 0)
+               finished (box! allocator bool false)
+               result (box! allocator i64 0)]
            ;; Default traversal advances one step.
            (factory-apply-workflow-decision! allocator
                                              "factories/architecture-3"
@@ -95,9 +97,9 @@
 
 (deftest factory-commands-run-and-stop-on-first-failure
          (let [allocator (malloc-allocator)
-               sink (box allocator NoopEventSink (zeroed NoopEventSink))
-               sequence (box allocator i64 0)
-               emitter (box allocator EventEmitter (event-emitter-new allocator sink sequence))
+               sink (box! allocator NoopEventSink (zeroed NoopEventSink))
+               sequence (box! allocator i64 0)
+               emitter (box! allocator EventEmitter (event-emitter-new allocator sink sequence))
                (mut successful) (al-new [(slice u8)] allocator)
                (mut failing) (al-new [(slice u8)] allocator)]
            (al-push! [(slice u8)] (mut successful) "true")

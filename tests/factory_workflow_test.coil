@@ -1,5 +1,7 @@
 (module harness-factory-workflow-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -13,11 +15,11 @@
 (deftest workflow-tools-expose-live-topology-and-history
          (let [allocator (malloc-allocator)
                state
-                 (box allocator
+                 (box! allocator
                       FactoryWorkflowState
                       (factory-workflow-state-new allocator "factories/architecture-3"))
-               tool (alloc/stack FactoryWorkflowTopologyTool)
-               call (alloc/stack ToolCall)
+               tool (primitive/alloc-stack FactoryWorkflowTopologyTool)
+               call (primitive/alloc-stack ToolCall)
                (mut arguments) (json-object allocator)]
            (factory-workflow-prepare-stage! state "02-implement.md" 1)
            (factory-workflow-record-completed! state)
@@ -44,11 +46,11 @@
 (deftest workflow-transition-selects-named-worker-and-rejects-unknown-worker
          (let [allocator (malloc-allocator)
                state
-                 (box allocator
+                 (box! allocator
                       FactoryWorkflowState
                       (factory-workflow-state-new allocator "factories/architecture-3"))
-               tool (alloc/stack FactoryWorkflowTransitionTool)
-               call (alloc/stack ToolCall)
+               tool (primitive/alloc-stack FactoryWorkflowTransitionTool)
+               call (primitive/alloc-stack ToolCall)
                (mut arguments) (json-object allocator)]
            (store! (field tool state) state)
            (store! (field call id) "transition-1")
@@ -68,11 +70,11 @@
 (deftest workflow-transition-can-complete-and-resets-for-each-stage
          (let [allocator (malloc-allocator)
                state
-                 (box allocator
+                 (box! allocator
                       FactoryWorkflowState
                       (factory-workflow-state-new allocator "factories/architecture-3"))
-               tool (alloc/stack FactoryWorkflowTransitionTool)
-               call (alloc/stack ToolCall)
+               tool (primitive/alloc-stack FactoryWorkflowTransitionTool)
+               call (primitive/alloc-stack ToolCall)
                (mut arguments) (json-object allocator)]
            (store! (field tool state) state)
            (store! (field call id) "transition-2")
@@ -89,7 +91,7 @@
 (deftest workflow-tools-are-always-registerable
          (let [allocator (malloc-allocator)
                state
-                 (box allocator
+                 (box! allocator
                       FactoryWorkflowState
                       (factory-workflow-state-new allocator "factories/architecture-3"))
                (mut registry) (tool-registry-new allocator)]

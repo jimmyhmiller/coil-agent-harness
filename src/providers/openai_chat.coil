@@ -19,6 +19,8 @@
 ;; per-request context would spawn and tear down an ssh connection every turn.
 (module openai-chat)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -46,16 +48,16 @@
 ;; Build a context for one configured provider. The tunnel is created but not
 ;; opened: nothing connects until a request needs it, so declaring a provider that
 ;; is currently unreachable does not prevent the harness from starting.
-(defn openai-chat-context [(allocator (ptr Allocator))
+(defn openai-chat-context [(allocator (dyn Allocator))
                            (config ConfiguredProvider)] (-> OpenAIChatContext)
-  (let [context (alloc/stack OpenAIChatContext)]
+  (let [context (primitive/alloc-stack OpenAIChatContext)]
     (set! (.config context) config)
     (set! (.tunnel context)
           (match (.transport config)
             (SshTransport [spec] (ssh-tunnel-new spec))
             (DirectTransport [url] (ssh-tunnel-new (ssh-tunnel-spec "" "" 0)))))
     (store! (field context transport)
-            (box allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
+            (box! allocator CurlStreamingHttpTransport (zeroed CurlStreamingHttpTransport)))
     (load context)))
 
 (defn openai-chat-name [(context (ptr OpenAIChatContext))] (-> (slice u8))
@@ -67,7 +69,7 @@
 
 ;; Resolve the URL to POST to, establishing the tunnel first when there is one.
 (defn openai-chat-endpoint [(context (ptr OpenAIChatContext))
-                            (allocator (ptr Allocator))] (-> ChatEndpoint)
+                            (allocator (dyn Allocator))] (-> ChatEndpoint)
   (let [config (field context config)
         path (load (field config path))]
     (match (load (field config transport))
@@ -101,7 +103,7 @@
         (load (field (field context config) default-effort))
         requested)))
 
-(defn chat-attach-reasoning! [(allocator (ptr Allocator))
+(defn chat-attach-reasoning! [(allocator (dyn Allocator))
                               (body (mut Json))
                               (context (ptr OpenAIChatContext))
                               (request (ptr ModelRequest))] (-> i64)
@@ -135,7 +137,7 @@
 (defn openai-chat-timeout-ms [(context (ptr OpenAIChatContext))] (-> i64)
   (load (field (field context config) request-timeout-ms)))
 
-(defn openai-chat-request-json [(allocator (ptr Allocator))
+(defn openai-chat-request-json [(allocator (dyn Allocator))
                                 (context (ptr OpenAIChatContext))
                                 (request (ptr ModelRequest))] (-> Json)
   (let [(mut body) (json-object allocator)]
@@ -163,7 +165,7 @@
 ;; case for a server on a machine the operator controls. One that named a variable
 ;; must have it: a declared credential that is not set is a configuration error, and
 ;; sending the request unauthenticated instead would fail less clearly.
-(defn openai-chat-credential [(allocator (ptr Allocator))
+(defn openai-chat-credential [(allocator (dyn Allocator))
                               (context (ptr OpenAIChatContext))] (-> ChatCredential)
   (let [variable (load (field (field context config) api-key-env))]
     (if (= (slice-len [u8] variable) 0)
@@ -189,7 +191,7 @@
 ;; have been given, because "which machine answered this" is not reconstructable
 ;; afterwards otherwise. Nothing secret appears here -- a key is read from the
 ;; environment and never travels through configuration or events.
-(defn openai-chat-started-payload [(allocator (ptr Allocator))
+(defn openai-chat-started-payload [(allocator (dyn Allocator))
                                    (context (ptr OpenAIChatContext))
                                    (endpoint (slice u8))] (-> Json)
   (let [(mut payload) (json-object allocator)
@@ -230,7 +232,7 @@
 
 ;; A transport that never completed. Naming the budget makes a timeout obvious
 ;; rather than leaving it to look like the server rejected the request.
-(defn openai-chat-transport-message [(allocator (ptr Allocator))
+(defn openai-chat-transport-message [(allocator (dyn Allocator))
                                      (context (ptr OpenAIChatContext))
                                      (http (ref HttpResponse))] (-> (slice u8))
   (let [(mut text) (sb-new allocator)
@@ -250,7 +252,7 @@
     (sb-str (load text))))
 
 ;; A real HTTP error, carrying the code and whatever the server said about it.
-(defn openai-chat-status-message [(allocator (ptr Allocator))
+(defn openai-chat-status-message [(allocator (dyn Allocator))
                                   (status i64)
                                   (body (slice u8))] (-> (slice u8))
   (let [(mut text) (sb-new allocator)]
@@ -265,7 +267,7 @@
 (defn openai-chat-execute-stream [(context (ptr OpenAIChatContext))
                                   (request (ptr ModelRequest))
                                   (emitter (ptr EventEmitter))
-                                  (allocator (ptr Allocator))] (-> ModelResult)
+                                  (allocator (dyn Allocator))] (-> ModelResult)
   (let [credential (openai-chat-credential allocator context)]
     (match credential
       (ChatCredentialMissing [problem]
@@ -284,12 +286,12 @@
                                    (openai-chat-fail context emitter request 0 message))
           (ChatEndpointReady [endpoint]
             (let [headers
-                    (box allocator
+                    (box! allocator
                          (ArrayList (slice u8))
                          (al-new [(slice u8)] allocator))
-                  state (alloc/stack OpenAIChatStreamState)
-                  decoder (alloc/stack SseDecoder)
-                  http-request (alloc/stack HttpRequest)]
+                  state (primitive/alloc-stack OpenAIChatStreamState)
+                  decoder (primitive/alloc-stack SseDecoder)
+                  http-request (primitive/alloc-stack HttpRequest)]
               (al-push! [(slice u8)] headers "Content-Type: application/json")
               (al-push! [(slice u8)] headers "Accept: text/event-stream")
               (match credential
@@ -370,6 +372,6 @@
   (execute-model [(self (ptr OpenAIChatContext))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (openai-chat-execute-stream self request emitter allocator)))

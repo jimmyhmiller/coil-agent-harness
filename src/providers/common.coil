@@ -1,5 +1,7 @@
 (module provider-common)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -25,7 +27,7 @@
    (fallback-env (ptr i8))])
 
 ;; Return an allocator-owned credential value, trying the primary name first.
-(defn api-key [(allocator (ptr Allocator)) (credential ApiCredential)] (-> (slice u8))
+(defn api-key [(allocator (dyn Allocator)) (credential ApiCredential)] (-> (slice u8))
   (match (os/env-get allocator (cstr->str (load (field credential primary-env))))
     (Ok [primary]
         (match primary
@@ -45,12 +47,12 @@
 (defn json-put-bool! [(object (mut Json)) (key (slice u8)) (value bool)] (-> bool)
   (json-object-put! (mut object) key (JsonBool value)))
 
-(defn concat-or-empty [(allocator (ptr Allocator)) (left (slice u8)) (right (slice u8))] (-> (slice u8))
+(defn concat-or-empty [(allocator (dyn Allocator)) (left (slice u8)) (right (slice u8))] (-> (slice u8))
   (match (str-concat allocator left right)
     (Some [value] value)
     (None [] "")))
 
-(defn tool-spec-wire [(allocator (ptr Allocator)) (spec ToolSpec) (layout i64)] (-> Json)
+(defn tool-spec-wire [(allocator (dyn Allocator)) (spec ToolSpec) (layout i64)] (-> Json)
   (let [(mut function) (json-object allocator)]
     (json-put-string! (mut function) "name" (.name spec))
     (json-put-string! (mut function) "description" (.description spec))
@@ -73,7 +75,7 @@
             0)
           (load function)))))
 
-(defn tool-registry-wire [(allocator (ptr Allocator)) (registry (ptr ToolRegistry)) (layout i64)] (-> Json)
+(defn tool-registry-wire [(allocator (dyn Allocator)) (registry (ptr ToolRegistry)) (layout i64)] (-> Json)
   (let [(mut tools) (json-array allocator)
         definitions (field registry definitions)
         (mut i) 0
@@ -88,7 +90,7 @@
                 (set! i (+ (load i) 1)))))
     (load tools)))
 
-(defn messages-wire [(allocator (ptr Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
+(defn messages-wire [(allocator (dyn Allocator)) (messages (ptr (ArrayList Message)))] (-> Json)
   (let [(mut result) (json-array allocator)
         (mut i) 0
         n (al-len [Message] (load messages))]
@@ -122,13 +124,13 @@
               (let [turn (al-elem [ContinuationTurn] turns (- n 1))]
                 (load (field turn user-text))))))))
 
-(defn user-input-item [(allocator (ptr Allocator)) (text (slice u8))] (-> Json)
+(defn user-input-item [(allocator (dyn Allocator)) (text (slice u8))] (-> Json)
   (let [(mut object) (json-object allocator)]
     (json-put-string! (mut object) "role" "user")
     (json-put-string! (mut object) "content" text)
     (load object)))
 
-(defn push-interjection! [(allocator (ptr Allocator))
+(defn push-interjection! [(allocator (dyn Allocator))
                           (input (mut Json))
                           (continuation (ptr ModelContinuation))] (-> i64)
   (let [text (continuation-interjection continuation)]
@@ -137,7 +139,7 @@
       0)
     0))
 
-(defn tool-choice-responses [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
+(defn tool-choice-responses [(allocator (dyn Allocator)) (choice ModelToolChoice)] (-> Json)
   (match choice
     (ToolsAuto [] (JsonString "auto"))
     (ToolsNone [] (JsonString "none"))
@@ -148,7 +150,7 @@
                   (json-put-string! (mut value) "name" name)
                   (load value)))))
 
-(defn tool-choice-chat [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
+(defn tool-choice-chat [(allocator (dyn Allocator)) (choice ModelToolChoice)] (-> Json)
   (match choice
     (ToolsAuto [] (JsonString "auto"))
     (ToolsNone [] (JsonString "none"))
@@ -161,7 +163,7 @@
                   (json-object-put! (mut value) "function" (load function))
                   (load value)))))
 
-(defn tool-choice-anthropic [(allocator (ptr Allocator)) (choice ModelToolChoice)] (-> Json)
+(defn tool-choice-anthropic [(allocator (dyn Allocator)) (choice ModelToolChoice)] (-> Json)
   (let [(mut value) (json-object allocator)]
     (match choice
       (ToolsAuto [] (json-put-string! (mut value) "type" "auto"))
@@ -177,8 +179,8 @@
 (defn usage-empty [] (-> ModelUsage)
   (zeroed ModelUsage))
 
-(defn response-empty [(allocator (ptr Allocator))] (-> ModelResponse)
-  (let [response (alloc/stack ModelResponse)]
+(defn response-empty [(allocator (dyn Allocator))] (-> ModelResponse)
+  (let [response (primitive/alloc-stack ModelResponse)]
     (set! (.provider response) "")
     (set! (.model response) "")
     (set! (.response-id response) "")
@@ -189,7 +191,7 @@
     (set! (.raw-output response) (JsonNull))
     (load response)))
 
-(defn model-completion-payload [(allocator (ptr Allocator))
+(defn model-completion-payload [(allocator (dyn Allocator))
                                 (request (ptr ModelRequest))
                                 (response (ptr ModelResponse))] (-> Json)
   (let [(mut usage) (json-object allocator)
@@ -222,7 +224,7 @@
 (defn model-failure [(provider (slice u8))
                      (status i64)
                      (message (slice u8))] (-> ModelResult)
-  (let [failure (alloc/stack ModelFailure)]
+  (let [failure (primitive/alloc-stack ModelFailure)]
     (store! (field failure kind)
             (cond (= status 0) (TransportFailure)
                   (or (= status 401) (= status 403)) (AuthenticationFailure)
@@ -242,11 +244,11 @@
     (Some [message] message)
     (None [] fallback)))
 
-(defn parsed-tool-call [(allocator (ptr Allocator))
+(defn parsed-tool-call [(allocator (dyn Allocator))
                         (id (slice u8))
                         (name (slice u8))
                         (raw-arguments (slice u8))] (-> ToolCall)
-  (let [call (alloc/stack ToolCall)
+  (let [call (primitive/alloc-stack ToolCall)
         parsed (json-parse allocator raw-arguments)]
     (set! (.id call) id)
     (set! (.name call) name)
@@ -259,7 +261,7 @@
 
 ;; `int->str` is a comptime primitive, so a runtime status code is formatted by
 ;; hand. Lives here because every provider needs it to describe a failure.
-(defn model-decimal [(allocator (ptr Allocator)) (value i64)] (-> (slice u8))
+(defn model-decimal [(allocator (dyn Allocator)) (value i64)] (-> (slice u8))
   (if (<= value 0)
       "0"
       (let [(mut buffer) (sb-new allocator)

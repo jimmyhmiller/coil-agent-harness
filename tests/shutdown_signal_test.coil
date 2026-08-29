@@ -1,5 +1,7 @@
 (module harness-shutdown-signal-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.thread" :use *)
@@ -10,7 +12,7 @@
 (extern raise :cc c [i32] (-> i32))
 
 (defstruct ListenerWaitJob
-  [(allocator (ptr Allocator))
+  [(allocator (dyn Allocator))
    (listener (ptr HttpListener))
    (shutdown (ptr ShutdownSignal))
    (result (ptr i64))])
@@ -31,11 +33,11 @@
 
 (deftest wakes-a-bounded-listener-loop-for-graceful-shutdown
          (let [allocator (malloc-allocator)
-               listener (alloc/stack HttpListener)
-               shutdown (alloc/stack ShutdownSignal)
-               result (alloc/stack i64)
-               job (alloc/stack ListenerWaitJob)
-               worker (alloc/stack Thread)]
+               listener (primitive/alloc-stack HttpListener)
+               shutdown (primitive/alloc-stack ShutdownSignal)
+               result (primitive/alloc-stack i64)
+               job (primitive/alloc-stack ListenerWaitJob)
+               worker (primitive/alloc-stack Thread)]
            (match (http-listener-open allocator 0)
              (ListenerOpenFailed [message] (assert false))
              (ListenerOpened [opened] (store! listener opened)))
@@ -59,7 +61,7 @@
            (http-listener-close! listener)))
 
 (deftest installed-sigterm-wakes-the-shutdown-pipe
-         (let [shutdown (alloc/stack ShutdownSignal)]
+         (let [shutdown (primitive/alloc-stack ShutdownSignal)]
            (store! shutdown (shutdown-signal-new))
            (assert (shutdown-signal-valid? shutdown))
            (assert-eq (shutdown-signal-install! shutdown) 0)

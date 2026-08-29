@@ -1,5 +1,7 @@
 (module harness-event-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
 (import "coil.match" :use *)
@@ -10,7 +12,7 @@
 
 (deftest serializes-the-complete-versioned-event-envelope
          (let [allocator (malloc-allocator)
-               event (alloc/stack Event)]
+               event (primitive/alloc-stack Event)]
            (store! (field event version) 1)
            (store! (field event sequence) 42)
            (store! (field event timestamp-ms) 1000)

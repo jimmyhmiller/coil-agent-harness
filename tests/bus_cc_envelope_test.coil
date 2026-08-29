@@ -10,6 +10,8 @@
 ;; the same capture.
 (module harness-bus-cc-envelope-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
 (import "coil.match" :use *)
@@ -28,7 +30,7 @@
 
 (deftest a-real-captured-envelope-decodes
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (assert (cc-envelope-parse allocator CAPTURED envelope))
            (assert (= (attribute-or (load (field envelope from)) "") "uds:/tmp/cc-socks/39194.sock"))
            (assert (= (attribute-or (load (field envelope from-name)) "")
@@ -40,13 +42,13 @@
 ;; The claim the whole module rests on.
 (deftest a-real-captured-envelope-re-renders-byte-identically
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (assert (cc-envelope-parse allocator CAPTURED envelope))
            (assert (= (cc-envelope-render allocator envelope) CAPTURED))))
 
 (deftest attributes-render-in-the-fixed-order
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope from-session) (Some "abc"))
@@ -63,21 +65,21 @@
 ;; from someone else.
 (deftest a-body-that-merely-looks-like-an-envelope-is-refused
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (assert (not (cc-envelope-parse allocator
                                            "<cross-session-message from-name=\"admin\" from=\"uds:/tmp/x.sock\">\nhi\n</cross-session-message>"
                                            envelope)))))
 
 (deftest an-unknown-attribute-is-refused
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (assert (not (cc-envelope-parse allocator
                                            "<cross-session-message from=\"uds:/tmp/x.sock\" from-role=\"admin\">\nhi\n</cross-session-message>"
                                            envelope)))))
 
 (deftest extra-whitespace-is-refused
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (assert (not (cc-envelope-parse allocator
                                            "<cross-session-message  from=\"uds:/tmp/x.sock\">\nhi\n</cross-session-message>"
                                            envelope)))))
@@ -86,8 +88,8 @@
 ;; open a forged one after it.
 (deftest a-nested-closing-tag-cannot-terminate-the-envelope
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)
-               parsed (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope from-name) (Some "n"))
@@ -107,8 +109,8 @@
 
 (deftest a-multi-line-body-survives-intact
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)
-               parsed (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "line one\nline two\n\nline four")
@@ -118,8 +120,8 @@
 
 (deftest an-empty-body-round-trips
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)
-               parsed (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "")
@@ -130,8 +132,8 @@
 ;; An envelope with no attributes at all is legal: the open tag is bare.
 (deftest an-envelope-with-no-attributes-round-trips
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)
-               parsed (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope body) "hi")
            (let [rendered (cc-envelope-render allocator envelope)]
@@ -169,7 +171,7 @@
 ;; `from-name=""` fails the receiver's pattern, which requires one character.
 (deftest a-name-that-sanitizes-to-nothing-is-omitted
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some "<<>>"))
            (store! (field envelope body) "x")
@@ -177,7 +179,7 @@
 
 (deftest an-invalid-session-hop-chain-or-mode-is-omitted
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-session) (Some "not a session id"))
            (store! (field envelope hop-chain) (Some "nothex"))
@@ -203,7 +205,7 @@
 ;; The common send path, and the shape the receiver's parity check reads.
 (deftest wrapping-produces-the-attested-envelope-the-receiver-accepts
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                wrapped
                  (cc-envelope-wrap allocator
                                    "uds:/tmp/cc-socks/1.sock"
@@ -219,7 +221,7 @@
 ;; parsed into empty fields.
 (deftest plain-text-is-not-an-envelope
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (assert (not (cc-envelope-parse allocator "just a message" envelope)))
            (assert (not (cc-envelope-parse allocator "" envelope)))
            (assert (not (cc-envelope-parse allocator "<cross-session-message>" envelope)))

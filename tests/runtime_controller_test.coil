@@ -1,5 +1,7 @@
 (module harness-runtime-controller-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
@@ -32,7 +34,7 @@
                      (RuntimeDependenciesReady [] true)
                      (_ false)))))
 
-(defstruct ControllerFakeProvider [])
+(defstruct ControllerFakeProvider [(reserved u8)])
 
 (impl ModelProvider ControllerFakeProvider
   (provider-name [(self (ptr ControllerFakeProvider))] (-> (slice u8)) "fake")
@@ -42,7 +44,7 @@
   (execute-model [(self (ptr ControllerFakeProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (let [(mut response) (response-empty allocator)]
                    (set! (.provider response) "fake")
@@ -56,12 +58,12 @@
 
 (impl RuntimeProviderFactory ControllerFakeProviderFactory
   (prepare-runtime-provider [(self (ptr ControllerFakeProviderFactory))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> i64)
                             0)
   (resolve-runtime-provider [(self (ptr ControllerFakeProviderFactory))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))
                             (if (str-eq provider-name "fake")
@@ -84,7 +86,7 @@
   (execute-model [(self (ptr QueuedFakeProvider))
                   (request (ptr ModelRequest))
                   (emitter (ptr EventEmitter))
-                  (allocator (ptr Allocator))]
+                  (allocator (dyn Allocator))]
                  (-> ModelResult)
                  (let [state (load (field self state))
                        concurrent (+ (atomic-add (load (field state active)) 1) 1)]
@@ -106,19 +108,19 @@
 
 (impl RuntimeProviderFactory QueuedProviderFactory
   (prepare-runtime-provider [(self (ptr QueuedProviderFactory))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> i64)
                             0)
   (resolve-runtime-provider [(self (ptr QueuedProviderFactory))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))
                             (if (str-eq provider-name "queued-fake")
                                 (Some (.provider self))
                                 (None [(dyn ModelProvider)]))))
 
-(defn controller-command [(allocator (ptr Allocator))] (-> Json)
+(defn controller-command [(allocator (dyn Allocator))] (-> Json)
   (let [(mut command) (json-object allocator)]
     (json-object-put! (mut command) "version" (json-integer allocator 1))
     (json-put-string! (mut command) "command_id" "controller-command")
@@ -133,15 +135,15 @@
 (deftest builds-and-retains-a-real-background-runtime-run
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-runtime-controller.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               provider (box! allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
                provider-factory
-                 (box allocator
+                 (box! allocator
                       ControllerFakeProviderFactory
-                      (let [factory (alloc/stack ControllerFakeProviderFactory)]
+                      (let [factory (primitive/alloc-stack ControllerFakeProviderFactory)]
                         (store! (field factory provider) provider)
                         (load factory)))]
            (fs/write-file allocator path "")
@@ -150,7 +152,7 @@
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
            (let [controller
-                   (box allocator
+                   (box! allocator
                         RuntimeRunController
                         (runtime-controller-new allocator
                                                 registry
@@ -227,15 +229,15 @@
 (deftest completed-child-injects-a-contextual-parent-notification-run
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-runtime-notification.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               provider (box! allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
                factory
-                 (box allocator
+                 (box! allocator
                       ControllerFakeProviderFactory
-                      (let [value (alloc/stack ControllerFakeProviderFactory)]
+                      (let [value (primitive/alloc-stack ControllerFakeProviderFactory)]
                         (store! (field value provider) provider)
                         (load value)))]
            (fs/write-file allocator path "")
@@ -244,7 +246,7 @@
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
            (let [controller
-                   (box allocator
+                   (box! allocator
                         RuntimeRunController
                         (runtime-controller-new allocator registry factory emitter journal path))
                  (mut parent) (controller-command allocator)
@@ -311,33 +313,33 @@
          (let [allocator (malloc-allocator)
                domains-before (allocation-domain-live-count)
                path "/tmp/coil-agent-harness-runtime-queue.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               state (alloc/stack QueuedProviderState)]
-           (store! (field state calls) (box allocator i64 0))
-           (store! (field state active) (box allocator i64 0))
-           (store! (field state max-active) (box allocator i64 0))
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               state (primitive/alloc-stack QueuedProviderState)]
+           (store! (field state calls) (box! allocator i64 0))
+           (store! (field state active) (box! allocator i64 0))
+           (store! (field state max-active) (box! allocator i64 0))
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
            (store! emitter (event-emitter-new allocator journal sequence))
            (let [provider
-                   (box allocator
+                   (box! allocator
                         QueuedFakeProvider
-                        (let [value (alloc/stack QueuedFakeProvider)]
+                        (let [value (primitive/alloc-stack QueuedFakeProvider)]
                           (store! (field value state) state)
                           (load value)))
                  factory
-                   (box allocator
+                   (box! allocator
                         QueuedProviderFactory
-                        (let [value (alloc/stack QueuedProviderFactory)]
+                        (let [value (primitive/alloc-stack QueuedProviderFactory)]
                           (store! (field value provider) provider)
                           (load value)))
                  controller
-                   (box allocator
+                   (box! allocator
                         RuntimeRunController
                         (runtime-controller-new allocator
                                                 registry
@@ -482,24 +484,24 @@
            (json-object-put! (mut command) "timeout_ms" (json-integer allocator 3600000))
            (assert (> (runtime-command-deadline (load command)) 0))))
 
-(defstruct ToolPlaneEchoTool [])
+(defstruct ToolPlaneEchoTool [(reserved u8)])
 
 (impl ToolImplementation ToolPlaneEchoTool
   (execute-tool [(self (ptr ToolPlaneEchoTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
                   (set! (.output result) (.arguments call))
                   (load result))))
 
-(defn tool-plane-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
+(defn tool-plane-definition [(allocator (dyn Allocator))] (-> ToolDefinition)
   (let [parsed
           (json-parse allocator
                       "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false}")
-        definition (alloc/stack ToolDefinition)
-        implementation (box allocator ToolPlaneEchoTool (zeroed ToolPlaneEchoTool))]
+        definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator ToolPlaneEchoTool (zeroed ToolPlaneEchoTool))]
     (set! (.name (.spec definition)) "plane_echo")
     (set! (.description (.spec definition)) "Return the supplied text.")
     (set! (.input-schema (.spec definition)) (.value parsed))
@@ -510,7 +512,7 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn tool-plane-command [(allocator (ptr Allocator))
+(defn tool-plane-command [(allocator (dyn Allocator))
                           (name (slice u8))
                           (arguments Json)] (-> Json)
   (let [(mut command) (json-object allocator)]
@@ -530,15 +532,15 @@
 (deftest tool-plane-describes-authorizes-and-invokes-registered-tools
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-tool-plane.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               provider (box allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               provider (box! allocator ControllerFakeProvider (zeroed ControllerFakeProvider))
                factory
-                 (box allocator
+                 (box! allocator
                       ControllerFakeProviderFactory
-                      (let [value (alloc/stack ControllerFakeProviderFactory)]
+                      (let [value (primitive/alloc-stack ControllerFakeProviderFactory)]
                         (store! (field value provider) provider)
                         (load value)))]
            (fs/write-file allocator path "")
@@ -548,7 +550,7 @@
            (store! emitter (event-emitter-new allocator journal sequence))
            (assert (tool-register! registry (tool-plane-definition allocator)))
            (let [controller
-                   (box allocator
+                   (box! allocator
                         RuntimeRunController
                         (runtime-controller-new allocator registry factory emitter journal path))
                  (mut arguments) (json-object allocator)]

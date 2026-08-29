@@ -1,5 +1,7 @@
 (module harness-tui-view)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
@@ -63,7 +65,7 @@
                  (first-prefix (slice u8))
                  (continuation-prefix (slice u8))
                  (text (slice u8))] (-> ViewNode)
-  (let [flow (alloc/stack ViewFlow)]
+  (let [flow (primitive/alloc-stack ViewFlow)]
     (set! (.role flow) role)
     (set! (.first-prefix flow) first-prefix)
     (set! (.continuation-prefix flow) continuation-prefix)
@@ -73,7 +75,7 @@
 (defn view-menu-entry [(label (slice u8))
                        (detail (slice u8))
                        (selected bool)] (-> ViewMenuEntry)
-  (let [entry (alloc/stack ViewMenuEntry)]
+  (let [entry (primitive/alloc-stack ViewMenuEntry)]
     (set! (.label entry) label)
     (set! (.detail entry) detail)
     (set! (.selected entry) selected)
@@ -85,7 +87,7 @@
                             (row-budget i64)
                             (menu (ptr (ArrayList ViewMenuEntry)))
                             (menu-overflow i64)] (-> ViewNode)
-  (let [input (alloc/stack ViewInput)]
+  (let [input (primitive/alloc-stack ViewInput)]
     (set! (.prompt input) prompt)
     (set! (.text input) text)
     (set! (.cursor-offset input) cursor-offset)
@@ -108,7 +110,7 @@
 (defn view-code [(language (slice u8))
                  (code (slice u8))
                  (prefix (slice u8))] (-> ViewNode)
-  (let [value (alloc/stack ViewCode)]
+  (let [value (primitive/alloc-stack ViewCode)]
     (set! (.language value) language)
     (set! (.code value) code)
     (set! (.prefix value) prefix)
@@ -122,7 +124,7 @@
                            (body-role StyleRole)
                            (suffix (slice u8))
                            (suffix-role StyleRole)] (-> ViewNode)
-  (let [flow (alloc/stack ViewDecoratedFlow)]
+  (let [flow (primitive/alloc-stack ViewDecoratedFlow)]
     (set! (.line-role flow) line-role)
     (set! (.first-prefix flow) first-prefix)
     (set! (.prefix-role flow) prefix-role)
@@ -136,15 +138,15 @@
 (defn view-spacer [(rows i64)] (-> ViewNode)
   (ViewSpacerNode (if (< rows 0) 0 rows)))
 
-(defn view-tail [(allocator (ptr Allocator))
+(defn view-tail [(allocator (dyn Allocator))
                  (rows i64)
                  (child ViewNode)] (-> ViewNode)
   (ViewTailNode (if (< rows 0) 0 rows)
-                (box allocator ViewNode child)))
+                (box! allocator ViewNode child)))
 
-(defn view-stack [(allocator (ptr Allocator)) (gap i64)] (-> ViewNode)
+(defn view-stack [(allocator (dyn Allocator)) (gap i64)] (-> ViewNode)
   (ViewStackNode (if (< gap 0) 0 gap)
-                 (box allocator
+                 (box! allocator
                       (ArrayList ViewNode)
                       (al-new [ViewNode] allocator))))
 
@@ -155,6 +157,6 @@
          (_ 0)))
 
 (defn terminal-view [(root ViewNode)] (-> TerminalView)
-  (let [view (alloc/stack TerminalView)]
+  (let [view (primitive/alloc-stack TerminalView)]
     (set! (.root view) root)
     (load view)))

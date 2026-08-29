@@ -1,5 +1,7 @@
 (module harness-tui-render-input)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "harness-allocation-domain" :use *)
@@ -13,23 +15,26 @@
   [(previous-height i64)
    (previous-cursor-row i64)
    (previous-menu-rows i64)
-   (owner (ptr Allocator))
+   (owner (dyn Allocator))
+   (retaining bool)
    (retained Frame)
    (retained-domain (ptr AllocationDomain))
    (has-retained bool)])
 
 (defn input-renderer-new [] (-> InputRenderer)
-  (let [renderer (alloc/stack InputRenderer)]
+  (let [renderer (primitive/alloc-stack InputRenderer)]
     (set! (.previous-height renderer) 0)
     (set! (.previous-cursor-row renderer) 0)
     (set! (.previous-menu-rows renderer) 0)
-    (set! (.owner renderer) (cast (ptr Allocator) 0))
+    (set! (.owner renderer) (zeroed (dyn Allocator)))
+    (set! (.retaining renderer) false)
     (set! (.has-retained renderer) false)
     (load renderer)))
 
-(defn input-renderer-new-retaining [(owner (ptr Allocator))] (-> InputRenderer)
+(defn input-renderer-new-retaining [(owner (dyn Allocator))] (-> InputRenderer)
   (let [(mut renderer) (input-renderer-new)]
     (set! (.owner renderer) owner)
+    (set! (.retaining renderer) true)
     (load renderer)))
 
 (defn input-renderer-release! [(renderer (ptr InputRenderer))] (-> i64)
@@ -43,14 +48,14 @@
 (defn input-renderer-retain! [(renderer (ptr InputRenderer))
                               (frame (ptr Frame))] (-> i64)
   (let [owner (load (field renderer owner))]
-    (if (= owner (cast (ptr Allocator) 0))
+    (if (not (.retaining renderer))
         0
         (let [domain (allocation-domain-open owner)]
           (if (not (allocation-domain-valid? domain))
               (do (input-renderer-release! renderer) 0)
               (let [old-domain (load (field renderer retained-domain))
                     had-old (.has-retained renderer)
-                    clone (alloc/stack Frame)]
+                    clone (primitive/alloc-stack Frame)]
                 (frame-clone! (allocation-domain-allocator domain) frame clone)
                 (set! (.retained renderer) (load clone))
                 (set! (.retained-domain renderer) domain)
@@ -78,7 +83,7 @@
 ;; be uninitialised, and an over-count here erases live transcript rows above the
 ;; composer.
 (defn input-renderer-plan-with! [(renderer (ptr InputRenderer))
-                                 (scratch (ptr Allocator))
+                                 (scratch (dyn Allocator))
                                  (layout (ptr ViewLayout))
                                  (menu-rows i64)] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
@@ -124,7 +129,7 @@
 ;; from the composer's last row. Without this the highlighted completion row
 ;; stays on screen forever, one copy per submitted command.
 (defn input-renderer-commit-plan! [(renderer (ptr InputRenderer))
-                                   (scratch (ptr Allocator))] (-> (ArrayList TerminalOperation))
+                                   (scratch (dyn Allocator))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)
         menu-rows (.previous-menu-rows renderer)]
     (input-renderer-final-row! renderer (mut operations))
@@ -149,7 +154,7 @@
     (load operations)))
 
 (defn input-renderer-clear-plan! [(renderer (ptr InputRenderer))
-                                  (scratch (ptr Allocator))] (-> (ArrayList TerminalOperation))
+                                  (scratch (dyn Allocator))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)]
     (input-renderer-final-row! renderer (mut operations))
     (inline-plan-clear-live! (mut operations)

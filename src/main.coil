@@ -1,5 +1,7 @@
 (module harness-main)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.io" :as io)
@@ -56,7 +58,7 @@
 (import "harness-bus-cc-realm" :use *)
 
 (defn write-slice [(fd i64) (value (slice u8))] (-> i64)
-  (let [writer (alloc/stack io/Writer)]
+  (let [writer (primitive/alloc-stack io/Writer)]
     (match (io/write-all (io/fd-writer writer fd)
                          (cast (ptr i8) (slice-data [u8] value))
                          (slice-len [u8] value))
@@ -65,14 +67,26 @@
 
 (defn write-line [(fd i64) (value (slice u8))] (-> i64)
   (write-slice fd value)
-  (let [newline (alloc/stack (array u8 1))]
+  (let [newline (primitive/alloc-stack (array u8 1))]
     (set! (index newline 0) (cast u8 10))
     (write-slice fd (slice-new [u8] (index newline 0) 1))))
+
+;; `argv` is imposed by the C entry ABI and therefore carries no length in its
+;; type. Keep the raw access in one explicit boundary and validate it against
+;; `argc` before producing an argument pointer.
+(defn cli-arg [(count i64)
+               (argv (ptr (ptr i8)))
+               (at i64)] (-> (ptr i8))
+  (if (or (< at 0) (>= at count))
+      (do
+        (alloc/abort)
+        (cast (ptr i8) 0))
+      (load (primitive/index argv at))))
 
 ;; Tool groups are a deliberately small runtime configuration seam. An absent
 ;; variable preserves the interactive harness defaults; factories can expose a
 ;; narrower registry without requiring a different binary.
-(defn tool-group-enabled? [(allocator (ptr Allocator))
+(defn tool-group-enabled? [(allocator (dyn Allocator))
                            (name (slice u8))] (-> bool)
   (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
     (Err [failure] true)
@@ -90,7 +104,7 @@
 
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
-  (write-line 2 "usage: harness <run|tool> <openai|deepseek-openai|deepseek-anthropic|codex|claude|agent-sdk|declared provider> <model> <prompt>")
+  (write-line 2 "usage: harness <run|tool> <openai|openrouter|deepseek-openai|deepseek-anthropic|codex|claude|agent-sdk|declared provider> <model> <prompt>")
   (write-line 2 "       harness <login|logout> <codex|claude>")
   (write-line 2 "       harness tui [--plain] [journal-path]")
   (write-line 2 "       harness serve <port> <journal-path>")
@@ -126,7 +140,7 @@
                              (model (slice u8))
                              (provider-name (slice u8))
                              (runtime-contexts (ArrayList (slice u8)))
-                             (allocator (ptr Allocator))] (-> i64)
+                             (allocator (dyn Allocator))] (-> i64)
   (match (load-factory-definition allocator factory-directory)
     (FactoryInvalid [message] (do (write-line 2 message) 65))
     (FactoryLoaded [definition-value]
@@ -215,15 +229,15 @@
                                                                                                    74))
                                                                               (JournalOpened [opened]
                                                                                              (let [sequence
-                                                                                                     (box allocator
+                                                                                                     (box! allocator
                                                                                                           i64
                                                                                                           1)
                                                                                                    emitter
-                                                                                                     (box allocator
+                                                                                                     (box! allocator
                                                                                                           EventEmitter
                                                                                                           (zeroed EventEmitter))]
                                                                                                (store! journal
-                                                                                                       (box allocator
+                                                                                                       (box! allocator
                                                                                                             EventJournal
                                                                                                             opened))
                                                                                                (event-emitter-init! emitter
@@ -251,7 +265,7 @@
 ;; without a path being retyped at every call site.
 
 ;; What a workflow says it needs before it can run, or "".
-(defn cli-factory-input [(allocator (ptr Allocator))
+(defn cli-factory-input [(allocator (dyn Allocator))
                          (factory-directory (slice u8))] (-> (slice u8))
   (match (load-factory-definition allocator factory-directory)
     (FactoryInvalid [message] "")
@@ -263,7 +277,7 @@
   (CliWorkspaceDirectory [(path (slice u8))])
   (CliWorkspaceUnknown [(message (slice u8))]))
 
-(defn cli-project-error [(allocator (ptr Allocator))
+(defn cli-project-error [(allocator (dyn Allocator))
                          (name (slice u8))
                          (message (slice u8))] (-> (slice u8))
   (let [(mut text) (sb-new allocator)]
@@ -276,7 +290,7 @@
 ;; A named project becomes the checkout it stands for. An unknown name, or one
 ;; whose checkout is not there, stops the run: the alternative is an agent working
 ;; in an empty directory and truthfully reporting that it found nothing to change.
-(defn cli-project-workspace [(allocator (ptr Allocator))
+(defn cli-project-workspace [(allocator (dyn Allocator))
                              (name (slice u8))] (-> CliWorkspaceChoice)
   (match (project-config-load allocator)
     (ProjectConfigInvalid [message] (CliWorkspaceUnknown message))
@@ -303,7 +317,7 @@
 ;;
 ;; An issue is always filed against a codebase, so the file is allowed to record
 ;; which one and the caller does not have to repeat it.
-(defn cli-issue-declared-project [(allocator (ptr Allocator))
+(defn cli-issue-declared-project [(allocator (dyn Allocator))
                                   (issue (slice u8))] (-> (slice u8))
   (match (fs/read-file allocator issue)
     (Err [failure] "")
@@ -330,7 +344,7 @@
 ;; the command line, then the project they named, and only then a scratch
 ;; directory. A workflow is a reusable thing that runs *in* a project; it does
 ;; not belong to one, so a manifest has no say here.
-(defn cli-workspace-choice [(allocator (ptr Allocator))
+(defn cli-workspace-choice [(allocator (dyn Allocator))
                             (requested-workspace (slice u8))
                             (project-name (slice u8))] (-> CliWorkspaceChoice)
   (if (> (slice-len [u8] requested-workspace) 0)
@@ -346,7 +360,7 @@
   (let [found (cli-positional count argv wanted)]
     (if (= (slice-len [u8] found) 0) fallback found)))
 
-(defn cli-projects-owned [(allocator (ptr Allocator))] (-> i64)
+(defn cli-projects-owned [(allocator (dyn Allocator))] (-> i64)
   (match (project-config-load allocator)
     (ProjectConfigInvalid [message] (do (write-line 2 message) 65))
     (ProjectConfigLoaded [loaded]
@@ -383,7 +397,7 @@
 ;; so none of them have to know about each other.
 (defn cli-say [(run-id (slice u8)) (message (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           path (inbox-path allocator run-id)
@@ -397,7 +411,7 @@
 
 (defn cli-projects [] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [result (cli-projects-owned (region/region-allocator process-region))]
       (region/region-close! process-region)
@@ -408,7 +422,7 @@
                                 (model (slice u8))
                                 (provider-name (slice u8))
                                 (runtime-contexts (ArrayList (slice u8)))
-                                (process-allocator (ptr Allocator))] (-> i64)
+                                (process-allocator (dyn Allocator))] (-> i64)
   (let [factory-domain (allocation-domain-open process-allocator)
         (mut result) 70]
     (when (allocation-domain-valid? factory-domain)
@@ -427,7 +441,7 @@
                        (count i64)
                        (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -508,7 +522,7 @@
                          (model (slice u8))
                          (provider-name (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -554,7 +568,7 @@
                        (count i64)
                        (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           (mut steps) (al-new [(slice u8)] allocator)
@@ -564,7 +578,7 @@
                 (do
                   (al-push! [(slice u8)]
                             (mut steps)
-                            (cstr->str (load (index argv (load at)))))
+                            (cstr->str (cli-arg count argv (load at))))
                   (set! at (+ (load at) 1)))))
       (when (= (al-len [(slice u8)] (load steps)) 0)
         (al-push! [(slice u8)] (mut steps) "worker")
@@ -580,10 +594,10 @@
         (region/region-close! process-region)
         result))))
 
-(defstruct CliEventSink [(allocator (ptr Allocator))])
+(defstruct CliEventSink [(allocator (dyn Allocator))])
 
 (defn publish-cli-event [(self (ptr CliEventSink)) (event (ptr Event))] (-> i64)
-  (let [scratch-region (alloc/stack region/Region)]
+  (let [scratch-region (primitive/alloc-stack region/Region)]
     (region/region-init scratch-region (load (field self allocator)))
     (let [scratch (region/region-allocator scratch-region)
           record (event-to-json scratch event)
@@ -600,7 +614,7 @@
 
 (defn execute-echo [(self (ptr EchoTool))
                     (call (ptr ToolCall))
-                    (allocator (ptr Allocator))] (-> ToolResult)
+                    (allocator (dyn Allocator))] (-> ToolResult)
   (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
     (set! (.output result) (.arguments call))
     (load result)))
@@ -609,11 +623,11 @@
   (execute-tool [(self (ptr EchoTool))
                  (call (ptr ToolCall))
                  (context (ptr ToolExecutionContext))
-                 (allocator (ptr Allocator))]
+                 (allocator (dyn Allocator))]
                 (-> ToolResult)
                 (execute-echo self call allocator)))
 
-(defn echo-schema [(allocator (ptr Allocator))] (-> Json)
+(defn echo-schema [(allocator (dyn Allocator))] (-> Json)
   (let [(mut text) (json-object allocator)
         (mut properties) (json-object allocator)
         (mut required) (json-array allocator)
@@ -627,9 +641,9 @@
     (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
     (load schema)))
 
-(defn echo-definition [(allocator (ptr Allocator))] (-> ToolDefinition)
-  (let [definition (alloc/stack ToolDefinition)
-        implementation (box allocator EchoTool (zeroed EchoTool))]
+(defn echo-definition [(allocator (dyn Allocator))] (-> ToolDefinition)
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator EchoTool (zeroed EchoTool))]
     (set! (.name (.spec definition)) "echo")
     (set! (.description (.spec definition)) "Return the supplied text. Multiple calls may run in parallel.")
     (set! (.input-schema (.spec definition)) (echo-schema allocator))
@@ -640,14 +654,14 @@
     (set! (.implementation definition) implementation)
     (load definition)))
 
-(defn make-request [(allocator (ptr Allocator))
+(defn make-request [(allocator (dyn Allocator))
                     (model (slice u8))
                     (prompt (slice u8))
                     (force-tool bool)
                     (registry (ptr ToolRegistry))] (-> ModelRequest)
-  (let [request (alloc/stack ModelRequest)
-        messages (box allocator (ArrayList Message) (al-new [Message] allocator))
-        message (alloc/stack Message)]
+  (let [request (primitive/alloc-stack ModelRequest)
+        messages (box! allocator (ArrayList Message) (al-new [Message] allocator))
+        message (primitive/alloc-stack Message)]
     ;; Keep future ModelRequest fields safe by default; explicit stores below
     ;; document the CLI contract and override this complete initialization.
     (set! request (zeroed ModelRequest))
@@ -679,21 +693,21 @@
     (set! (.tool-results (.continuation request)) (cast (ptr (ArrayList ToolResult)) 0))
     (load request)))
 
-(defn cli-run-provider [(allocator (ptr Allocator))
+(defn cli-run-provider [(allocator (dyn Allocator))
                         (registry (ptr ToolRegistry))
                         (provider (dyn ModelProvider))
                         (model (slice u8))
                         (prompt (slice u8))
                         (force-tool bool)] (-> i64)
   (let [request
-          (box allocator
+          (box! allocator
                ModelRequest
                (make-request allocator model prompt force-tool registry))
-        sequence (box allocator i64 1)
-        sink (alloc/stack CliEventSink)
-        policy (alloc/stack AgentRunPolicy)]
+        sequence (box! allocator i64 1)
+        sink (primitive/alloc-stack CliEventSink)
+        policy (primitive/alloc-stack AgentRunPolicy)]
     (set! (.allocator sink) allocator)
-    (let [emitter (box allocator EventEmitter (zeroed EventEmitter))]
+    (let [emitter (box! allocator EventEmitter (zeroed EventEmitter))]
       (event-emitter-init! emitter allocator sink sequence)
       (set! (.max-model-turns policy) 0)
       (set! (.max-parallel-tools policy) 8)
@@ -715,27 +729,29 @@
                      (model (slice u8))
                      (prompt (slice u8))
                      (force-tool bool)
-                     (process-allocator (ptr Allocator))
-                     (run-allocator (ptr Allocator))] (-> i64)
+                     (process-allocator (dyn Allocator))
+                     (run-allocator (dyn Allocator))] (-> i64)
   (block :cli-run
   (let [allocator run-allocator
         registry
-          (box process-allocator
+          (box! process-allocator
                ToolRegistry
                (tool-registry-new process-allocator))
-        openai-context (box allocator OpenAIResponsesContext (openai-context-default allocator))
-        deepseek-openai-context (box allocator DeepSeekOpenAIContext (deepseek-openai-context-default allocator))
+        openai-context (box! allocator OpenAIResponsesContext (openai-context-default allocator))
+        openrouter-context (box! allocator OpenAIChatContext
+                           (openai-chat-context allocator (openrouter-config)))
+        deepseek-openai-context (box! allocator DeepSeekOpenAIContext (deepseek-openai-context-default allocator))
         deepseek-anthropic-context
-          (box allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default allocator))
+          (box! allocator DeepSeekAnthropicContext (deepseek-anthropic-context-default allocator))
         cwd-result (os/current-dir allocator)
         cwd
           (match cwd-result
             (Ok [owned] (os/owned-string-slice owned))
             (Err [failure] "."))
         codex-strategy (default-codex-strategy allocator cwd)
-        codex-context-value (box allocator CodexProvider (zeroed CodexProvider))
-        claude-context-value (box allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))
-        agent-sdk-context-value (box allocator AgentSdkContext (agent-sdk-context allocator cwd))
+        codex-context-value (box! allocator CodexProvider (zeroed CodexProvider))
+        claude-context-value (box! allocator ClaudeAnthropicContext (claude-anthropic-context-default allocator))
+        agent-sdk-context-value (box! allocator AgentSdkContext (agent-sdk-context allocator cwd))
         config-result (provider-config-load allocator)
         (mut declared)
           (match config-result
@@ -754,6 +770,8 @@
     (let [result
             (cond (= provider-name "openai")
                     (cli-run-provider allocator registry openai-context model prompt force-tool)
+                  (= provider-name "openrouter")
+                    (cli-run-provider allocator registry openrouter-context model prompt force-tool)
                   (= provider-name "deepseek-openai")
                     (cli-run-provider allocator registry deepseek-openai-context model prompt force-tool)
                   (= provider-name "deepseek-anthropic")
@@ -768,7 +786,7 @@
                     (cli-run-provider allocator registry agent-sdk-context-value model prompt force-tool)
                   (>= declared-index 0)
                     (let [context
-                            (box allocator
+                            (box! allocator
                                  OpenAIChatContext
                                  (openai-chat-context allocator
                                                       (load (provider-config-at (mut declared)
@@ -780,6 +798,7 @@
                       outcome)
                   :else (do (write-line 2 "unknown provider") 64))]
       (codex-strategy-close! (load codex-strategy))
+      (openai-chat-close! openrouter-context)
       result))))
 
 (defn cli-run [(provider-name (slice u8))
@@ -787,7 +806,7 @@
                (prompt (slice u8))
                (force-tool bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -805,7 +824,7 @@
       (region/region-close! process-region)
       (load result))))
 
-(defn cli-auth-token [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cli-auth-token [(allocator (dyn Allocator))] (-> (slice u8))
   (match (os/env-get allocator "HARNESS_OPERATOR_TOKEN")
     (Ok [found]
         (match found
@@ -819,7 +838,7 @@
                   (Err [failure] "")))))
     (Err [failure] "")))
 
-(defn cli-observer-token [(allocator (ptr Allocator))] (-> (slice u8))
+(defn cli-observer-token [(allocator (dyn Allocator))] (-> (slice u8))
   (match (os/env-get allocator "HARNESS_OBSERVER_TOKEN")
     (Ok [found]
         (match found
@@ -829,7 +848,7 @@
 
 (defn cli-claude-auth [(login bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           result
@@ -841,7 +860,7 @@
 
 (defn cli-codex-auth [(login bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)]
+        process-region (primitive/alloc-stack region/Region)]
     (region/region-init process-region owner)
     (let [allocator (region/region-allocator process-region)
           result
@@ -853,9 +872,9 @@
 
 (defn cli-tui-owned [(journal-path (slice u8))
                      (force-plain bool)
-                     (process-allocator (ptr Allocator))
-                     (service-allocator (ptr Allocator))
-                     (session-allocator (ptr Allocator))] (-> i64)
+                     (process-allocator (dyn Allocator))
+                     (service-allocator (dyn Allocator))
+                     (session-allocator (dyn Allocator))] (-> i64)
   (let [allocator service-allocator
         (mut journal) (cast (ptr EventJournal) 0)
         (mut overrides) (terminal-overrides-from-env process-allocator)]
@@ -870,24 +889,24 @@
                                     (write-line 2 message)
                                     (return-from :tui 74)))
                (JournalOpened [opened]
-                              (store! journal (box allocator EventJournal opened))))
+                              (store! journal (box! allocator EventJournal opened))))
              (let [recovery (event-journal-recover allocator journal-path)]
                (when (not (load (field recovery ok)))
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :tui 65))
-               (let [sequence (box allocator i64 (+ (load (field recovery last-sequence)) 1))
-                     emitter (box allocator EventEmitter (zeroed EventEmitter))
+               (let [sequence (box! allocator i64 (+ (load (field recovery last-sequence)) 1))
+                     emitter (box! allocator EventEmitter (zeroed EventEmitter))
                      registry
-                       (box process-allocator
+                       (box! process-allocator
                             ToolRegistry
                             (tool-registry-new process-allocator))
                      provider-factory
-                       (box allocator
+                       (box! allocator
                             DefaultRuntimeProviderFactory
                             (zeroed DefaultRuntimeProviderFactory))
                      controller
-                       (box allocator
+                       (box! allocator
                             RuntimeRunController
                             (runtime-controller-new allocator
                                                     registry
@@ -895,7 +914,7 @@
                                                     emitter
                                                     journal
                                                     journal-path))
-                     service (box allocator RunService (zeroed RunService))]
+                     service (box! allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
                  (store! (field service provider-config)
                          (load (default-runtime-provider-factory-config provider-factory)))
@@ -908,7 +927,7 @@
                    (event-journal-close! journal)
                    (return-from :tui 70))
                  (store! (field provider-factory tui-fixture)
-                         (box process-allocator
+                         (box! process-allocator
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
                  (when (tool-group-enabled? allocator "filesystem")
@@ -941,8 +960,8 @@
 
 (defn cli-tui [(journal-path (slice u8)) (force-plain bool)] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
-        session-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
+        session-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -965,7 +984,7 @@
 
 (defn cli-tui-default [(force-plain bool)] (-> i64)
   (let [owner (malloc-allocator)
-        scratch-region (alloc/stack region/Region)]
+        scratch-region (primitive/alloc-stack region/Region)]
     (region/region-init scratch-region owner)
     (let [allocator (region/region-allocator scratch-region)
           state-root
@@ -1019,14 +1038,14 @@
 
 (defn cli-serve-owned [(port-text (slice u8))
                        (journal-path (slice u8))
-                       (process-allocator (ptr Allocator))
-                       (service-allocator (ptr Allocator))] (-> i64)
+                       (process-allocator (dyn Allocator))
+                       (service-allocator (dyn Allocator))] (-> i64)
   (let [allocator service-allocator
         auth-token (cli-auth-token process-allocator)
         observer-token (cli-observer-token process-allocator)
-        service-auth (alloc/stack ServiceAuth)
+        service-auth (primitive/alloc-stack ServiceAuth)
         (mut journal) (cast (ptr EventJournal) 0)
-        listener (alloc/stack HttpListener)]
+        listener (primitive/alloc-stack HttpListener)]
     (block :serve
            (when (= (slice-len [u8] auth-token) 0)
              (write-line 2 "HARNESS_OPERATOR_TOKEN or HARNESS_AUTH_TOKEN must be set and non-empty")
@@ -1049,27 +1068,27 @@
                                     (write-line 2 message)
                                     (return-from :serve 74)))
                (JournalOpened [opened]
-                              (store! journal (box allocator EventJournal opened))))
+                              (store! journal (box! allocator EventJournal opened))))
              (let [recovery (event-journal-recover allocator journal-path)]
                (when (not (load (field recovery ok)))
                  (write-line 2 (load (field recovery error)))
                  (event-journal-close! journal)
                  (return-from :serve 65))
                (let [sequence
-                       (box allocator
+                       (box! allocator
                             i64
                             (+ (load (field recovery last-sequence)) 1))
-                     emitter (box allocator EventEmitter (zeroed EventEmitter))
+                     emitter (box! allocator EventEmitter (zeroed EventEmitter))
                      registry
-                       (box process-allocator
+                       (box! process-allocator
                             ToolRegistry
                             (tool-registry-new process-allocator))
                      provider-factory
-                       (box allocator
+                       (box! allocator
                             DefaultRuntimeProviderFactory
                             (zeroed DefaultRuntimeProviderFactory))
                      controller
-                       (box allocator
+                       (box! allocator
                             RuntimeRunController
                             (runtime-controller-new allocator
                                                     registry
@@ -1077,7 +1096,7 @@
                                                     emitter
                                                     journal
                                                     journal-path))
-                     service (box allocator RunService (zeroed RunService))]
+                     service (box! allocator RunService (zeroed RunService))]
                  (event-emitter-init! emitter allocator (load journal) sequence)
                  (store! (field service provider-config)
                          (load (default-runtime-provider-factory-config provider-factory)))
@@ -1090,7 +1109,7 @@
                    (event-journal-close! journal)
                    (return-from :serve 70))
                  (store! (field provider-factory tui-fixture)
-                         (box process-allocator
+                         (box! process-allocator
                               TuiFixtureProvider
                               (zeroed TuiFixtureProvider)))
                  (tool-register! registry (echo-definition process-allocator))
@@ -1130,7 +1149,7 @@
                                               (json-stringify allocator
                                                               (json-integer allocator
                                                                             (load (field listener port))))))
-                 (let [shutdown (alloc/stack ShutdownSignal)
+                 (let [shutdown (primitive/alloc-stack ShutdownSignal)
                        (mut server-code) 0]
                    (store! shutdown (shutdown-signal-new))
                    (if (or (not (shutdown-signal-valid? shutdown))
@@ -1154,7 +1173,7 @@
 (defn cli-serve [(port-text (slice u8))
                  (journal-path (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        process-region (alloc/stack region/Region)
+        process-region (primitive/alloc-stack region/Region)
         (mut result) 70]
     (region/region-init process-region owner)
     (let [process-allocator (region/region-allocator process-region)
@@ -1208,14 +1227,14 @@
         (mut i) 4]
     (loop (if (or (>= (load i) count) (not (load valid)))
               (break)
-              (let [argument (cstr->str (load (index argv (load i))))]
+              (let [argument (cstr->str (cli-arg count argv (load i)))]
                 (if (and (or (= argument "--workspace")
                              (or (= argument "--issue")
                                  (or (= argument "--project")
                                      (or (= argument "--model")
                                          (= argument "--provider")))))
                          (< (+ (load i) 1) count)
-                         (not (starts-with (cstr->str (load (index argv (+ (load i) 1))))
+                         (not (starts-with (cstr->str (cli-arg count argv (+ (load i) 1)))
                                            "--")))
                     (set! i (+ (load i) 2))
                     (set! valid false)))))
@@ -1231,7 +1250,7 @@
     (loop (if (or (>= (load i) count) (load found))
               (break)
               (do
-                (when (= (cstr->str (load (index argv (load i)))) name)
+                (when (= (cstr->str (cli-arg count argv (load i))) name)
                   (store! found true)
                   0)
                 (set! i (+ (load i) 1)))))
@@ -1248,9 +1267,9 @@
     (loop (if (or (>= (load i) count) (> (slice-len [u8] (load value)) 0))
               (break)
               (do
-                (when (and (= (cstr->str (load (index argv (load i)))) name)
+                (when (and (= (cstr->str (cli-arg count argv (load i))) name)
                            (< (+ (load i) 1) count))
-                  (store! value (cstr->str (load (index argv (+ (load i) 1)))))
+                  (store! value (cstr->str (cli-arg count argv (+ (load i) 1))))
                   0)
                 (set! i (+ (load i) 1)))))
     (load value)))
@@ -1264,7 +1283,7 @@
         (mut i) 2]
     (loop (if (or (>= (load i) count) (> (slice-len [u8] (load found)) 0))
               (break)
-              (let [argument (cstr->str (load (index argv (load i))))]
+              (let [argument (cstr->str (cli-arg count argv (load i)))]
                 (if (starts-with argument "--")
                     (set! i (+ (load i) (if (cli-option-takes-value? argument) 2 1)))
                     (do
@@ -1280,7 +1299,7 @@
         (mut i) 2]
     (loop (if (or (>= (load i) count) (> (slice-len [u8] (load bad)) 0))
               (break)
-              (let [argument (cstr->str (load (index argv (load i))))]
+              (let [argument (cstr->str (cli-arg count argv (load i)))]
                 (if (starts-with argument "--")
                     (do
                       (when (not (or (= argument "--all")
@@ -1299,7 +1318,7 @@
 ;; rather than being hidden: they are reachable, and a listing that omitted them
 ;; would misrepresent who is actually out there.
 (defn cli-peers-in [(realm (ptr CcRealm))
-                    (allocator (ptr Allocator))
+                    (allocator (dyn Allocator))
                     (include-dead bool)] (-> i64)
   (let [(mut peers) (cc-discover realm allocator include-dead)
         n (al-len [CcPeer] peers)
@@ -1347,10 +1366,10 @@
 
 (defn cli-peers [(realm-name (slice u8)) (include-dead bool)] (-> i64)
   (let [owner (malloc-allocator)
-        region (alloc/stack region/Region)]
+        region (primitive/alloc-stack region/Region)]
     (region/region-init region owner)
     (let [allocator (region/region-allocator region)
-          realm (alloc/stack CcRealm)]
+          realm (primitive/alloc-stack CcRealm)]
       (cc-realm-init! realm allocator realm-name)
       (cli-peers-in realm allocator include-dead)
       (region/region-close! region)
@@ -1360,11 +1379,11 @@
                      (target (slice u8))
                      (message (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
-        region (alloc/stack region/Region)]
+        region (primitive/alloc-stack region/Region)]
     (region/region-init region owner)
     (let [allocator (region/region-allocator region)
-          realm (alloc/stack CcRealm)
-          identity (alloc/stack CcIdentity)]
+          realm (primitive/alloc-stack CcRealm)
+          identity (primitive/alloc-stack CcIdentity)]
       (cc-realm-init! realm allocator realm-name)
       ;; No reply address: this process does not bind a socket, so a reply has
       ;; nowhere to go. The message still delivers -- reachability never
@@ -1382,10 +1401,10 @@
   (let [count (cast i64 argc)]
     (if (< count 2)
         (cli-usage)
-        (let [command (cstr->str (load (index argv 1)))]
+        (let [command (cstr->str (cli-arg count argv 1))]
           (if (or (= command "login") (= command "logout"))
               (if (= count 3)
-                  (let [provider (cstr->str (load (index argv 2)))
+                  (let [provider (cstr->str (cli-arg count argv 2))
                         login (= command "login")]
                     (cond (= provider "codex") (cli-codex-auth login)
                           (= provider "claude") (cli-claude-auth login)
@@ -1393,15 +1412,15 @@
                   (cli-usage))
               (if (= command "factory")
                   (cond (and (>= count 4)
-                             (= (cstr->str (load (index argv 2))) "new"))
-                          (cli-factory-new (cstr->str (load (index argv 3)))
+                             (= (cstr->str (cli-arg count argv 2)) "new"))
+                          (cli-factory-new (cstr->str (cli-arg count argv 3))
                                            4
                                            count
                                            argv)
                         (and (>= count 4)
-                             (= (cstr->str (load (index argv 2))) "issue"))
+                             (= (cstr->str (cli-arg count argv 2)) "issue"))
                           (if (cli-factory-issue-arguments-valid? count argv)
-                              (cli-factory-issue (cstr->str (load (index argv 3)))
+                              (cli-factory-issue (cstr->str (cli-arg count argv 3))
                                                  (cli-option count argv "--workspace")
                                                  (cli-option count argv "--project")
                                                  (cli-option count argv "--issue")
@@ -1415,25 +1434,25 @@
                                                        "codex")))
                               (cli-usage))
                         (and (>= count 4)
-                             (= (cstr->str (load (index argv 2))) "run"))
-                          (cli-factory-run (cstr->str (load (index argv 3))) count argv)
+                             (= (cstr->str (cli-arg count argv 2)) "run"))
+                          (cli-factory-run (cstr->str (cli-arg count argv 3)) count argv)
                         :else (cli-usage))
                   (if (= command "tui")
                       (cond (= count 2) (cli-tui-default false)
                             (= count 3)
-                              (let [argument (cstr->str (load (index argv 2)))]
+                              (let [argument (cstr->str (cli-arg count argv 2))]
                                 (if (= argument "--plain")
                                     (cli-tui-default true)
                                     (cli-tui argument false)))
                             (= count 4)
-                              (if (= (cstr->str (load (index argv 2))) "--plain")
-                                  (cli-tui (cstr->str (load (index argv 3))) true)
+                              (if (= (cstr->str (cli-arg count argv 2)) "--plain")
+                                  (cli-tui (cstr->str (cli-arg count argv 3)) true)
                                   (cli-usage))
                             :else (cli-usage))
                       (if (= command "say")
                           (if (= count 4)
-                              (cli-say (cstr->str (load (index argv 2)))
-                                       (cstr->str (load (index argv 3))))
+                              (cli-say (cstr->str (cli-arg count argv 2))
+                                       (cstr->str (cli-arg count argv 3)))
                               (cli-usage))
                       (if (= command "projects")
                           (if (= count 2) (cli-projects) (cli-usage))
@@ -1454,14 +1473,14 @@
                                                    message)))
                               (if (= command "serve")
                                   (if (= count 4)
-                                      (cli-serve (cstr->str (load (index argv 2)))
-                                                 (cstr->str (load (index argv 3))))
+                                      (cli-serve (cstr->str (cli-arg count argv 2))
+                                                 (cstr->str (cli-arg count argv 3)))
                                       (cli-usage))
                                   (if (< count 5)
                                       (cli-usage)
-                                      (let [provider (cstr->str (load (index argv 2)))
-                                            model (cstr->str (load (index argv 3)))
-                                            prompt (cstr->str (load (index argv 4)))]
+                                      (let [provider (cstr->str (cli-arg count argv 2))
+                                            model (cstr->str (cli-arg count argv 3))
+                                            prompt (cstr->str (cli-arg count argv 4))]
                                         (cond (= command "run") (cli-run provider model prompt false)
                                               (= command "tool") (cli-run provider model prompt true)
                                               :else (cli-usage))))))))))))))))

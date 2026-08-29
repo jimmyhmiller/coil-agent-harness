@@ -7,7 +7,7 @@
 
 ;; Plain rendering is deliberately ANSI-free and sequential. The caller owns the
 ;; returned buffer and may write it to a TTY, pipe, log, or snapshot fixture.
-(defn render-frame-plain [(allocator (ptr Allocator))
+(defn render-frame-plain [(allocator (dyn Allocator))
                           (frame (ptr Frame))] (-> (slice u8))
   (let [(mut output) (sb-new allocator)
         (mut at) 0

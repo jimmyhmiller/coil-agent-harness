@@ -1,5 +1,7 @@
 (module harness-event-journal-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
@@ -36,13 +38,13 @@
 (deftest persists-ordered-events-and-recovers-past-a-torn-tail
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-journal-recovery.jsonl"
-               sequence (box allocator i64 1)
-               journal (alloc/stack EventJournal)]
+               sequence (box! allocator i64 1)
+               journal (primitive/alloc-stack EventJournal)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
              (JournalOpened [opened] (store! journal opened)))
-           (let [emitter (alloc/stack EventEmitter)]
+           (let [emitter (primitive/alloc-stack EventEmitter)]
              (store! emitter (event-emitter-new allocator journal sequence))
              (assert-eq (emit-event emitter
                                     100
@@ -91,8 +93,8 @@
 (deftest opens-the-same-path-without-process-ownership
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-journal-owner.jsonl"
-               first (alloc/stack EventJournal)
-               second (alloc/stack EventJournal)]
+               first (primitive/alloc-stack EventJournal)
+               second (primitive/alloc-stack EventJournal)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path true)
              (JournalOpenFailed [message] (assert false))
@@ -106,13 +108,13 @@
 (deftest serializes-sequence-assignment-with-concurrent-publication
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-journal-concurrent.jsonl"
-               sequence (box allocator i64 1)
-               journal (alloc/stack EventJournal)
-               emitter (alloc/stack EventEmitter)
-               first-job (alloc/stack ConcurrentEventJob)
-               second-job (alloc/stack ConcurrentEventJob)
-               first-thread (alloc/stack Thread)
-               second-thread (alloc/stack Thread)]
+               sequence (box! allocator i64 1)
+               journal (primitive/alloc-stack EventJournal)
+               emitter (primitive/alloc-stack EventEmitter)
+               first-job (primitive/alloc-stack ConcurrentEventJob)
+               second-job (primitive/alloc-stack ConcurrentEventJob)
+               first-thread (primitive/alloc-stack Thread)
+               second-thread (primitive/alloc-stack Thread)]
            (fs/write-file allocator path "")
            (match (event-journal-open allocator path false)
              (JournalOpenFailed [message] (assert false))

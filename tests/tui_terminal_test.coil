@@ -1,5 +1,7 @@
 (module harness-tui-terminal-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc)
 (import "harness-tui-terminal" :use *)
 
@@ -8,7 +10,7 @@
                            (term-dumb bool)
                            (no-color bool)
                            (columns i64)] (-> TerminalFacts)
-  (let [facts (alloc/stack TerminalFacts)]
+  (let [facts (primitive/alloc-stack TerminalFacts)]
     (set! (.input-tty facts) input-tty)
     (set! (.output-tty facts) output-tty)
     (set! (.term-dumb facts) term-dumb)

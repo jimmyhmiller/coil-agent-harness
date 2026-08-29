@@ -92,12 +92,12 @@
     (and (load ok) (>= (load sent) length))))
 
 ;; Deliver one already-serialized NDJSON line to a socket path.
-(defn cc-send-line [(allocator (ptr Allocator))
+(defn cc-send-line [(allocator (dyn Allocator))
                     (socket-path (slice u8))
                     (line (slice u8))] (-> i64)
   (if (= (slice-len [u8] line) 0)
       CC_SEND_TOO_LARGE
-      (let [connection (alloc/stack socket/UnixConnection)]
+      (let [connection (primitive/alloc-stack socket/UnixConnection)]
         (match (socket/unix-connect connection socket-path)
           (Err [failure] CC_SEND_CONNECT_FAILED)
           (Ok [_]
@@ -115,7 +115,7 @@
 ;; makes the receiver drop the frame silently, so it is opt-in: a wrong guess
 ;; here is indistinguishable from the message never being sent.
 (defn cc-peer-send [(realm (ptr CcRealm))
-                    (allocator (ptr Allocator))
+                    (allocator (dyn Allocator))
                     (identity (ptr CcIdentity))
                     (target (slice u8))
                     (body (slice u8))
@@ -141,7 +141,7 @@
 ;; Ask a peer to display us under a different name. A courtesy, not a
 ;; requirement: the roster is a name directory and nothing routes on it.
 (defn cc-peer-rename [(realm (ptr CcRealm))
-                      (allocator (ptr Allocator))
+                      (allocator (dyn Allocator))
                       (target (slice u8))
                       (name (slice u8))] (-> i64)
   (let [socket-path (cc-resolve realm allocator target)]
@@ -158,7 +158,7 @@
 ;; receiver when our `from` lives in the same socket directory as theirs, so
 ;; `identity.address` must be a path we really bound.
 (defn cc-peer-report-status [(realm (ptr CcRealm))
-                             (allocator (ptr Allocator))
+                             (allocator (dyn Allocator))
                              (identity (ptr CcIdentity))
                              (target (slice u8))
                              (status (slice u8))

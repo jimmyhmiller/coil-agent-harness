@@ -1,5 +1,7 @@
 (module async-tool-provider-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
@@ -18,15 +20,15 @@
 (deftest turns-a-durable-request-into-the-requested-tool-call
          (let [allocator (malloc-allocator)
                (mut messages) (al-new [Message] allocator)
-               message (alloc/stack Message)
-               request (alloc/stack ModelRequest)]
+               message (primitive/alloc-stack Message)
+               request (primitive/alloc-stack ModelRequest)]
            (store! (field message role) (UserRole))
            (store! (field message content)
                    "{\"tool_name\":\"bash\",\"arguments\":{\"command\":\"echo ready\"}}")
            (al-push! [Message] (mut messages) (load message))
            (store! (field request run-id) "async-bash-1")
            (store! (field request messages)
-                   (box allocator (ArrayList Message) (load messages)))
+                   (box! allocator (ArrayList Message) (load messages)))
            (match (async-tool-first-response request allocator)
              (ModelErr [failure] (assert false))
              (ModelOk [response]
@@ -46,15 +48,15 @@
 (deftest executes-an-ordinary-tool-through-a-durable-asynchronous-run
          (let [allocator (malloc-allocator)
                path "/tmp/coil-agent-harness-async-tool-provider.jsonl"
-               journal (alloc/stack EventJournal)
-               sequence (box allocator i64 1)
-               emitter (alloc/stack EventEmitter)
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               provider (box allocator AsyncToolProvider (zeroed AsyncToolProvider))
-               request (alloc/stack ModelRequest)
+               journal (primitive/alloc-stack EventJournal)
+               sequence (box! allocator i64 1)
+               emitter (primitive/alloc-stack EventEmitter)
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               provider (box! allocator AsyncToolProvider (zeroed AsyncToolProvider))
+               request (primitive/alloc-stack ModelRequest)
                (mut messages) (al-new [Message] allocator)
-               message (alloc/stack Message)
-               policy (alloc/stack AgentRunPolicy)]
+               message (primitive/alloc-stack Message)
+               policy (primitive/alloc-stack AgentRunPolicy)]
            ;; Optional request fields, especially the opt-in run deadline, must
            ;; start at zero. A stack slot is not implicitly initialized.
            (store! request (zeroed ModelRequest))
@@ -72,7 +74,7 @@
            (store! (field request operation-id) "async")
            (store! (field request model) "async-tool")
            (store! (field request messages)
-                   (box allocator (ArrayList Message) (load messages)))
+                   (box! allocator (ArrayList Message) (load messages)))
            (store! (field request tools) registry)
            (store! (field request tool-choice) (ToolsAuto))
            (store! (field request parallel-tool-calls) true)

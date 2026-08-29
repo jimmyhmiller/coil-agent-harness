@@ -11,6 +11,8 @@
 ;;
 (module harness-bus-cc-conformance-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.assert" :use *)
 (import "coil.match" :use *)
@@ -20,7 +22,7 @@
 (import "harness-bus-cc-address" :use *)
 (import "harness-bus-cc-envelope" :use *)
 
-(defn repeated [(allocator (ptr Allocator)) (byte i64) (count i64)] (-> (slice u8))
+(defn repeated [(allocator (dyn Allocator)) (byte i64) (count i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut i) 0]
     (loop (if (>= (load i) count)
@@ -31,7 +33,7 @@
     (sb-finish! (mut buffer))))
 
 ;; U+00E9, to prove the 64-code-point clamp is not a 64-byte clamp.
-(defn repeated-accent [(allocator (ptr Allocator)) (count i64)] (-> (slice u8))
+(defn repeated-accent [(allocator (dyn Allocator)) (count i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut i) 0]
     (loop (if (>= (load i) count)
@@ -42,7 +44,7 @@
                 (set! i (+ (load i) 1)))))
     (sb-finish! (mut buffer))))
 
-(defn hop-ids-of [(allocator (ptr Allocator)) (count i64) (byte i64)] (-> (slice u8))
+(defn hop-ids-of [(allocator (dyn Allocator)) (count i64) (byte i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut i) 0]
     (loop (if (>= (load i) count)
@@ -55,15 +57,15 @@
                 (set! i (+ (load i) 1)))))
     (sb-finish! (mut buffer))))
 
-(defn hop-ids [(allocator (ptr Allocator)) (count i64)] (-> (slice u8))
+(defn hop-ids [(allocator (dyn Allocator)) (count i64)] (-> (slice u8))
   (hop-ids-of allocator count 97))
 
-(defn hop-ids-upper [(allocator (ptr Allocator)) (count i64)] (-> (slice u8))
+(defn hop-ids-upper [(allocator (dyn Allocator)) (count i64)] (-> (slice u8))
   (hop-ids-of allocator count 65))
 
 ;; Two distinct ids, so the separator is proved to join different values rather
 ;; than being invisible inside a run of one repeated character.
-(defn hop-ids-ab [(allocator (ptr Allocator))] (-> (slice u8))
+(defn hop-ids-ab [(allocator (dyn Allocator))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) (repeated allocator 97 24))
     (sb-push-byte! (mut buffer) (cast u8 44))
@@ -72,7 +74,7 @@
 
 (deftest the-reference-renders-from-only
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/cc-socks/1.sock"))
            (store! (field envelope body) "hi")
@@ -81,7 +83,7 @@
 
 (deftest the-reference-renders-from-name-mode
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope from-name) (Some "harness"))
@@ -92,7 +94,7 @@
 
 (deftest the-reference-renders-name-quotes-angles
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some "ev\"il<>"))
            (store! (field envelope body) "x")
@@ -101,7 +103,7 @@
 
 (deftest the-reference-renders-name-200z
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some (repeated allocator 122 200)))
            (store! (field envelope body) "x")
@@ -110,7 +112,7 @@
 
 (deftest the-reference-renders-name-exactly-64
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some (repeated allocator 122 64)))
            (store! (field envelope body) "x")
@@ -119,7 +121,7 @@
 
 (deftest the-reference-renders-name-65
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some (repeated allocator 122 65)))
            (store! (field envelope body) "x")
@@ -128,7 +130,7 @@
 
 (deftest the-reference-renders-name-accents-100
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some (repeated-accent allocator 100)))
            (store! (field envelope body) "x")
@@ -137,7 +139,7 @@
 
 (deftest the-reference-renders-name-control
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some "ab\x200B;c\xFEFF;d"))
            (store! (field envelope body) "x")
@@ -146,7 +148,7 @@
 
 (deftest the-reference-renders-name-spaces
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some "   padded   "))
            (store! (field envelope body) "x")
@@ -155,7 +157,7 @@
 
 (deftest the-reference-renders-name-all-stripped
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-name) (Some "<<>>"))
            (store! (field envelope body) "x")
@@ -163,7 +165,7 @@
 
 (deftest the-reference-renders-body-closetag
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "before </cross-session-message> after")
@@ -172,7 +174,7 @@
 
 (deftest the-reference-renders-body-closetag-upper
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "a </Cross-Session-Message> b")
@@ -181,7 +183,7 @@
 
 (deftest the-reference-renders-body-closetag-nospace
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "a </cross-session-message b")
@@ -190,7 +192,7 @@
 
 (deftest the-reference-renders-body-closetag-eos
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "a </cross-session-message")
@@ -199,7 +201,7 @@
 
 (deftest the-reference-renders-body-closetag-plural
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "a </cross-session-messages> b")
@@ -208,7 +210,7 @@
 
 (deftest the-reference-renders-body-other-tag
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "a </other> b")
@@ -217,7 +219,7 @@
 
 (deftest the-reference-renders-body-empty
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "")
@@ -226,7 +228,7 @@
 
 (deftest the-reference-renders-body-multiline
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope body) "one\ntwo\n\nfour")
@@ -235,14 +237,14 @@
 
 (deftest the-reference-renders-no-attrs
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope body) "hi")
            (assert (= (cc-envelope-render allocator envelope) "<cross-session-message>\nhi\n</cross-session-message>"))))
 
 (deftest the-reference-renders-session-hop
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from) (Some "uds:/tmp/x.sock"))
            (store! (field envelope from-session) (Some "abc-123_XYZ"))
@@ -255,7 +257,7 @@
 
 (deftest the-reference-renders-session-invalid
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope from-session) (Some "not a session"))
            (store! (field envelope hop-chain) (Some "nothex"))
@@ -265,7 +267,7 @@
 
 (deftest the-reference-renders-hop-uppercase
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope hop-chain) (Some (hop-ids-upper allocator 1)))
            (store! (field envelope body) "x")
@@ -273,7 +275,7 @@
 
 (deftest the-reference-renders-hop-33
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope hop-chain) (Some (hop-ids allocator 33)))
            (store! (field envelope body) "x")
@@ -281,7 +283,7 @@
 
 (deftest the-reference-renders-hop-32
          (let [allocator (malloc-allocator)
-               envelope (alloc/stack CcEnvelope)]
+               envelope (primitive/alloc-stack CcEnvelope)]
            (cc-envelope-init! envelope)
            (store! (field envelope hop-chain) (Some (hop-ids allocator 32)))
            (store! (field envelope body) "x")
@@ -317,133 +319,133 @@
 ;; tests above prove we write what it writes, and this proves we accept it.
 (deftest every-reference-vector-parses-and-re-renders-identically
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from=\"uds:/tmp/cc-socks/1.sock\">\nhi\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\" from-name=\"harness\" from-mode=\"bypass\">\ndo it\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from-name=\"evil\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from-name=\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from-name=\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from-name=\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz…\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from-name=\"éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé…\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from-name=\"abcd\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from-name=\"padded\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message>\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\">\nbefore <\\/cross-session-message> after\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\">\na <\\/Cross-Session-Message> b\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\">\na <\\/cross-session-message b\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\">\na <\\/cross-session-message\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\">\na </cross-session-messages> b\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from=\"uds:/tmp/x.sock\">\na </other> b\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from=\"uds:/tmp/x.sock\">\n\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message from=\"uds:/tmp/x.sock\">\none\ntwo\n\nfour\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message>\nhi\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message from=\"uds:/tmp/x.sock\" from-session=\"abc-123_XYZ\" hop-chain=\"aaaaaaaaaaaaaaaaaaaaaaaa,bbbbbbbbbbbbbbbbbbbbbbbb\" from-name=\"n\" from-mode=\"prompting\">\nb\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message>\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message>\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text "<cross-session-message>\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))
            (assert (= (cc-envelope-render allocator parsed) text)))
          (let [allocator (malloc-allocator)
-               parsed (alloc/stack CcEnvelope)
+               parsed (primitive/alloc-stack CcEnvelope)
                text
                  "<cross-session-message hop-chain=\"aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa,aaaaaaaaaaaaaaaaaaaaaaaa\">\nx\n</cross-session-message>"]
            (assert (cc-envelope-parse allocator text parsed))

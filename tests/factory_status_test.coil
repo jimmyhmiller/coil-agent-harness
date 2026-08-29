@@ -1,5 +1,7 @@
 (module harness-factory-status-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.slice" :use *)
@@ -10,9 +12,9 @@
 
 (deftest worker-status-records-ready-and-not-ready-reports
          (let [allocator (malloc-allocator)
-               status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
-               tool (alloc/stack FactoryStatusTool)
-               call (alloc/stack ToolCall)
+               status (box! allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+               tool (primitive/alloc-stack FactoryStatusTool)
+               call (primitive/alloc-stack ToolCall)
                (mut arguments) (json-object allocator)]
            (store! (field tool status) status)
            (json-put-bool! (mut arguments) "ready" true)
@@ -34,7 +36,7 @@
 
 (deftest worker-status-tool-is-always-registerable
          (let [allocator (malloc-allocator)
-               status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+               status (box! allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
                (mut registry) (tool-registry-new allocator)]
            (assert (register-factory-status-tool! (mut registry) allocator status))
            (assert (match (tool-find (load registry) "report_worker_status") (Some [tool] true) (_ false)))))
@@ -43,11 +45,12 @@
 ;; it has to survive the run allocator it was said in.
 (deftest a-report-keeps-what-the-worker-said
          (let [allocator (malloc-allocator)
-               status (box allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
-               registry (box allocator ToolRegistry (tool-registry-new allocator))
-               call (alloc/stack ToolCall)
+               status (box! allocator FactoryWorkerStatus (zeroed FactoryWorkerStatus))
+               registry (box! allocator ToolRegistry (tool-registry-new allocator))
+               call (primitive/alloc-stack ToolCall)
                (mut arguments) (json-object allocator)]
            (store! (field status allocator) allocator)
+           (store! (field status has-allocator) true)
            (assert (register-factory-status-tool! registry allocator status))
            (json-object-put! (mut arguments) "ready" (JsonBool false))
            (json-put-string! (mut arguments) "summary" "one.txt is written; two.txt is missing")
@@ -56,7 +59,7 @@
            (store! (field call name) "report_worker_status")
            (store! (field call arguments) (load arguments))
            (store! (field call raw-arguments) "")
-           (let [tool (box allocator FactoryStatusTool (zeroed FactoryStatusTool))]
+           (let [tool (box! allocator FactoryStatusTool (zeroed FactoryStatusTool))]
              (store! (field tool status) status)
              (execute-factory-status tool call allocator))
            (assert (factory-worker-status-reported? status))

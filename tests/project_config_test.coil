@@ -16,7 +16,7 @@
     (Some [at] true)
     (None [] false)))
 
-(defn parse-invalid [(allocator (ptr Allocator)) (source (slice u8))] (-> (slice u8))
+(defn parse-invalid [(allocator (dyn Allocator)) (source (slice u8))] (-> (slice u8))
   (match (project-config-parse allocator source)
     (ProjectConfigLoaded [config] "")
     (ProjectConfigInvalid [message] message)))

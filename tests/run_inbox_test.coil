@@ -2,6 +2,8 @@
 ;; these tests are about what a writer and a reader see, not about the format.
 (module harness-run-inbox-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
@@ -12,7 +14,7 @@
 (import "harness-directory" :use *)
 (import "harness-run-inbox" :use *)
 
-(defn scratch [(allocator (ptr Allocator)) (name (slice u8))] (-> (slice u8))
+(defn scratch [(allocator (dyn Allocator)) (name (slice u8))] (-> (slice u8))
   (let [root (path-join allocator "/tmp" "harness-inbox-test")]
     (directory-create-all allocator root 448)
     (path-remove allocator (path-join allocator root name))
@@ -21,7 +23,7 @@
 (deftest a-message-written-is-a-message-read
          (let [allocator (malloc-allocator)
                path (scratch allocator "one.jsonl")
-               inbox (alloc/stack RunInbox)]
+               inbox (primitive/alloc-stack RunInbox)]
            (store! inbox (inbox-open path))
            (assert (inbox-send! allocator path "stop rewriting the tests"))
            (let [messages (inbox-drain! allocator inbox)]
@@ -33,7 +35,7 @@
 (deftest a-message-is-delivered-once
          (let [allocator (malloc-allocator)
                path (scratch allocator "two.jsonl")
-               inbox (alloc/stack RunInbox)]
+               inbox (primitive/alloc-stack RunInbox)]
            (store! inbox (inbox-open path))
            (assert (inbox-send! allocator path "first"))
            (assert-eq (al-len [(slice u8)] (inbox-drain! allocator inbox)) 1)
@@ -46,7 +48,7 @@
 (deftest an-inbox-nobody-wrote-to-is-empty-not-an-error
          (let [allocator (malloc-allocator)
                path (scratch allocator "empty.jsonl")
-               inbox (alloc/stack RunInbox)]
+               inbox (primitive/alloc-stack RunInbox)]
            (store! inbox (inbox-open path))
            (assert-eq (al-len [(slice u8)] (inbox-drain! allocator inbox)) 0)))
 
@@ -54,7 +56,7 @@
 (deftest messages-keep-the-order-they-were-said-in
          (let [allocator (malloc-allocator)
                path (scratch allocator "order.jsonl")
-               inbox (alloc/stack RunInbox)]
+               inbox (primitive/alloc-stack RunInbox)]
            (store! inbox (inbox-open path))
            (assert (inbox-send! allocator path "one"))
            (assert (inbox-send! allocator path "two"))
@@ -67,7 +69,7 @@
 (deftest a-half-written-line-waits-for-the-rest
          (let [allocator (malloc-allocator)
                path (scratch allocator "torn.jsonl")
-               inbox (alloc/stack RunInbox)]
+               inbox (primitive/alloc-stack RunInbox)]
            (store! inbox (inbox-open path))
            (match (fs/write-file allocator path "{\"version\":1,\"text\":\"whole\"}\n{\"version\":1,\"te")
              (Ok [written] 0)
@@ -80,7 +82,7 @@
 (deftest a-line-that-is-not-a-message-is-skipped
          (let [allocator (malloc-allocator)
                path (scratch allocator "junk.jsonl")
-               inbox (alloc/stack RunInbox)]
+               inbox (primitive/alloc-stack RunInbox)]
            (store! inbox (inbox-open path))
            (match (fs/write-file allocator path "not json at all\n{\"version\":1,\"text\":\"real\"}\n")
              (Ok [written] 0)

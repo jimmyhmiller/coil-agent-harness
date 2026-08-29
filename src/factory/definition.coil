@@ -1,5 +1,7 @@
 (module harness-factory-definition)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.fs" :as fs)
@@ -68,14 +70,14 @@
   (FactoryLoaded [(definition FactoryDefinition)])
   (FactoryInvalid [(message (slice u8))]))
 
-(defn factory-read-file [(allocator (ptr Allocator))
+(defn factory-read-file [(allocator (dyn Allocator))
                          (directory (slice u8))
                          (relative (slice u8))] (-> (slice u8))
   (match (fs/read-file allocator (path-join allocator directory relative))
     (Ok [owned] owned)
     (Err [failure] "")))
 
-(defn factory-load-string-files! [(allocator (ptr Allocator))
+(defn factory-load-string-files! [(allocator (dyn Allocator))
                                   (directory (slice u8))
                                   (paths Json)
                                   (output (mut (ArrayList (slice u8))))] (-> bool)
@@ -98,7 +100,7 @@
                         (_ (set! ok false)))))
             (load ok)))))
 
-(defn factory-add-worker! [(allocator (ptr Allocator))
+(defn factory-add-worker! [(allocator (dyn Allocator))
                            (directory (slice u8))
                            (file (slice u8))
                            (provider (slice u8))
@@ -108,7 +110,7 @@
                            (after Json)
                            (workers (mut (ArrayList FactoryWorker)))] (-> bool)
   (let [instructions (factory-read-file allocator directory file)
-        worker (alloc/stack FactoryWorker)]
+        worker (primitive/alloc-stack FactoryWorker)]
     (set! (.file worker) file)
     (set! (.instructions worker) instructions)
     (set! (.provider worker) provider)
@@ -126,7 +128,7 @@
             false
             (do (al-push! [FactoryWorker] (mut workers) (load worker)) true)))))
 
-(defn factory-load-workers! [(allocator (ptr Allocator))
+(defn factory-load-workers! [(allocator (dyn Allocator))
                              (directory (slice u8))
                              (entries Json)
                              (workers (mut (ArrayList FactoryWorker)))] (-> bool)
@@ -173,7 +175,7 @@
                         (set! i (+ (load i) 1)))))
             (load ok)))))
 
-(defn load-factory-definition [(allocator (ptr Allocator))
+(defn load-factory-definition [(allocator (dyn Allocator))
                                (directory (slice u8))] (-> FactoryDefinitionResult)
   (let [manifest-text (factory-read-file allocator directory "factory.json")]
     (if (= (slice-len [u8] manifest-text) 0)

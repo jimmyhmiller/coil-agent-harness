@@ -1,5 +1,7 @@
 (module harness-model-catalog-test)
 
+(import "coil.primitive" :as primitive)
+
 (import "coil.alloc" :as alloc :use *)
 (import "coil.match" :use *)
 (import "coil.slice" :use *)
@@ -59,6 +61,18 @@
            ;; than claiming the first row is already selected.
            (assert-eq (model-catalog-find (mut catalog) "claude" "claude-not-real") -1)))
 
+(deftest ox-alpha-is-a-routable-openrouter-default
+         (let [allocator (malloc-allocator)
+               (mut empty-config) (provider-config-new allocator)
+               (mut catalog) (model-catalog-default allocator)]
+           (assert (route-known-provider? "openrouter" (mut empty-config)))
+           (assert (= (route-default-model "openrouter" (mut empty-config))
+                      "stealth/ox-alpha"))
+           (assert (>= (model-catalog-find (mut catalog)
+                                           "openrouter"
+                                           "stealth/ox-alpha")
+                       0))))
+
 ;; A model flagged as taking no effort must not carry a level, or the picker
 ;; would send a parameter the provider rejects.
 (deftest models-without-effort-default-to-none
@@ -83,7 +97,7 @@
          (let [(mut i) 0]
            (loop (if (>= (load i) EFFORT_CHOICE_COUNT)
                      (break)
-                     (let [choice (alloc/stack EffortChoice)]
+                     (let [choice (primitive/alloc-stack EffortChoice)]
                        (store! choice (effort-choice-at (load i)))
                        (assert-eq (effort-index (load (field choice effort))) (load i))
                        (assert (= (load (field choice effort)) (load (field choice label))))
@@ -108,7 +122,7 @@
                      (let [choice (model-catalog-at (mut catalog) (load i))]
                        (when (load (field choice effort))
                          (let [at (effort-index (load (field choice default-effort)))
-                               shown (alloc/stack EffortChoice)]
+                               shown (primitive/alloc-stack EffortChoice)]
                            (assert (and (>= at 0) (< at EFFORT_CHOICE_COUNT)))
                            (store! shown (effort-choice-at at))
                            (assert (= (load (field shown effort)) (load (field choice default-effort)))))
