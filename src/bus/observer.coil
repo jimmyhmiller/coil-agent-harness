@@ -41,8 +41,8 @@
   (set! (.next-id sink) 1)
   0)
 
-;; Decimal formatting, written out because `int->str` is a comptime primitive
-;; and the message id is built at runtime.
+;;; Decimal formatting, written out because `int->str` is a comptime primitive
+;;; and the message id is built at runtime.
 (defn decimal [(allocator (dyn Allocator)) (value i64)] (-> (slice u8))
   (if (= value 0)
       "0"
@@ -73,7 +73,7 @@
 (defn bus-observer-at [(sink (ptr BusObserverSink)) (index i64)] (-> (ptr Envelope))
   (primitive/index (load (field (field sink queue) data)) index))
 
-;; Remove everything the caller has finished sending.
+;;; Remove everything the caller has finished sending.
 (defn bus-observer-clear! [(sink (ptr BusObserverSink))] (-> i64)
   (let [n (bus-observer-pending sink)
         (mut i) 0]
@@ -84,9 +84,9 @@
                 (set! i (+ (load i) 1)))))
     n))
 
-;; Drop the oldest entry to make room. Oldest rather than newest because a
-;; subscriber that fell behind is better served by recent state than by a stale
-;; prefix it can no longer act on.
+;;; Drop the oldest entry to make room. Oldest rather than newest because a
+;;; subscriber that fell behind is better served by recent state than by a stale
+;;; prefix it can no longer act on.
 (defn drop-oldest! [(sink (ptr BusObserverSink))] (-> i64)
   (let [n (bus-observer-pending sink)
         (mut i) 1]

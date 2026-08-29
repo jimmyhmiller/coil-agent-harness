@@ -63,9 +63,9 @@
                                 (unix-transport-adopt! server (load accepted))
                                 true))))))))))
 
-;; Move everything the observer queued onto the subscriber's transport. This is
-;; the loop a real server runs; keeping it in the test until it earns a module
-;; keeps the shape honest.
+;;; Move everything the observer queued onto the subscriber's transport. This is
+;;; the loop a real server runs; keeping it in the test until it earns a module
+;;; keeps the shape honest.
 (defn drain-to-subscriber! [(sink (ptr BusObserverSink))
                             (router (ptr Router))
                             (codec (dyn Codec))
@@ -98,7 +98,7 @@
     (bus-observer-clear! sink)
     (load sent)))
 
-;; Read one envelope back off the wire and report the `event` field of its body.
+;;; Read one envelope back off the wire and report the `event` field of its body.
 (defn receive-event-kind [(transport (ptr UnixTransport))
                           (codec (dyn Codec))
                           (allocator (dyn Allocator))] (-> (slice u8))

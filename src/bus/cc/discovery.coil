@@ -39,9 +39,9 @@
 (import "harness-bus-cc-address" :use *)
 (import "harness-bus-cc-realm" :use *)
 
-;; A peer as we found it. Everything below `alive` comes from the session file
-;; and is absent for an unregistered peer, which is a normal and supported
-;; state rather than a degraded one.
+;;; A peer as we found it. Everything below `alive` comes from the session file
+;;; and is absent for an unregistered peer, which is a normal and supported
+;;; state rather than a degraded one.
 (defstruct CcPeer
   [(socket-path (slice u8))
    (address (slice u8))
@@ -78,26 +78,26 @@
 ;; Liveness
 ;; ---------------------------------------------------------------------------
 
-;; `socket-error-code` encodes a connect failure as 600 + errno. Going through
-;; that stable numbering rather than matching the sum is the same choice
-;; unix_transport.coil makes, and for the same reason: it keeps working as
-;; variants are added.
+;;; `socket-error-code` encodes a connect failure as 600 + errno. Going through
+;;; that stable numbering rather than matching the sum is the same choice
+;;; unix_transport.coil makes, and for the same reason: it keeps working as
+;;; variants are added.
 (const SOCKET_CONNECT_FAILED_BASE 600)
 (const ERRNO_EBUSY 16)
 
-;; True when something is listening on `socket-path`.
-;;
-;; A busy listener counts as alive. That distinction is not pedantic: a session
-;; under load is exactly the one you most want to find, and reporting it dead
-;; would make peers flicker out of the roster precisely when they are working.
-;;
-;; Known limitation: `unix-connect` blocks, so this cannot impose the reference
-;; client's 250 ms probe timeout. For a local unix socket connect resolves in
-;; the kernel without a round trip -- it either finds a listener or does not --
-;; so there is no network delay to bound. The case that could still stall is a
-;; listener whose backlog is full on a platform that blocks rather than
-;; returning EBUSY. That needs a non-blocking connect to fix properly, and it is
-;; not worth a partial fix that only looks like one.
+;;; True when something is listening on `socket-path`.
+;;;
+;;; A busy listener counts as alive. That distinction is not pedantic: a session
+;;; under load is exactly the one you most want to find, and reporting it dead
+;;; would make peers flicker out of the roster precisely when they are working.
+;;;
+;;; Known limitation: `unix-connect` blocks, so this cannot impose the reference
+;;; client's 250 ms probe timeout. For a local unix socket connect resolves in
+;;; the kernel without a round trip -- it either finds a listener or does not --
+;;; so there is no network delay to bound. The case that could still stall is a
+;;; listener whose backlog is full on a platform that blocks rather than
+;;; returning EBUSY. That needs a non-blocking connect to fix properly, and it is
+;;; not worth a partial fix that only looks like one.
 (defn cc-probe-alive? [(allocator (dyn Allocator)) (socket-path (slice u8))] (-> bool)
   (let [connection (primitive/alloc-stack socket/UnixConnection)]
     (match (socket/unix-connect connection socket-path)
@@ -121,9 +121,9 @@
     (None [] fallback)
     (Some [text] text)))
 
-;; Overlay a session file's metadata onto a peer we already found by socket.
-;; Returns false when the file is missing or unreadable, which leaves the peer
-;; usable -- it just stays anonymous.
+;;; Overlay a session file's metadata onto a peer we already found by socket.
+;;; Returns false when the file is missing or unreadable, which leaves the peer
+;;; usable -- it just stays anonymous.
 (defn cc-apply-session-file! [(allocator (dyn Allocator))
                               (path (slice u8))
                               (peer (ptr CcPeer))] (-> bool)
@@ -147,8 +147,8 @@
 ;; Enumeration
 ;; ---------------------------------------------------------------------------
 
-;; `<pid>.sock` -> pid, or -1 when the name is not one of ours to interpret.
-;; A foreign file in the socket directory is skipped rather than guessed at.
+;;; `<pid>.sock` -> pid, or -1 when the name is not one of ours to interpret.
+;;; A foreign file in the socket directory is skipped rather than guessed at.
 (defn cc-pid-from-socket-name [(name (slice u8))] (-> i64)
   (let [n (slice-len [u8] name)
         suffix-length 5]
@@ -169,11 +169,11 @@
                       (set! i (+ (load i) 1)))))
           (if (load ok) (load value) -1)))))
 
-;; Every peer with a socket in the socket directory.
-;;
-;; `include-dead` keeps entries that failed the probe, which is what a reaper
-;; or a diagnostic listing wants; ordinary callers pass false and get only peers
-;; they can actually reach.
+;;; Every peer with a socket in the socket directory.
+;;;
+;;; `include-dead` keeps entries that failed the probe, which is what a reaper
+;;; or a diagnostic listing wants; ordinary callers pass false and get only peers
+;;; they can actually reach.
 (defn cc-discover [(realm (ptr CcRealm))
                    (allocator (dyn Allocator))
                    (include-dead bool)] (-> (ArrayList CcPeer))
@@ -218,8 +218,8 @@
     (sb-push-str! (mut buffer) ".json")
     (sb-finish! (mut buffer))))
 
-;; Read a whole file, or None. Wrapped because a missing session file is the
-;; common case, not an exception.
+;;; Read a whole file, or None. Wrapped because a missing session file is the
+;;; common case, not an exception.
 (defn fs-read [(allocator (dyn Allocator)) (path (slice u8))] (-> (Option (slice u8)))
   (match (fs/read-file allocator path)
     (Err [failure] (None [(slice u8)]))
@@ -235,8 +235,8 @@
     (cc-push-decimal! (mut buffer) value)
     (= text (sb-str (load buffer)))))
 
-;; Does `query` name this peer? Matches the reference client's resolution
-;; order: exact name, pid, session id, then name prefix.
+;;; Does `query` name this peer? Matches the reference client's resolution
+;;; order: exact name, pid, session id, then name prefix.
 (defn cc-peer-matches? [(peer (ptr CcPeer)) (query (slice u8))] (-> bool)
   (or (or (= (.name peer) query)
           (cc-decimal-eq? query (.pid peer)))
@@ -244,11 +244,11 @@
           (and (> (slice-len [u8] (.name peer)) 0)
                (starts-with (.name peer) query)))))
 
-;; Resolve `query` to a socket path.
-;;
-;; A raw `uds:` address or absolute path skips the roster entirely, which is
-;; deliberate: reachability never depended on registration, so neither should
-;; addressing. Returns an empty slice when nothing matches.
+;;; Resolve `query` to a socket path.
+;;;
+;;; A raw `uds:` address or absolute path skips the roster entirely, which is
+;;; deliberate: reachability never depended on registration, so neither should
+;;; addressing. Returns an empty slice when nothing matches.
 (defn cc-resolve [(realm (ptr CcRealm))
                   (allocator (dyn Allocator))
                   (query (slice u8))] (-> (slice u8))
@@ -270,11 +270,11 @@
                     (set! i (+ (load i) 1)))))
         (load found))))
 
-;; Remove session files whose socket is gone and whose process is gone.
-;;
-;; Both conditions, not either: a live process that has not yet bound its socket
-;; is starting up, and unlinking its entry would make a session that is about to
-;; be reachable disappear from every roster. Returns the number reaped.
+;;; Remove session files whose socket is gone and whose process is gone.
+;;;
+;;; Both conditions, not either: a live process that has not yet bound its socket
+;;; is starting up, and unlinking its entry would make a session that is about to
+;;; be reachable disappear from every roster. Returns the number reaped.
 (defn cc-reap-stale! [(realm (ptr CcRealm)) (allocator (dyn Allocator))] (-> i64)
   (let [sessions-dir (.sessions-dir realm)
         socket-dir (.socket-dir realm)
@@ -317,6 +317,6 @@
     (sb-push-str! (mut buffer) ".sock")
     (sb-finish! (mut buffer))))
 
-;; Signal 0: ask whether the pid exists without disturbing it.
+;;; Signal 0: ask whether the pid exists without disturbing it.
 (defn process-alive? [(pid i64)] (-> bool)
   (= (cast i64 (os/kill (cast i32 pid) 0)) 0))

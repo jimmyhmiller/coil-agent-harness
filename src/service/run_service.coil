@@ -64,8 +64,8 @@
                                  (provider-name (slice u8))] (-> i64)
   (prepare-durable-provider (.controller service) provider-name))
 
-;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
-;; by value through a trait object is not ABI-stable across Coil backends.
+;;; Dynamic calls use pointers for aggregate JSON values. Passing a sum aggregate
+;;; by value through a trait object is not ABI-stable across Coil backends.
 (defn service-start-durable-run [(service (ptr RunService)) (command Json)] (-> i64)
   (let [command-ref (primitive/alloc-stack Json)]
     (set! command-ref command)
@@ -341,9 +341,9 @@
                                                  "run_exists"
                                                  "run_id already exists")))))))))))
 
-;; Rebuild a semantic conversation from durable events. The service, rather than
-;; a particular client, owns history and provider continuation handles. This also
-;; makes an explicit conversation_id resumable after a process restart.
+;;; Rebuild a semantic conversation from durable events. The service, rather than
+;;; a particular client, owns history and provider continuation handles. This also
+;;; makes an explicit conversation_id resumable after a process restart.
 (defn service-conversation-exists? [(events (ref (ArrayList Json)))
                                     (conversation-id (slice u8))] (-> bool)
   (let [(mut i) 0
@@ -557,8 +557,8 @@
                   0)
                 0)))))))
 
-;; Transport-neutral run submission shared by HTTP, the TUI, and orchestration
-;; tools. Every caller receives the same actor, agent, routing, and admission rules.
+;;; Transport-neutral run submission shared by HTTP, the TUI, and orchestration
+;;; tools. Every caller receives the same actor, agent, routing, and admission rules.
 (defn service-inherit-parent-route! [(service (ptr RunService))
                                      (command (mut Json))] (-> i64)
   (let [allocator (load (field service allocator))
@@ -774,8 +774,8 @@
             (and (> (slice-len [u8] (command-string command "run_id")) 0)
                  (> (slice-len [u8] (command-string command field-name)) 0)))))
 
-;; Zero means unseen, one requested, two applied, and three rejected. Intervention
-;; idempotency is based on the completed state, not merely the first audit record.
+;;; Zero means unseen, one requested, two applied, and three rejected. Intervention
+;;; idempotency is based on the completed state, not merely the first audit record.
 (defn supervisor-intervention-state [(events (ref (ArrayList Json)))
                                      (command-id (slice u8))] (-> i64)
   (let [(mut state) 0
@@ -947,8 +947,8 @@
                     (set! i (+ (load i) 1))))))
     (load found)))
 
-;; Recover all durable runs once at service startup. Queued work is safe to launch
-;; because no run.started fact exists. In-flight work is never replayed blindly.
+;;; Recover all durable runs once at service startup. Queued work is safe to launch
+;;; because no run.started fact exists. In-flight work is never replayed blindly.
 (defn service-recover-runs! [(service (ptr RunService))] (-> i64)
   (let [allocator (load (field service allocator))
         recovery (service-recover-into service allocator)]
@@ -1395,8 +1395,8 @@
                       (json-put-string! (mut body) "status" "recorded")
                       (service-response 202 (load body))))))))))
 
-;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
-;; request into this value and serialize the returned status/body.
+;;; Versioned transport-neutral HTTP routing. A socket server only needs to parse one
+;;; request into this value and serialize the returned status/body.
 (defn service-tool-plane-unavailable [(allocator (dyn Allocator))] (-> ServiceResponse)
   (service-error allocator 501 "tool_plane_unavailable"
                  "this service is not backed by a tool registry"))

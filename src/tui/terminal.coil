@@ -22,9 +22,9 @@
 
 (defn terminal-os-pick [(linux Code) (darwin Code)] (-> Code)
   (if (primitive/code-eq (primitive/target-os) `linux) linux darwin))
-;; hygiene: these platform constants intentionally enter this module's public
-;; namespace -- the code below refers to them by hand, so the generator publishes
-;; the bare name explicitly rather than leaving it in its own template context.
+;;; hygiene: these platform constants intentionally enter this module's public
+;;; namespace -- the code below refers to them by hand, so the generator publishes
+;;; the bare name explicitly rather than leaving it in its own template context.
 (defn terminal--public-name [(name Code)] (-> Code)
   (primitive/syntax->datum name))
 (defn terminal-platform-constants [] (-> Code)
@@ -35,8 +35,8 @@
      (const ~(terminal--public-name `TUI_TIOCGWINSZ) ~(terminal-os-pick `21523 `1074295912))))
 (meta (terminal-platform-constants))
 
-;; libc owns the platform-specific termios layout. The storage is deliberately
-;; opaque, aligned, and larger than the public structure on supported POSIX hosts.
+;;; libc owns the platform-specific termios layout. The storage is deliberately
+;;; opaque, aligned, and larger than the public structure on supported POSIX hosts.
 (defstruct TerminalAttributes [(storage (array u64 32))])
 
 (defstruct TerminalWindowSize
@@ -54,7 +54,7 @@
    (columns i64)
    (rows i64)])
 
-;; color-mode: -1 auto, 0 disabled, 1 explicitly enabled.
+;;; color-mode: -1 auto, 0 disabled, 1 explicitly enabled.
 (defstruct TerminalOverrides
   [(force-plain bool)
    (screen-reader bool)

@@ -23,10 +23,10 @@
 (import "harness-tui-cells" :use *)
 (import "harness-tui-frame" :use *)
 
-;; How a language spells its line comment, and whether it uses lisp-style quoting.
-;; Block comments are deliberately absent: they span lines, and a streaming block
-;; can be cut anywhere, so a `/*` with no `*/` yet would swallow the rest of the
-;; visible answer.
+;;; How a language spells its line comment, and whether it uses lisp-style quoting.
+;;; Block comments are deliberately absent: they span lines, and a streaming block
+;;; can be cut anywhere, so a `/*` with no `*/` yet would swallow the rest of the
+;;; visible answer.
 (defsum CommentStyle
   (CommentHash [])
   (CommentSlash [])
@@ -38,8 +38,8 @@
    (comment CommentStyle)
    (keywords (slice u8))])
 
-;; Keyword sets are space-delimited strings rather than arrays so a language is
-;; one line to add and impossible to get half-initialised.
+;;; Keyword sets are space-delimited strings rather than arrays so a language is
+;;; one line to add and impossible to get half-initialised.
 (const SYNTAX_KEYWORDS_C
        " if else for while do return break continue switch case default struct enum union typedef const static void int char long short float double unsigned signed sizeof goto extern inline ")
 (const SYNTAX_KEYWORDS_JS
@@ -55,9 +55,9 @@
 (const SYNTAX_KEYWORDS_SQL
        " select from where insert into values update set delete create table drop alter add index join left right inner outer on group by order having limit offset union distinct as and or not null ")
 
-;; Unknown languages get a union of the most common control-flow words. This is a
-;; guess and is meant to look like one: it highlights less than a real set would,
-;; rather than mislabelling identifiers as keywords.
+;;; Unknown languages get a union of the most common control-flow words. This is a
+;;; guess and is meant to look like one: it highlights less than a real set would,
+;;; rather than mislabelling identifiers as keywords.
 (const SYNTAX_KEYWORDS_GENERIC
        " if else for while do return break continue function class import export const let var def fn true false null nil None ")
 
@@ -70,8 +70,8 @@
     (set! (.keywords language) keywords)
     (load language)))
 
-;; Resolve a fence info string. Only the first word matters, so ```python title=x
-;; still resolves to python.
+;;; Resolve a fence info string. Only the first word matters, so ```python title=x
+;;; still resolves to python.
 (defn syntax-language [(info (slice u8))] (-> SyntaxLanguage)
   (cond (or (= info "c") (or (= info "cpp") (or (= info "c++") (= info "h"))))
           (syntax-language-new "c" (CommentSlash) SYNTAX_KEYWORDS_C)
@@ -101,8 +101,8 @@
 (defn syntax-word? [(byte u8)] (-> bool)
   (or (syntax-alpha? byte) (syntax-digit? byte)))
 
-;; Membership test against the space-delimited keyword string. Both sides are
-;; wrapped in spaces so `in` cannot match inside `int`.
+;;; Membership test against the space-delimited keyword string. Both sides are
+;;; wrapped in spaces so `in` cannot match inside `int`.
 (defn syntax-keyword? [(allocator (dyn Allocator))
                        (language (ref SyntaxLanguage))
                        (word (slice u8))] (-> bool)
@@ -142,9 +142,9 @@
     0)
   0)
 
-;; Classify one line into styled spans. Lines are independent: no state carries
-;; across them, which is what makes a partially streamed block safe to render and
-;; re-render as it grows.
+;;; Classify one line into styled spans. Lines are independent: no state carries
+;;; across them, which is what makes a partially streamed block safe to render and
+;;; re-render as it grows.
 (defn syntax-highlight-line [(allocator (dyn Allocator))
                              (language (ref SyntaxLanguage))
                              (line (slice u8))] (-> (ArrayList FrameSpan))

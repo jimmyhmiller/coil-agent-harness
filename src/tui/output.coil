@@ -15,8 +15,8 @@
 (import "harness-tui-terminal" :use *)
 (import "harness-tui-terminal-operation" :use *)
 
-;; Application code submits frames and output intents here. This module and the
-;; renderer/driver layers are the only TUI code that writes presentation bytes.
+;;; Application code submits frames and output intents here. This module and the
+;;; renderer/driver layers are the only TUI code that writes presentation bytes.
 (defn tui-output-write-slice [(fd i64) (value (slice u8))] (-> i64)
   (let [writer (primitive/alloc-stack io/Writer)]
     (match (io/write-all (io/fd-writer writer fd)
@@ -66,9 +66,9 @@
                 (set! at (+ (load at) 1)))))
     0))
 
-;; A repaint walks the cursor across every row it rewrites. Hiding it for the
-;; duration means the terminal never draws that walk, which is what stops the
-;; block cursor skittering around during a stream.
+;;; A repaint walks the cursor across every row it rewrites. Hiding it for the
+;;; duration means the terminal never draws that walk, which is what stops the
+;;; block cursor skittering around during a stream.
 (defn tui-output-inline-update! [(renderer (ptr InlineRenderer))
                                  (allocator (dyn Allocator))
                                  (profile (ref TerminalProfile))

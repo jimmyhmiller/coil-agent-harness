@@ -8,8 +8,8 @@
 (import "coil.match" :use *)
 (import "harness-tui-model" :use *)
 
-;; Commitment is a renderer policy projected from semantic state. It is not stored
-;; on presentation blocks because a future renderer may retain a wider mutable region.
+;;; Commitment is a renderer policy projected from semantic state. It is not stored
+;;; on presentation blocks because a future renderer may retain a wider mutable region.
 (defstruct TranscriptPolicy [(committed-count i64)])
 
 (defn transcript-policy-new [] (-> TranscriptPolicy)
@@ -26,8 +26,8 @@
     (PresentationPending [] false)
     (PresentationRunning [] false)))
 
-;; Only a stable prefix may enter append-only scrollback. A completed later tool
-;; remains live while an earlier assistant block is still streaming.
+;;; Only a stable prefix may enter append-only scrollback. A completed later tool
+;;; remains live while an earlier assistant block is still streaming.
 (defn transcript-advance! [(policy (ptr TranscriptPolicy))
                            (model (ptr PresentationModel))] (-> i64)
   (let [(mut at) (.committed-count policy)

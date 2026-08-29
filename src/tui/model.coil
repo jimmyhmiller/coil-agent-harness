@@ -13,8 +13,8 @@
 (const PRESENTATION_ASSISTANT_TEXT_LIMIT 1048576)
 (const PRESENTATION_TRUNCATION_NOTICE "\n[output truncated]")
 
-;; Terminal-independent kinds and states. Renderers decide how these concepts look;
-;; journal adapters decide which wire events produce them.
+;;; Terminal-independent kinds and states. Renderers decide how these concepts look;
+;;; journal adapters decide which wire events produce them.
 (defsum PresentationKind
   (UserBlock [])
   (AssistantBlock [])
@@ -47,8 +47,8 @@
    (last-sequence i64)
    (terminal bool)])
 
-;; Adapter output is semantic and contains no color, indentation, cursor position, or
-;; terminal-width decisions.
+;;; Adapter output is semantic and contains no color, indentation, cursor position, or
+;;; terminal-width decisions.
 (defsum PresentationAction
   (IgnoreEvent [])
   (SubmitUser [(id (slice u8)) (text (slice u8))])
@@ -180,9 +180,9 @@
                 0)
               (sb-finish! (mut builder))))))
 
-;; A terminal run event closes every still-open child block. Keeping those blocks
-;; running would be a false semantic state and would also prevent the transcript
-;; policy from committing the terminal result.
+;;; A terminal run event closes every still-open child block. Keeping those blocks
+;;; running would be a false semantic state and would also prevent the transcript
+;;; policy from committing the terminal result.
 (defn presentation-terminalize-open! [(model (ptr PresentationModel))
                                       (state PresentationState)
                                       (detail (slice u8))] (-> i64)

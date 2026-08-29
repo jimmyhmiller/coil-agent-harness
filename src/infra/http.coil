@@ -36,9 +36,9 @@
    (body (slice u8))
    (error (slice u8))])
 
-;; Providers depend on this narrow streaming boundary rather than libcurl. Request
-;; and response aggregates cross dynamic dispatch by pointer to keep the ABI stable
-;; and to make complete byte-stream behavior injectable in contract tests.
+;;; Providers depend on this narrow streaming boundary rather than libcurl. Request
+;;; and response aggregates cross dynamic dispatch by pointer to keep the ABI stable
+;;; and to make complete byte-stream behavior injectable in contract tests.
 (deftrait StreamingHttpTransport [Self]
   (send-streaming-http [(self (ptr Self))
                         (allocator (dyn Allocator))
@@ -56,15 +56,15 @@
 (defn discard-http-chunk [(data (ptr u8)) (len usize) (context (ptr i8))] (-> usize)
   len)
 
-;; Adapts the harness chunk sink to `coil.http.client`'s `BodySink`, and keeps the
-;; capped copy of the body that the client does not: `request-stream` delivers
-;; bytes and never buffers them, while `HttpResponse.body` is still expected to
-;; hold the transcript up to `max-captured-bytes`.
-;;
-;; A harness sink reports how many bytes it accepted, and anything short of the
-;; whole chunk is how it asks to stop — that is what `BODY-STOP` means here. The
-;; bytes are transport-owned and only valid for this call, which is why the
-;; retained copy is made before the sink is given a chance to stop.
+;;; Adapts the harness chunk sink to `coil.http.client`'s `BodySink`, and keeps the
+;;; capped copy of the body that the client does not: `request-stream` delivers
+;;; bytes and never buffers them, while `HttpResponse.body` is still expected to
+;;; hold the transcript up to `max-captured-bytes`.
+;;;
+;;; A harness sink reports how many bytes it accepted, and anything short of the
+;;; whole chunk is how it asks to stop — that is what `BODY-STOP` means here. The
+;;; bytes are transport-owned and only valid for this call, which is why the
+;;; retained copy is made before the sink is given a chance to stop.
 (defn capture-streaming-chunk [(data (ptr u8))
                                (length i64)
                                (opaque (ptr i8))] (-> i64)
@@ -118,7 +118,7 @@
                 (set! i (+ (load i) 1)))))
     (al-into-slice [client/Header] (mut headers))))
 
-;; Adapt the harness's existing POST shape to Coil's supported HTTP client.
+;;; Adapt the harness's existing POST shape to Coil's supported HTTP client.
 (defn http-post [(allocator (dyn Allocator)) (request (ptr HttpRequest))] (-> HttpResponse)
   (let [headers (request-headers allocator (load (field request headers)))
         native-request (primitive/alloc-stack client/Request)
@@ -145,11 +145,11 @@
              (set! (.error result) "HTTP transport failed"))))
     (load result)))
 
-;; Incremental transport for provider SSE, on `coil.http.client/request-stream`.
-;;
-;; The retained body is still ours to build: the client hands bytes to the sink
-;; and buffers nothing, so `capture-streaming-chunk` keeps the capped copy that
-;; `HttpResponse.body` promises.
+;;; Incremental transport for provider SSE, on `coil.http.client/request-stream`.
+;;;
+;;; The retained body is still ours to build: the client hands bytes to the sink
+;;; and buffers nothing, so `capture-streaming-chunk` keeps the capped copy that
+;;; `HttpResponse.body` promises.
 (defn http-post-stream [(allocator (dyn Allocator))
                         (request (ptr HttpRequest))] (-> HttpResponse)
   (let [headers (request-headers allocator (load (field request headers)))

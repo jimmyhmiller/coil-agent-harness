@@ -11,8 +11,8 @@
 (import "harness-system" :use *)
 (import "provider-common" :use *)
 
-;; Dynamic trait objects require a real data address. A zero-sized boxed provider
-;; can become an invalid dyn.data target under optimization.
+;;; Dynamic trait objects require a real data address. A zero-sized boxed provider
+;;; can become an invalid dyn.data target under optimization.
 (defstruct TuiFixtureProvider [(reserved u8)])
 
 (defn tui-fixture-event [(emitter (ptr EventEmitter))

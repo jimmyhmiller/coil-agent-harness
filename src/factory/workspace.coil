@@ -31,8 +31,8 @@
 
 (defstruct GitOutcome [(code i64) (message (slice u8))])
 
-;; Run git in a directory. Argv, not shell source, so nothing in a path can be
-;; read as a command; what git said is copied out before the run result is freed.
+;;; Run git in a directory. Argv, not shell source, so nothing in a path can be
+;;; read as a command; what git said is copied out before the run result is freed.
 (defn git-in [(allocator (dyn Allocator))
               (directory (slice u8))
               (args (slice (slice u8)))] (-> GitOutcome)
@@ -67,8 +67,8 @@
             0)))
     (load outcome)))
 
-;; Is this directory inside a git working tree? Only then is there anything to
-;; isolate a run from.
+;;; Is this directory inside a git working tree? Only then is there anything to
+;;; isolate a run from.
 (defn git-checkout? [(allocator (dyn Allocator)) (directory (slice u8))] (-> bool)
   (let [args (primitive/alloc-stack (array (slice u8) 2))]
     (set! (index args 0) "rev-parse")
@@ -77,10 +77,10 @@
           code (.code outcome)]
       (= code 0))))
 
-;; Where a run works, and what it must say when it cannot get there. An empty
-;; `message` means this is usable; a non-empty one is the reason the run must not
-;; start, because the alternative — falling back to the checkout itself — is the
-;; exact thing this exists to prevent.
+;;; Where a run works, and what it must say when it cannot get there. An empty
+;;; `message` means this is usable; a non-empty one is the reason the run must not
+;;; start, because the alternative — falling back to the checkout itself — is the
+;;; exact thing this exists to prevent.
 (defstruct IsolatedWorkspace
   [(directory (slice u8))
    (branch (slice u8))
@@ -100,9 +100,9 @@
     (set! (.message out) (sb-finish! (mut text)))
     (load out)))
 
-;; Worktrees live beside the harness's other run-owned directories, never inside
-;; the checkout: a run leaves nothing at all in the project it works on, not even
-;; an ignored directory.
+;;; Worktrees live beside the harness's other run-owned directories, never inside
+;;; the checkout: a run leaves nothing at all in the project it works on, not even
+;;; an ignored directory.
 (const FACTORY_WORKTREE_DIRECTORY ".factory-worktrees")
 
 (defn factory-worktree-root [(allocator (dyn Allocator))] (-> (slice u8))
@@ -118,10 +118,10 @@
     (sb-push-str! (mut text) (json-stringify allocator (json-integer allocator (now-ms))))
     (sb-finish! (mut text))))
 
-;; The workspace a run actually gets. A directory that is not a checkout is
-;; handed back untouched — a scratch workspace is already nobody's working copy —
-;; and a checkout becomes a fresh worktree of itself, on a branch of its own,
-;; outside the checkout so that nothing appears inside it at all.
+;;; The workspace a run actually gets. A directory that is not a checkout is
+;;; handed back untouched — a scratch workspace is already nobody's working copy —
+;;; and a checkout becomes a fresh worktree of itself, on a branch of its own,
+;;; outside the checkout so that nothing appears inside it at all.
 (defn isolate-workspace [(allocator (dyn Allocator))
                          (requested (slice u8))
                          (factory-name (slice u8))
@@ -156,10 +156,10 @@
                     (load out))
                   (isolation-failed allocator requested (.message outcome)))))))))
 
-;; What the run did, recorded where it can be reviewed. A worker finishing is the
-;; moment its work exists; leaving it uncommitted means the next worker's tools
-;; can quietly undo it and nobody can see what changed. "nothing to commit" is a
-;; normal answer -- a worker that only read things changed nothing.
+;;; What the run did, recorded where it can be reviewed. A worker finishing is the
+;;; moment its work exists; leaving it uncommitted means the next worker's tools
+;;; can quietly undo it and nobody can see what changed. "nothing to commit" is a
+;;; normal answer -- a worker that only read things changed nothing.
 (defn commit-workspace! [(allocator (dyn Allocator))
                          (workspace (slice u8))
                          (message (slice u8))] (-> bool)
@@ -222,9 +222,9 @@
               (subprocess/run-result-free allocator completed)
               success))))))
 
-;; Copy the entire reusable factory definition into a run-owned location. `cp`
-;; receives paths as argv entries rather than shell source, so names cannot be
-;; interpreted as commands or options.
+;;; Copy the entire reusable factory definition into a run-owned location. `cp`
+;;; receives paths as argv entries rather than shell source, so names cannot be
+;;; interpreted as commands or options.
 (defn snapshot-factory-definition [(allocator (dyn Allocator))
                                    (source (slice u8))
                                    (workspace (slice u8))] (-> FactorySnapshotResult)

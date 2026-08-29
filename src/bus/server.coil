@@ -28,10 +28,10 @@
 (import "harness-bus-router" :use *)
 (import "harness-bus-observer" :use *)
 
-;; How long to wait for a newly-connected client to send its Subscribe frame.
-;; This is a hard bound, not a hope: without it a client that connects and stays
-;; silent blocks the accept path forever, and once the bus shares a thread with
-;; the run service that means one silent client wedges the whole server.
+;;; How long to wait for a newly-connected client to send its Subscribe frame.
+;;; This is a hard bound, not a hope: without it a client that connects and stays
+;;; silent blocks the accept path forever, and once the bus shares a thread with
+;;; the run service that means one silent client wedges the whole server.
 (const HANDSHAKE_TIMEOUT_MS 2000)
 
 (defstruct Subscriber
@@ -78,8 +78,8 @@
                 (set! i (+ (load i) 1)))))
     (load live)))
 
-;; Decimal formatting for generated subscriber identities. Same reason as in the
-;; observer: `int->str` is comptime-only.
+;;; Decimal formatting for generated subscriber identities. Same reason as in the
+;;; observer: `int->str` is comptime-only.
 (defn subscriber-name [(allocator (dyn Allocator)) (n i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut digits) (al-new [i64] allocator)
@@ -107,8 +107,8 @@
                         (set! i (+ (load i) 1))))))))
     (sb-str (load buffer))))
 
-;; Drop a subscriber: close its socket and stop routing to it. Detaching from
-;; the router rather than deleting the slot keeps existing handles meaningful.
+;;; Drop a subscriber: close its socket and stop routing to it. Detaching from
+;;; the router rather than deleting the slot keeps existing handles meaningful.
 (defn retire-subscriber! [(server (ptr BusServer)) (subscriber (ptr Subscriber))] (-> i64)
   (when (load (field subscriber alive))
     (transport-close! (load (field subscriber transport)))
@@ -116,8 +116,8 @@
     (store! (field subscriber alive) false))
   0)
 
-;; True when `transport` has data to read within the handshake timeout.
-;; The read that follows can then only block on bytes already in flight.
+;;; True when `transport` has data to read within the handshake timeout.
+;;; The read that follows can then only block on bytes already in flight.
 (defn handshake-readable? [(transport (ptr UnixTransport))] (-> bool)
   (try (let [timeout (try-or! (time/duration-millis HANDSHAKE_TIMEOUT_MS) false)]
             (match (selectors/wait-fd-for (load (field (field transport connection) fd))
@@ -126,13 +126,13 @@
               (Err [_] false)
               (Ok [_] true)))))
 
-;; Accept one pending connection and complete its Subscribe handshake.
-;; Returns 1 if a subscriber was added, 0 if nothing was pending, -1 on a
-;; malformed or silent client (which is not a server error).
-;;
-;; `accept-timeout-ms` is how long to wait for a pending connection. A server
-;; sharing a thread with other work passes a small value and polls; a dedicated
-;; accept loop can pass a larger one.
+;;; Accept one pending connection and complete its Subscribe handshake.
+;;; Returns 1 if a subscriber was added, 0 if nothing was pending, -1 on a
+;;; malformed or silent client (which is not a server error).
+;;;
+;;; `accept-timeout-ms` is how long to wait for a pending connection. A server
+;;; sharing a thread with other work passes a small value and polls; a dedicated
+;;; accept loop can pass a larger one.
 (defn bus-server-accept-for! [(server (ptr BusServer))
                               (listener (ptr socket/UnixListener))
                               (accept-timeout-ms i64)] (-> i64)
@@ -188,15 +188,15 @@
                                            ;; what it wanted.
                                            (_ (do (transport-close! transport) -1))))))))))))))
 
-;; Accept with the default handshake timeout, for callers that own the thread.
+;;; Accept with the default handshake timeout, for callers that own the thread.
 (defn bus-server-accept! [(server (ptr BusServer))
                           (listener (ptr socket/UnixListener))] (-> i64)
   (bus-server-accept-for! server listener HANDSHAKE_TIMEOUT_MS))
 
-;; Move every queued envelope onto the subscribers that should receive it.
-;; Returns the number of successful writes. A subscriber whose write fails is
-;; retired rather than retried -- the queue is bounded and a broken socket will
-;; not fix itself, so holding events for it only costs live subscribers.
+;;; Move every queued envelope onto the subscribers that should receive it.
+;;; Returns the number of successful writes. A subscriber whose write fails is
+;;; retired rather than retried -- the queue is bounded and a broken socket will
+;;; not fix itself, so holding events for it only costs live subscribers.
 (defn bus-server-drain! [(server (ptr BusServer))] (-> i64)
   (let [allocator (load (field server allocator))
         observer (load (field server observer))

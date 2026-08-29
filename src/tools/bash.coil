@@ -15,9 +15,9 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-;; Tool output becomes durable model history. Sixteen KiB per stream is enough
-;; for compiler diagnostics while preventing broad discovery commands from
-;; polluting every later turn in the conversation.
+;;; Tool output becomes durable model history. Sixteen KiB per stream is enough
+;;; for compiler diagnostics while preventing broad discovery commands from
+;;; polluting every later turn in the conversation.
 (const BASH_CAPTURE_LIMIT 8192)
 (const BASH_TIMEOUT_MS 120000)
 
@@ -26,9 +26,9 @@
 
 (defstruct BashTool [(cwd (slice u8))])
 
-;; Model and journal strings must be UTF-8. Process pipes are byte streams, so a
-;; command such as `cat executable` may return arbitrary bytes. Keep those bytes
-;; in the artifact and replace only the inline preview with a useful explanation.
+;;; Model and journal strings must be UTF-8. Process pipes are byte streams, so a
+;;; command such as `cat executable` may return arbitrary bytes. Keep those bytes
+;;; in the artifact and replace only the inline preview with a useful explanation.
 (defn bash-text-output? [(value (slice u8))] (-> bool)
   (let [(mut at) 0
         count (slice-len [u8] value)

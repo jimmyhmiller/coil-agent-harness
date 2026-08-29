@@ -15,8 +15,8 @@
 (import "harness-system" :use *)
 (import "harness-tool" :use *)
 
-;; Retains the operation that crashed in codex-thread-start-request after the
-;; production path stopped cloning immutable registry schemas.
+;;; Retains the operation that crashed in codex-thread-start-request after the
+;;; production path stopped cloning immutable registry schemas.
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
         domain (allocation-domain-open owner)

@@ -401,12 +401,12 @@
              (assert-eq (atomic-load events) 2)
              (assert-eq (atomic-load terminals) 1))))
 
-;; Talking to a run that is already going.
-;;
-;; The provider speaks into its own inbox on the first turn, the way a person
-;; would while watching, and checks on the second turn that what it said arrived
-;; in the conversation. Nothing here goes near a model: this is about whether the
-;; loop looks, and whether what it finds reaches the request the provider sees.
+;;; Talking to a run that is already going.
+;;;
+;;; The provider speaks into its own inbox on the first turn, the way a person
+;;; would while watching, and checks on the second turn that what it said arrived
+;;; in the conversation. Nothing here goes near a model: this is about whether the
+;;; loop looks, and whether what it finds reaches the request the provider sees.
 (defstruct SpeakingProvider
   [(calls (ptr i64))
    (heard (ptr i64))

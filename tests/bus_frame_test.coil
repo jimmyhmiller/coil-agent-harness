@@ -63,7 +63,7 @@
                      length))
   (transport-close! [(self (ptr ChunkedTransport))] (-> i64) 0))
 
-;; Write one frame, read it back, and report whether the payload survived.
+;;; Write one frame, read it back, and report whether the payload survived.
 (defn round-trip-payload? [(chunk i64) (payload (slice u8))] (-> bool)
   (let [allocator (malloc-allocator)
         transport (primitive/alloc-stack ChunkedTransport)

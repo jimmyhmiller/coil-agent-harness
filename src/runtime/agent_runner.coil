@@ -32,8 +32,8 @@
 (const RUN_LIFECYCLE_CANCELLING 3)
 (const RUN_LIFECYCLE_TERMINAL 4)
 
-;; Caller-owned request/provider dependencies must outlive the handle. The job itself
-;; is allocator-owned and its completion flag is safe to poll from another thread.
+;;; Caller-owned request/provider dependencies must outlive the handle. The job itself
+;;; is allocator-owned and its completion flag is safe to poll from another thread.
 (defstruct AgentRunJob
   [(allocator (dyn Allocator))
    (provider (ptr (dyn ModelProvider)))
@@ -98,10 +98,10 @@
                   (json-stringify allocator (json-integer allocator turn)))
     (sb-finish! (mut value))))
 
-;; Notification registration is the terminal action of an asynchronous setup
-;; turn. Starts must continue through the model once so it can compose their
-;; returned handles into notify_async; after that registration, another provider
-;; round trip merely to say "registered" would keep the TUI busy unnecessarily.
+;;; Notification registration is the terminal action of an asynchronous setup
+;;; turn. Starts must continue through the model once so it can compose their
+;;; returned handles into notify_async; after that registration, another provider
+;;; round trip merely to say "registered" would keep the TUI busy unnecessarily.
 (defn async-delegation-batch? [(calls (ptr (ArrayList ToolCall)))
                                (results (ptr (ArrayList ToolResult)))] (-> bool)
   (let [count (al-len [ToolCall] (load calls))
@@ -144,11 +144,11 @@
     (set! (.retryable failure) false)
     (ModelErr (load failure))))
 
-;; A run deadline is opt-in: zero means the run has none, and that is the normal
-;; case. The runner deliberately does NOT synthesise one from `timeout-ms` --
-;; that field bounds a single HTTP request, and borrowing it as a run budget is
-;; what used to fail long tasks. When there is no deadline this predicate is
-;; false forever and the run ends only by finishing, failing, or cancellation.
+;;; A run deadline is opt-in: zero means the run has none, and that is the normal
+;;; case. The runner deliberately does NOT synthesise one from `timeout-ms` --
+;;; that field bounds a single HTTP request, and borrowing it as a run budget is
+;;; what used to fail long tasks. When there is no deadline this predicate is
+;;; false forever and the run ends only by finishing, failing, or cancellation.
 (defn request-deadline-expired? [(request (ptr ModelRequest))] (-> bool)
   (let [deadline (.deadline-monotonic-ms request)]
     (and (> deadline 0) (= (deadline-remaining-ms deadline 0) 0))))
@@ -173,9 +173,9 @@
                       (JsonString (.message failure)))
     (runner-event emitter request (ModelRequestRetryScheduled) (load payload))))
 
-;; Retry only failures explicitly classified by the provider as transient. The
-;; same request and operation id are reused, so this neither loses continuation
-;; state nor becomes an additional logical model turn.
+;;; Retry only failures explicitly classified by the provider as transient. The
+;;; same request and operation id are reused, so this neither loses continuation
+;;; state nor becomes an additional logical model turn.
 (defn execute-model-with-retry [(allocator (dyn Allocator))
                                 (provider (dyn ModelProvider))
                                 (request (ptr ModelRequest))
@@ -215,11 +215,11 @@
                           (set! done true))))))))
     (load result)))
 
-;; Run the model/tool loop until the model produces no function calls, a provider
-;; fails, or an explicitly configured positive turn limit is reached. Zero means
-;; unlimited, which is the normal policy: an internal loop counter must not turn
-;; unfinished work into a user-visible failure. Provider continuations retain
-;; opaque prior output so reasoning/signature fields are never lost.
+;;; Run the model/tool loop until the model produces no function calls, a provider
+;;; fails, or an explicitly configured positive turn limit is reached. Zero means
+;;; unlimited, which is the normal policy: an internal loop counter must not turn
+;;; unfinished work into a user-visible failure. Provider continuations retain
+;;; opaque prior output so reasoning/signature fields are never lost.
 (defn run-agent [(allocator (dyn Allocator))
                  (provider (dyn ModelProvider))
                  (request (ptr ModelRequest))
@@ -386,8 +386,8 @@
       0)
     (load final)))
 
-;; Keep the turn that just finished. The list is created on first use so a
-;; request that never continues carries nothing.
+;;; Keep the turn that just finished. The list is created on first use so a
+;;; request that never continues carries nothing.
 (defn continuation-remember! [(allocator (dyn Allocator))
                               (continuation (ptr ModelContinuation))
                               (output Json)
@@ -403,16 +403,16 @@
     (al-push! [ContinuationTurn] (load (field continuation turns)) (load turn))
     0))
 
-;; Put what a person said into the conversation, in order.
-;;
-;; Before the first model turn there is nothing to attach it to, so it joins the
-;; prompt as another user message. After that it becomes a turn of its own, which
-;; is what keeps "you said this after the second tool call" true in the
-;; transcript the model reads.
-;; What a person says arrives in the middle of a conversation the model is
-;; already deep in, right after a tool result, where it reads like more context
-;; rather than a change of orders. It is framed so it cannot be mistaken for
-;; either: this is the person watching, and what they just said wins.
+;;; Put what a person said into the conversation, in order.
+;;;
+;;; Before the first model turn there is nothing to attach it to, so it joins the
+;;; prompt as another user message. After that it becomes a turn of its own, which
+;;; is what keeps "you said this after the second tool call" true in the
+;;; transcript the model reads.
+;;; What a person says arrives in the middle of a conversation the model is
+;;; already deep in, right after a tool result, where it reads like more context
+;;; rather than a change of orders. It is framed so it cannot be mistaken for
+;;; either: this is the person watching, and what they just said wins.
 (defn interjection-text [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [(mut framed) (sb-new allocator)]
     (sb-push-str! (mut framed)
@@ -420,15 +420,15 @@
     (sb-push-str! (mut framed) text)
     (sb-finish! (mut framed))))
 
-;; Returns where the message went: 0 into the prompt, because the model has not
-;; said anything yet, and 1 as its own turn in the transcript. The journal
-;; records which, because "the agent ignored me" and "the message went somewhere
-;; the model does not read" look identical from outside.
-;; A person's message is a change of orders, not an aside. Delivering it into the
-;; turn gets it acted on now; adding it to the instructions is what keeps it true
-;; afterwards. Without the second half an agent does the thing it was told and
-;; then drifts back to its original assignment on the next turn, which is worse
-;; than not listening at all.
+;;; Returns where the message went: 0 into the prompt, because the model has not
+;;; said anything yet, and 1 as its own turn in the transcript. The journal
+;;; records which, because "the agent ignored me" and "the message went somewhere
+;;; the model does not read" look identical from outside.
+;;; A person's message is a change of orders, not an aside. Delivering it into the
+;;; turn gets it acted on now; adding it to the instructions is what keeps it true
+;;; afterwards. Without the second half an agent does the thing it was told and
+;;; then drifts back to its original assignment on the next turn, which is worse
+;;; than not listening at all.
 (defn instructions-with-order [(allocator (dyn Allocator))
                                (instructions (slice u8))
                                (raw (slice u8))] (-> (slice u8))
@@ -483,9 +483,9 @@
                   (al-push! [ContinuationTurn] turns (load turn))
                   1)))))))
 
-;; Everything a person has said since the last turn. Draining here, immediately
-;; before the model is asked anything, is what makes a message land at the first
-;; moment the conversation can take one.
+;;; Everything a person has said since the last turn. Draining here, immediately
+;;; before the model is asked anything, is what makes a message land at the first
+;;; moment the conversation can take one.
 (defn runner-deliver-messages! [(allocator (dyn Allocator))
                                 (request (ptr ModelRequest))
                                 (inbox (ptr RunInbox))
@@ -527,9 +527,9 @@
     (atomic-store (load (field job completed)) 1)
     (cast (ptr i8) 0)))
 
-;; Start an owned background worker. Completion is observable through the same event
-;; emitter as a foreground run; callers poll `agent-run-finished?` and eventually join.
-;; The handle owns the request's cancellation resource and releases it during join.
+;;; Start an owned background worker. Completion is observable through the same event
+;;; emitter as a foreground run; callers poll `agent-run-finished?` and eventually join.
+;;; The handle owns the request's cancellation resource and releases it during join.
 (defn run-agent-background [(allocator (dyn Allocator))
                             (provider (dyn ModelProvider))
                             (request (ptr ModelRequest))
@@ -573,9 +573,9 @@
         request (load (field job request))]
     (cancellation-request! (load (field request cancellation)))))
 
-;; Reserve cancellation against terminal publication. While reserved, the worker
-;; cannot publish a terminal event; the controller durably publishes the request
-;; and then calls `agent-run-confirm-cancellation!`.
+;;; Reserve cancellation against terminal publication. While reserved, the worker
+;;; cannot publish a terminal event; the controller durably publishes the request
+;;; and then calls `agent-run-confirm-cancellation!`.
 (defn agent-run-reserve-cancellation! [(handle (ptr AgentRunHandle))] (-> i64)
   (let [lifecycle (load (field (load (field handle job)) lifecycle))]
     (block :reserve
@@ -607,8 +607,8 @@
               RUN_LIFECYCLE_RUNNING)
   0)
 
-;; Join exactly once and return the terminal result. A second join is harmless and
-;; returns the stored result. A spawn failure is reported as a configuration failure.
+;;; Join exactly once and return the terminal result. A second join is harmless and
+;;; returns the stored result. A spawn failure is reported as a configuration failure.
 (defn agent-run-join [(handle (mut AgentRunHandle))] (-> ModelResult)
   (if (not (.spawned handle))
       (let [job (load (field handle job))

@@ -44,9 +44,9 @@
     (RoleCodeComment [] 7)
     (RoleCodeNumber [] 8)))
 
-;; Rows are compared by their spans, not by the flattened line text: two rows
-;; with identical characters but different styling are different rows, and
-;; repainting one as if it matched would leave the wrong colour on screen.
+;;; Rows are compared by their spans, not by the flattened line text: two rows
+;;; with identical characters but different styling are different rows, and
+;;; repainting one as if it matched would leave the wrong colour on screen.
 (defn frame-line-same? [(left (ref FrameLine)) (right (ref FrameLine))] (-> bool)
   (let [left-spans (.spans left)
         right-spans (.spans right)
@@ -66,7 +66,7 @@
                           (do (set! same false) (break))))))
           (load same)))))
 
-;; True when the two frames differ in no row at all.
+;;; True when the two frames differ in no row at all.
 (defn frame-same? [(left (ptr Frame)) (right (ptr Frame))] (-> bool)
   (let [left-lines (.lines left)
         right-lines (.lines right)
@@ -83,7 +83,7 @@
                         (do (set! same false) (break)))))
           (load same)))))
 
-;; Can a diff be planned between these two live frames?
+;;; Can a diff be planned between these two live frames?
 (defn diffable? [(committed (ptr Frame))
                  (previous (ptr Frame))
                  (next (ptr Frame))] (-> bool)
@@ -110,13 +110,13 @@
   (al-push! [TerminalOperation] (mut operations) operation)
   0)
 
-;; Plan the minimal repaint that turns `previous` into `next` on screen.
-;;
-;; The cursor is assumed to be on the LAST row of the live region, which is
-;; where the full planner leaves it, and is left there again -- so a diffed
-;; frame and a repainted frame are interchangeable from the caller's side.
-;;
-;; Returns the number of rows actually rewritten.
+;;; Plan the minimal repaint that turns `previous` into `next` on screen.
+;;;
+;;; The cursor is assumed to be on the LAST row of the live region, which is
+;;; where the full planner leaves it, and is left there again -- so a diffed
+;;; frame and a repainted frame are interchangeable from the caller's side.
+;;;
+;;; Returns the number of rows actually rewritten.
 (defn plan-live-diff! [(operations (ptr (ArrayList TerminalOperation)))
                        (previous (ptr Frame))
                        (next (ptr Frame))] (-> i64)
@@ -169,8 +169,8 @@
     (sb-push-str! (mut buffer) text)
     (sb-finish! (mut buffer))))
 
-;; Deep-copy `source` into `out`, owning every byte in `allocator`. The copy
-;; must not borrow the source's text: the whole point is to outlive it.
+;;; Deep-copy `source` into `out`, owning every byte in `allocator`. The copy
+;;; must not borrow the source's text: the whole point is to outlive it.
 (defn frame-clone! [(allocator (dyn Allocator))
                     (source (ptr Frame))
                     (out (ptr Frame))] (-> i64)

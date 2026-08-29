@@ -27,9 +27,9 @@
   [(durable (ptr (dyn EventSink)))
    (observers (ptr (dyn EventSink)))])
 
-;; Initialize in final storage rather than returning by value, matching
-;; `event-emitter-init!` -- copying a boxed trait object through a returned
-;; aggregate crosses an ownership boundary.
+;;; Initialize in final storage rather than returning by value, matching
+;;; `event-emitter-init!` -- copying a boxed trait object through a returned
+;;; aggregate crosses an ownership boundary.
 (defn tee-event-sink-init! [(sink (ptr TeeEventSink))
                             (allocator (dyn Allocator))
                             (durable (dyn EventSink))

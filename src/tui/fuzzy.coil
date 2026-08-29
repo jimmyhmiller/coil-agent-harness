@@ -16,18 +16,18 @@
 
 (const FUZZY_NO_MATCH -1)
 
-;; Matching is ASCII-case-insensitive and byte-wise. Menu labels here are model
-;; names, so that is sufficient; a label with non-ASCII letters still matches on
-;; its ASCII parts rather than failing outright, because a byte that is not an
-;; ASCII letter is simply compared as-is.
+;;; Matching is ASCII-case-insensitive and byte-wise. Menu labels here are model
+;;; names, so that is sufficient; a label with non-ASCII letters still matches on
+;;; its ASCII parts rather than failing outright, because a byte that is not an
+;;; ASCII letter is simply compared as-is.
 (defn fuzzy-lower [(byte u8)] (-> u8)
   (if (and (>= byte (cast u8 65)) (<= byte (cast u8 90)))
       (cast u8 (+ (cast i64 byte) 32))
       byte))
 
-;; A boundary is where a word starts: the first byte, or anything following a
-;; separator. Matching on a boundary is the strongest signal that the query is
-;; initials rather than a coincidental run of letters.
+;;; A boundary is where a word starts: the first byte, or anything following a
+;;; separator. Matching on a boundary is the strongest signal that the query is
+;;; initials rather than a coincidental run of letters.
 (defn fuzzy-separator? [(byte u8)] (-> bool)
   (or (= byte (cast u8 32))
       (or (= byte (cast u8 45))
@@ -35,13 +35,13 @@
               (or (= byte (cast u8 47))
                   (or (= byte (cast u8 95)) (= byte (cast u8 183))))))))
 
-;; Score a candidate against a query. FUZZY_NO_MATCH when the query is not a
-;; subsequence at all; otherwise higher is better.
-;;
-;; The weights encode three preferences, in decreasing strength: matched runs
-;; should be contiguous, matches should land on word boundaries, and matches
-;; should start early. An empty query matches everything with score 0, which is
-;; what keeps the unfiltered menu in registration order.
+;;; Score a candidate against a query. FUZZY_NO_MATCH when the query is not a
+;;; subsequence at all; otherwise higher is better.
+;;;
+;;; The weights encode three preferences, in decreasing strength: matched runs
+;;; should be contiguous, matches should land on word boundaries, and matches
+;;; should start early. An empty query matches everything with score 0, which is
+;;; what keeps the unfiltered menu in registration order.
 (defn fuzzy-score [(query (slice u8)) (candidate (slice u8))] (-> i64)
   (let [q (slice-len [u8] query)
         n (slice-len [u8] candidate)]
@@ -86,6 +86,6 @@
                   (let [lateness (if (> (load first-match) 12) 12 (load first-match))]
                     (- (load score) lateness))))))))
 
-;; True when the query matches at all, ignoring rank.
+;;; True when the query matches at all, ignoring rank.
 (defn fuzzy-matches? [(query (slice u8)) (candidate (slice u8))] (-> bool)
   (!= (fuzzy-score query candidate) FUZZY_NO_MATCH))

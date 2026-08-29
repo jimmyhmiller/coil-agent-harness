@@ -8,8 +8,8 @@
 (import "harness-tui-model" :use *)
 (import "provider-common" :use *)
 
-;; This module is the sole boundary between the durable journal's JSON wire schema
-;; and terminal-independent presentation actions.
+;;; This module is the sole boundary between the durable journal's JSON wire schema
+;;; and terminal-independent presentation actions.
 (defn presentation-json-string [(value Json) (key (slice u8))] (-> (slice u8))
   (match (json-string-at value key)
     (Some [text] text)
@@ -82,8 +82,8 @@
               :else (IgnoreEvent))
         (presentation-event-action (load (field model allocator)) event))))
 
-;; Journal replay is ordered by sequence. Reapplying an already observed prefix is a
-;; no-op, which makes recovery and polling safe without renderer-specific deduplication.
+;;; Journal replay is ordered by sequence. Reapplying an already observed prefix is a
+;;; no-op, which makes recovery and polling safe without renderer-specific deduplication.
 (defn presentation-apply-event! [(model (ptr PresentationModel))
                                  (event Json)] (-> bool)
   (let [sequence (json-number-i64 (json-get event "sequence"))]

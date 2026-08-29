@@ -71,9 +71,9 @@
     (set! (index newline 0) (cast u8 10))
     (write-slice fd (slice-new [u8] (index newline 0) 1))))
 
-;; `argv` is imposed by the C entry ABI and therefore carries no length in its
-;; type. Keep the raw access in one explicit boundary and validate it against
-;; `argc` before producing an argument pointer.
+;;; `argv` is imposed by the C entry ABI and therefore carries no length in its
+;;; type. Keep the raw access in one explicit boundary and validate it against
+;;; `argc` before producing an argument pointer.
 (defn cli-arg [(count i64)
                (argv (ptr (ptr i8)))
                (at i64)] (-> (ptr i8))
@@ -83,9 +83,9 @@
         (cast (ptr i8) 0))
       (load (primitive/index argv at))))
 
-;; Tool groups are a deliberately small runtime configuration seam. An absent
-;; variable preserves the interactive harness defaults; factories can expose a
-;; narrower registry without requiring a different binary.
+;;; Tool groups are a deliberately small runtime configuration seam. An absent
+;;; variable preserves the interactive harness defaults; factories can expose a
+;;; narrower registry without requiring a different binary.
 (defn tool-group-enabled? [(allocator (dyn Allocator))
                            (name (slice u8))] (-> bool)
   (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
@@ -288,7 +288,7 @@
 ;; in projects.json, so the same workflow can be pointed at a real codebase
 ;; without a path being retyped at every call site.
 
-;; What a workflow says it needs before it can run, or "".
+;;; What a workflow says it needs before it can run, or "".
 (defn cli-factory-input [(allocator (dyn Allocator))
                          (factory-directory (slice u8))] (-> (slice u8))
   (match (load-factory-definition allocator factory-directory)
@@ -311,9 +311,9 @@
     (sb-push-str! (mut text) message)
     (sb-str (load text))))
 
-;; A named project becomes the checkout it stands for. An unknown name, or one
-;; whose checkout is not there, stops the run: the alternative is an agent working
-;; in an empty directory and truthfully reporting that it found nothing to change.
+;;; A named project becomes the checkout it stands for. An unknown name, or one
+;;; whose checkout is not there, stops the run: the alternative is an agent working
+;;; in an empty directory and truthfully reporting that it found nothing to change.
 (defn cli-project-workspace [(allocator (dyn Allocator))
                              (name (slice u8))] (-> CliWorkspaceChoice)
   (match (project-config-load allocator)
@@ -333,14 +333,14 @@
                                                         "names a checkout that is not there"))
                                  :else (CliWorkspaceDirectory path))))))
 
-;; The project an issue file names in its front matter:
-;;
-;;   ---
-;;   project: snake
-;;   ---
-;;
-;; An issue is always filed against a codebase, so the file is allowed to record
-;; which one and the caller does not have to repeat it.
+;;; The project an issue file names in its front matter:
+;;;
+;;;   ---
+;;;   project: snake
+;;;   ---
+;;;
+;;; An issue is always filed against a codebase, so the file is allowed to record
+;;; which one and the caller does not have to repeat it.
 (defn cli-issue-declared-project [(allocator (dyn Allocator))
                                   (issue (slice u8))] (-> (slice u8))
   (match (fs/read-file allocator issue)
@@ -364,10 +364,10 @@
                                 :else (set! i (+ (load i) 1))))))
               (load value))))))
 
-;; Where a run should happen, in the order a person means it: what they said on
-;; the command line, then the project they named, and only then a scratch
-;; directory. A workflow is a reusable thing that runs *in* a project; it does
-;; not belong to one, so a manifest has no say here.
+;;; Where a run should happen, in the order a person means it: what they said on
+;;; the command line, then the project they named, and only then a scratch
+;;; directory. A workflow is a reusable thing that runs *in* a project; it does
+;;; not belong to one, so a manifest has no say here.
 (defn cli-workspace-choice [(allocator (dyn Allocator))
                             (requested-workspace (slice u8))
                             (project-name (slice u8))] (-> CliWorkspaceChoice)
@@ -416,9 +416,9 @@
                                              (set! i (+ (load i) 1)))))
                                  0))))))
 
-;; Speak into a run that is already going. The run may have been started by a
-;; terminal, by the window, or by something else entirely: the inbox is a file,
-;; so none of them have to know about each other.
+;;; Speak into a run that is already going. The run may have been started by a
+;;; terminal, by the window, or by something else entirely: the inbox is a file,
+;;; so none of them have to know about each other.
 (defn cli-say [(run-id (slice u8)) (message (slice u8))] (-> i64)
   (let [owner (malloc-allocator)
         process-region (primitive/alloc-stack region/Region)]
@@ -1235,8 +1235,8 @@
 ;; multiplying cases. Scanning is smaller and keeps `--realm` from having to
 ;; sit in one fixed slot.
 
-;; `--realm` is the only option carrying a value, so it is the only one whose
-;; following token has to be skipped when counting positionals.
+;;; `--realm` is the only option carrying a value, so it is the only one whose
+;;; following token has to be skipped when counting positionals.
 (defn cli-option-takes-value? [(name (slice u8))] (-> bool)
   (or (= name "--realm")
       (or (= name "--workspace")
@@ -1280,9 +1280,9 @@
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-;; The value following `name`, or empty when absent. Empty is also what a
-;; trailing `--realm` with nothing after it yields, which `cc-realm-init!`
-;; already treats as "use the configured default".
+;;; The value following `name`, or empty when absent. Empty is also what a
+;;; trailing `--realm` with nothing after it yields, which `cc-realm-init!`
+;;; already treats as "use the configured default".
 (defn cli-option [(count i64)
                   (argv (ptr (ptr i8)))
                   (name (slice u8))] (-> (slice u8))
@@ -1298,7 +1298,7 @@
                 (set! i (+ (load i) 1)))))
     (load value)))
 
-;; The nth argument that is not a flag or a flag's value.
+;;; The nth argument that is not a flag or a flag's value.
 (defn cli-positional [(count i64)
                       (argv (ptr (ptr i8)))
                       (wanted i64)] (-> (slice u8))
@@ -1338,9 +1338,9 @@
 ;; Peer commands
 ;; ---------------------------------------------------------------------------
 
-;; One line per peer. Unregistered peers print their address instead of a name
-;; rather than being hidden: they are reachable, and a listing that omitted them
-;; would misrepresent who is actually out there.
+;;; One line per peer. Unregistered peers print their address instead of a name
+;;; rather than being hidden: they are reachable, and a listing that omitted them
+;;; would misrepresent who is actually out there.
 (defn cli-peers-in [(realm (ptr CcRealm))
                     (allocator (dyn Allocator))
                     (include-dead bool)] (-> i64)

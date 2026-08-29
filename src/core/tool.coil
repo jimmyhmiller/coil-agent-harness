@@ -14,9 +14,9 @@
 (import "harness-json" :use *)
 (import "harness-json-schema" :use *)
 
-;; Effect classification is descriptive metadata for presentation and retry policy.
-;; It is deliberately independent of provider tool formats. The harness does not
-;; gate execution on it; an out-of-tree policy plugin is free to.
+;;; Effect classification is descriptive metadata for presentation and retry policy.
+;;; It is deliberately independent of provider tool formats. The harness does not
+;;; gate execution on it; an out-of-tree policy plugin is free to.
 (defsum ToolEffect
   (ReadOnly [])
   (Reversible [])
@@ -108,8 +108,8 @@
                  (allocator (dyn Allocator))]
                 (-> ToolResult)))
 
-;; A registered tool combines serializable metadata with an erased implementation.
-;; Implementations return data; registration is the only gate on execution.
+;;; A registered tool combines serializable metadata with an erased implementation.
+;;; Implementations return data; registration is the only gate on execution.
 (defstruct ToolDefinition
   [(spec ToolSpec)
    (implementation (dyn ToolImplementation))])
@@ -122,8 +122,8 @@
     (set! (.definitions registry) (al-new [ToolDefinition] allocator))
     (load registry)))
 
-;; Register a tool. Names must be unique; false means an existing name was left
-;; unchanged.
+;;; Register a tool. Names must be unique; false means an existing name was left
+;;; unchanged.
 (defn tool-register! [(registry (mut ToolRegistry)) (definition ToolDefinition)] (-> bool)
   (let [name (.name (.spec definition))
         (mut i) 0
@@ -163,8 +163,8 @@
     (set! (.finished-at-ms result) 0)
     (load result)))
 
-;; Promotion helpers make arena crossings explicit. A copied tagged Json value is
-;; still a borrow; these functions recursively own every retained field in `target`.
+;;; Promotion helpers make arena crossings explicit. A copied tagged Json value is
+;;; still a borrow; these functions recursively own every retained field in `target`.
 (defn tool-call-clone-into [(target (dyn Allocator))
                             (source ToolCall)] (-> ToolCall)
   (let [result (primitive/alloc-stack ToolCall)]
@@ -185,8 +185,8 @@
     (set! (.finished-at-ms result) (.finished-at-ms source))
     (load result)))
 
-;; Validate the cross-provider subset required by strict function tools. Provider
-;; adapters may impose additional restrictions and report them separately.
+;;; Validate the cross-provider subset required by strict function tools. Provider
+;;; adapters may impose additional restrictions and report them separately.
 (defn tool-spec-valid? [(spec ToolSpec)] (-> bool)
   (let [name (.name spec)]
     (and (> (slice-len [u8] name) 0)

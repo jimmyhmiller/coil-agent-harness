@@ -123,7 +123,7 @@
     (set! (.last-sequence view) (json-number-i64 (json-get event "sequence")))
     0))
 
-;; Rebuild one run from immutable journal events without assuming a process boundary.
+;;; Rebuild one run from immutable journal events without assuming a process boundary.
 (defn project-run [(events (ref (ArrayList Json)))
                    (run-id (slice u8))] (-> DurableRunView)
   (let [view (primitive/alloc-stack DurableRunView)
@@ -146,8 +146,8 @@
                 (set! i (+ (load i) 1)))))
     (load view)))
 
-;; Recovery explicitly classifies in-flight work as interrupted. It is never replayed
-;; blindly because the previous process may have completed external side effects.
+;;; Recovery explicitly classifies in-flight work as interrupted. It is never replayed
+;;; blindly because the previous process may have completed external side effects.
 (defn project-run-after-restart [(events (ref (ArrayList Json)))
                                  (run-id (slice u8))] (-> DurableRunView)
   (let [(mut view) (project-run events run-id)]

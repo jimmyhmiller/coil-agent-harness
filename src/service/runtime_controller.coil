@@ -68,9 +68,9 @@
                              (provider-name (slice u8))]
                             (-> (Option (dyn ModelProvider)))))
 
-;; Declared providers are held for the life of the factory, in the same way the
-;; Codex provider is, because each owns an ssh tunnel. Building one per request
-;; would open and tear down a connection every turn.
+;;; Declared providers are held for the life of the factory, in the same way the
+;;; Codex provider is, because each owns an ssh tunnel. Building one per request
+;;; would open and tear down a connection every turn.
 (defstruct DefaultRuntimeProviderFactory
   [(tui-fixture (ptr TuiFixtureProvider))
    (codex (ptr CodexProvider))
@@ -121,11 +121,11 @@
     (set! (.openrouter factory) openrouter)
     (default-runtime-provider-factory-configure! factory allocator)))
 
-;; Load the operator's declared providers and build a context for each.
-;;
-;; A malformed configuration is deliberately fatal rather than ignored: the operator
-;; asked for work to run somewhere specific, and starting with those providers
-;; silently missing would send it somewhere else instead.
+;;; Load the operator's declared providers and build a context for each.
+;;;
+;;; A malformed configuration is deliberately fatal rather than ignored: the operator
+;;; asked for work to run somewhere specific, and starting with those providers
+;;; silently missing would send it somewhere else instead.
 (defn default-runtime-provider-factory-configure! [(factory (ptr DefaultRuntimeProviderFactory))
                                                    (allocator (dyn Allocator))] (-> i64)
   (set! (.configured factory) (al-new [(ptr OpenAIChatContext)] allocator))
@@ -154,11 +154,11 @@
         0))))
   0)
 
-;; The declared providers, for callers that route or present them.
+;;; The declared providers, for callers that route or present them.
 (defn default-runtime-provider-factory-config [(factory (ptr DefaultRuntimeProviderFactory))] (-> (ptr ProviderConfig))
   (field factory config))
 
-;; The reason initialization failed, or "" when it did not.
+;;; The reason initialization failed, or "" when it did not.
 (defn default-runtime-provider-factory-error [(factory (ptr DefaultRuntimeProviderFactory))] (-> (slice u8))
   (load (field factory config-error)))
 
@@ -321,29 +321,29 @@
 (defn runtime-controller-unlock! [(controller (ptr RuntimeRunController))] (-> i64)
   (atomic-store (load (field controller state-lock)) 0))
 
-;; Three unrelated things used to share one clamped number, and only one of them
-;; was ever a real failure mode.
-;;
-;;   transport timeout  a single HTTP request to the provider. A dead socket
-;;                      really can hang forever, so this one is always set.
-;;   tool deadline      one tool call. Already per-tool: see the `timeout-ms`
-;;                      on each ToolSpec (bash carries its own).
-;;   run deadline       the whole task. NOT a failure mode -- a task taking
-;;                      forty minutes is a task taking forty minutes.
-;;
-;; Deriving all three from one two-minute constant is why a long run looked like
-;; a broken filesystem: once the run clock expired the tool executor rejected
-;; every later call before running it, so a `read_text_file` that never touched
-;; the disk reported a deadline error, and `spawn_subagents` handed each child
-;; whatever scraps of the parent's clock remained.
-;;
-;; So the runtime no longer manufactures a run deadline. It is a policy the
-;; caller sets per command, and absent means unlimited.
+;;; Three unrelated things used to share one clamped number, and only one of them
+;;; was ever a real failure mode.
+;;;
+;;;   transport timeout  a single HTTP request to the provider. A dead socket
+;;;                      really can hang forever, so this one is always set.
+;;;   tool deadline      one tool call. Already per-tool: see the `timeout-ms`
+;;;                      on each ToolSpec (bash carries its own).
+;;;   run deadline       the whole task. NOT a failure mode -- a task taking
+;;;                      forty minutes is a task taking forty minutes.
+;;;
+;;; Deriving all three from one two-minute constant is why a long run looked like
+;;; a broken filesystem: once the run clock expired the tool executor rejected
+;;; every later call before running it, so a `read_text_file` that never touched
+;;; the disk reported a deadline error, and `spawn_subagents` handed each child
+;;; whatever scraps of the parent's clock remained.
+;;;
+;;; So the runtime no longer manufactures a run deadline. It is a policy the
+;;; caller sets per command, and absent means unlimited.
 (const RUNTIME_TRANSPORT_TIMEOUT_MS 600000)
 
-;; Monotonic deadline for the run, or 0 for none. `timeout_ms` is honoured
-;; exactly as given -- no default, no ceiling. A caller that wants a bounded
-;; run asks for one; nothing else imposes it.
+;;; Monotonic deadline for the run, or 0 for none. `timeout_ms` is honoured
+;;; exactly as given -- no default, no ceiling. A caller that wants a bounded
+;;; run asks for one; nothing else imposes it.
 (defn runtime-command-deadline [(command Json)] (-> i64)
   (let [value (json-number-i64 (json-get command "timeout_ms"))]
     (if (<= value 0) 0 (deadline-from-timeout value))))
@@ -775,7 +775,7 @@
               (command-string command "model")
               (JsonString "queued run could not start")))
 
-;; Returns one only when the head node must remain queued for its predecessors.
+;;; Returns one only when the head node must remain queued for its predecessors.
 (defn runtime-controller-process-pending! [(controller (ptr RuntimeRunController))
                                            (pending PendingRuntimeRun)] (-> i64)
   (let [command (.command pending)
@@ -823,8 +823,8 @@
                                     0)
                                   0)))))
 
-;; A dependency-blocked node must not reserve the queue head. Launch or terminalize
-;; one later runnable entry and leave a tombstone so the head can be reconsidered.
+;;; A dependency-blocked node must not reserve the queue head. Launch or terminalize
+;;; one later runnable entry and leave a tombstone so the head can be reconsidered.
 (defn runtime-controller-process-later! [(controller (ptr RuntimeRunController))
                                          (start i64)
                                          (count i64)] (-> bool)
@@ -1157,11 +1157,11 @@
         (runtime-controller-unlock! controller)))
   0)
 
-;; A bridged call belongs to the caller's session, not to a harness run: the
-;; external loop owns its own lifecycle and never tells us when it ends, so the
-;; harness does not manufacture a run around it. The session ID is still the run
-;; ID on every journaled tool event, which is what makes those calls readable
-;; through the existing events endpoint.
+;;; A bridged call belongs to the caller's session, not to a harness run: the
+;;; external loop owns its own lifecycle and never tells us when it ends, so the
+;;; harness does not manufacture a run around it. The session ID is still the run
+;;; ID on every journaled tool event, which is what makes those calls readable
+;;; through the existing events endpoint.
 (defn runtime-tool-session-id [(command Json)] (-> (slice u8))
   (let [value (command-string command "session_id")]
     (if (> (slice-len [u8] value) 0) value "agent-sdk")))
@@ -1170,9 +1170,9 @@
   (let [value (command-string command "call_id")]
     (if (> (slice-len [u8] value) 0) value (command-string command "name"))))
 
-;; The registry's own view, not a provider dialect. The caller needs what the
-;; harness knows about each tool -- schema, effect, idempotence -- because it is
-;; the loop deciding how to present and parallelize the call.
+;;; The registry's own view, not a provider dialect. The caller needs what the
+;;; harness knows about each tool -- schema, effect, idempotence -- because it is
+;;; the loop deciding how to present and parallelize the call.
 (defn runtime-controller-tools-json [(controller (ptr RuntimeRunController))
                                      (allocator (dyn Allocator))] (-> Json)
   (let [registry (load (field controller registry))
@@ -1200,10 +1200,10 @@
     (json-object-put! (mut body) "tools" (load tools))
     (load body)))
 
-;; Registration is the gate. A registered tool whose arguments satisfy its own
-;; schema is authorized and nothing else is; effect is reported for display, not
-;; consulted, because the harness has no effect policy to apply. A caller that
-;; wants one denies on the effect it reads here.
+;;; Registration is the gate. A registered tool whose arguments satisfy its own
+;;; schema is authorized and nothing else is; effect is reported for display, not
+;;; consulted, because the harness has no effect policy to apply. A caller that
+;;; wants one denies on the effect it reads here.
 (defn runtime-controller-authorize-tool [(controller (ptr RuntimeRunController))
                                          (command Json)
                                          (allocator (dyn Allocator))] (-> Json)

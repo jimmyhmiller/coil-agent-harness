@@ -78,14 +78,14 @@
     (json-put-string! (mut block) "content" output)
     (load block)))
 
-;; Preserve every prior Anthropic content block array verbatim. This retains
-;; thinking blocks and signatures while adding each turn's tool results together.
-;;
-;; The whole transcript is resent because Anthropic Messages has no server-side
-;; history: a request carries the conversation or the model does not have one. A
-;; continuation that replayed only the last turn made the model re-derive
-;; everything before it, which is an agent that reads the same file forever and
-;; never gets to the work.
+;;; Preserve every prior Anthropic content block array verbatim. This retains
+;;; thinking blocks and signatures while adding each turn's tool results together.
+;;;
+;;; The whole transcript is resent because Anthropic Messages has no server-side
+;;; history: a request carries the conversation or the model does not have one. A
+;;; continuation that replayed only the last turn made the model re-derive
+;;; everything before it, which is an agent that reads the same file forever and
+;;; never gets to the work.
 (defn anthropic-turn-messages! [(allocator (dyn Allocator))
                                 (messages (mut Json))
                                 (output Json)

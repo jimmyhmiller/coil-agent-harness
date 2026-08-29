@@ -50,9 +50,9 @@
 (const PROJECT_CONFIG_FILE "projects.json")
 (const PROJECT_CONFIG_VERSION 1)
 
-;; The workflow an issue is handed to when neither the issue nor the caller names
-;; one. `factories/issues` is the harness's own generic implement-and-verify
-;; workflow, which is what an issue filed against an existing codebase wants.
+;;; The workflow an issue is handed to when neither the issue nor the caller names
+;;; one. `factories/issues` is the harness's own generic implement-and-verify
+;;; workflow, which is what an issue filed against an existing codebase wants.
 (const PROJECT_DEFAULT_ISSUE_WORKFLOW "issues")
 
 (defstruct ConfiguredProject
@@ -81,8 +81,8 @@
 (defn project-config-at [(config (ptr ProjectConfig)) (at i64)] (-> (ptr ConfiguredProject))
   (al-elem [ConfiguredProject] (mut (.projects config)) at))
 
-;; Index of the project with this name, or -1. Callers take the index rather than a
-;; borrowed pointer so a configuration can be consulted without pinning its storage.
+;;; Index of the project with this name, or -1. Callers take the index rather than a
+;;; borrowed pointer so a configuration can be consulted without pinning its storage.
 (defn project-config-find [(config (ptr ProjectConfig)) (name (slice u8))] (-> i64)
   (let [n (project-config-count config)
         (mut i) 0
@@ -99,9 +99,9 @@
 (defn project-config-has? [(config (ptr ProjectConfig)) (name (slice u8))] (-> bool)
   (>= (project-config-find config name) 0))
 
-;; The checkout this name stands for, or "" when nothing declares it. Resolution is
-;; deliberately total: callers distinguish "no such project" from a real path by the
-;; empty string rather than by a sum they have to match on at every call site.
+;;; The checkout this name stands for, or "" when nothing declares it. Resolution is
+;;; deliberately total: callers distinguish "no such project" from a real path by the
+;;; empty string rather than by a sum they have to match on at every call site.
 (defn project-config-resolve [(config (ptr ProjectConfig)) (name (slice u8))] (-> (slice u8))
   (let [at (project-config-find config name)]
     (if (< at 0) "" (load (field (project-config-at config at) path)))))
@@ -139,10 +139,10 @@
     (Some [found] found)
     (None [] fallback)))
 
-;; `~/x` becomes `$HOME/x`. A bare `~` is the home directory itself. Everything
-;; else is returned unchanged, including a `~user` form this does not resolve --
-;; the entry rule below rejects that separately rather than passing a path with a
-;; literal tilde to a subprocess.
+;;; `~/x` becomes `$HOME/x`. A bare `~` is the home directory itself. Everything
+;;; else is returned unchanged, including a `~user` form this does not resolve --
+;;; the entry rule below rejects that separately rather than passing a path with a
+;;; literal tilde to a subprocess.
 (defn project-expand-home [(allocator (dyn Allocator)) (path (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] path)]
     (if (or (= n 0) (not (= (primitive-byte path 0) 126)))
@@ -177,9 +177,9 @@
     (sb-push-str! (mut text) message)
     (sb-str (load text))))
 
-;; A project name is used as a directory component and matched against a factory
-;; manifest, so it is restricted to what is unambiguous in both: letters, digits,
-;; dash, underscore, and dot.
+;;; A project name is used as a directory component and matched against a factory
+;;; manifest, so it is restricted to what is unambiguous in both: letters, digits,
+;;; dash, underscore, and dot.
 (defn project-name-valid? [(name (slice u8))] (-> bool)
   (let [n (slice-len [u8] name)
         (mut i) 0
@@ -196,7 +196,7 @@
                 (set! i (+ (load i) 1)))))
     (load ok)))
 
-;; Read one entry into `project`, returning "" or the reason it was rejected.
+;;; Read one entry into `project`, returning "" or the reason it was rejected.
 (defn project-config-entry [(allocator (dyn Allocator))
                             (entry Json)
                             (at i64)
@@ -241,8 +241,8 @@
         ""
         "projects.json: unsupported version; this harness reads version 1")))
 
-;; Parse an already-read document. Separate from reading the file so the format has
-;; tests that do not need a filesystem.
+;;; Parse an already-read document. Separate from reading the file so the format has
+;;; tests that do not need a filesystem.
 (defn project-config-parse [(allocator (dyn Allocator))
                             (source (slice u8))] (-> ProjectConfigResult)
   (let [parsed (json-parse allocator source)]
@@ -276,12 +276,12 @@
                     (ProjectConfigInvalid (load failure))
                     (ProjectConfigLoaded (load config)))))))))
 
-;; Load the operator's projects.
-;;
-;; A missing file yields an empty configuration, because having none is the normal
-;; case and must behave exactly like having an empty one. A file that exists but
-;; cannot be read is a failure: the operator declared projects and the harness
-;; cannot honour them.
+;;; Load the operator's projects.
+;;;
+;;; A missing file yields an empty configuration, because having none is the normal
+;;; case and must behave exactly like having an empty one. A file that exists but
+;;; cannot be read is a failure: the operator declared projects and the harness
+;;; cannot honour them.
 (defn project-config-load [(allocator (dyn Allocator))] (-> ProjectConfigResult)
   (let [path (project-config-path allocator)]
     (if (not (path-exists? allocator path))

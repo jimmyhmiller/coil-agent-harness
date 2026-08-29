@@ -7,12 +7,12 @@
 (import "coil.arraylist" :use *)
 (import "coil.str" :use *)
 
-;; Semantic roles, never colours. The first five describe conversation state; the
-;; last four describe code tokens and exist because a code block needs
-;; distinctions that "success" and "warning" cannot honestly carry. A profile
-;; without colour renders them all as plain text, which is why highlighting is
-;; never the only thing distinguishing a code block from prose -- the fence does
-;; that.
+;;; Semantic roles, never colours. The first five describe conversation state; the
+;;; last four describe code tokens and exist because a code block needs
+;;; distinctions that "success" and "warning" cannot honestly carry. A profile
+;;; without colour renders them all as plain text, which is why highlighting is
+;;; never the only thing distinguishing a code block from prose -- the fence does
+;;; that.
 (defsum StyleRole
   (RolePrimary [])
   (RoleMuted [])
@@ -110,13 +110,13 @@
     (set! (.spans line) (load spans))
     0))
 
-;; A copy of `source` holding only rows [start, end), spans preserved.
-;;
-;; The live region uses this to split a streamed block into the part that has
-;; scrolled out of the mutable window -- which is finished and can be committed
-;; -- and the tail that is still changing. Appending text to a flow only ever
-;; rewrites its last rows, so a leading row that has left the window will not
-;; change again and is safe to make permanent.
+;;; A copy of `source` holding only rows [start, end), spans preserved.
+;;;
+;;; The live region uses this to split a streamed block into the part that has
+;;; scrolled out of the mutable window -- which is finished and can be committed
+;;; -- and the tail that is still changing. Appending text to a flow only ever
+;;; rewrites its last rows, so a leading row that has left the window will not
+;;; change again and is safe to make permanent.
 (defn frame-range [(allocator (dyn Allocator))
                    (source (ref Frame))
                    (start i64)
@@ -140,8 +140,8 @@
                 (set! at (+ (load at) 1)))))
     (load result)))
 
-;; Bound a mutable footer to rows the process can continue to address. Committed
-;; transcript frames are never passed through this projection.
+;;; Bound a mutable footer to rows the process can continue to address. Committed
+;;; transcript frames are never passed through this projection.
 (defn frame-tail-bounded [(allocator (dyn Allocator))
                           (source (ref Frame))
                           (maximum i64)] (-> Frame)

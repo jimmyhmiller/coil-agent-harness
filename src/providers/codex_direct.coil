@@ -163,8 +163,8 @@
       0)
     (load input)))
 
-;; Direct requests use store=false, so retain the complete replay chain rather
-;; than only the immediately previous response and tool result.
+;;; Direct requests use store=false, so retain the complete replay chain rather
+;;; than only the immediately previous response and tool result.
 (defn codex-direct-cumulative-raw-output [(allocator (dyn Allocator))
                                           (request (ptr ModelRequest))
                                           (response (ptr ModelResponse))] (-> Json)

@@ -77,11 +77,11 @@
       0)
     0))
 
-;; `menu-rows` is supplied by the caller rather than read back off the layout.
-;; The reader builds the menu, so it is the only thing that knows the count for
-;; certain -- deriving it from a struct field meant trusting a value that could
-;; be uninitialised, and an over-count here erases live transcript rows above the
-;; composer.
+;;; `menu-rows` is supplied by the caller rather than read back off the layout.
+;;; The reader builds the menu, so it is the only thing that knows the count for
+;;; certain -- deriving it from a struct field meant trusting a value that could
+;;; be uninitialised, and an over-count here erases live transcript rows above the
+;;; composer.
 (defn input-renderer-plan-with! [(renderer (ptr InputRenderer))
                                  (scratch (dyn Allocator))
                                  (layout (ptr ViewLayout))
@@ -124,10 +124,10 @@
                              layout
                              0))
 
-;; Committing turns the composer into transcript. The menu is not transcript, so
-;; its rows are erased from the bottom up first and the line break is emitted
-;; from the composer's last row. Without this the highlighted completion row
-;; stays on screen forever, one copy per submitted command.
+;;; Committing turns the composer into transcript. The menu is not transcript, so
+;;; its rows are erased from the bottom up first and the line break is emitted
+;;; from the composer's last row. Without this the highlighted completion row
+;;; stays on screen forever, one copy per submitted command.
 (defn input-renderer-commit-plan! [(renderer (ptr InputRenderer))
                                    (scratch (dyn Allocator))] (-> (ArrayList TerminalOperation))
   (let [(mut operations) (inline-operations-new scratch)

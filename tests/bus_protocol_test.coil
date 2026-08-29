@@ -21,9 +21,9 @@
                 (Instruction)
                 "summarize the diff"))
 
-;; Round-trip through one codec and assert every field survived. Taking the
-;; codec as a trait object is the point: the body of this function cannot tell
-;; which format it is exercising.
+;;; Round-trip through one codec and assert every field survived. Taking the
+;;; codec as a trait object is the point: the body of this function cannot tell
+;;; which format it is exercising.
 (defn round-trips? [(allocator (dyn Allocator)) (codec (dyn Codec))] (-> bool)
   (let [original (primitive/alloc-stack Envelope)
         slot (primitive/alloc-stack Envelope)]

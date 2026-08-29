@@ -66,9 +66,9 @@
          (TerminalCursorDown [_] OP_DOWN)
          (_ OP_OTHER)))
 
-;; Net vertical movement must be zero: the planner is documented to leave the
-;; cursor where it found it, on the last live row. If that drifts, the next
-;; frame repaints the wrong rows.
+;;; Net vertical movement must be zero: the planner is documented to leave the
+;;; cursor where it found it, on the last live row. If that drifts, the next
+;;; frame repaints the wrong rows.
 (defn net-vertical [(operations (ArrayList TerminalOperation))] (-> i64)
   (let [count (al-len [TerminalOperation] operations)
         (mut i) 0

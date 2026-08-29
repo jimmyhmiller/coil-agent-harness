@@ -51,8 +51,8 @@
     (set! (.error result) message)
     (load result)))
 
-;; Copy into the status's own allocator: the argument JSON belongs to a run
-;; allocator that is gone by the time anyone asks what the worker said.
+;;; Copy into the status's own allocator: the argument JSON belongs to a run
+;;; allocator that is gone by the time anyone asks what the worker said.
 (defn factory-status-keep [(status (ptr FactoryWorkerStatus))
                            (value (Option (slice u8)))] (-> (slice u8))
   (match value

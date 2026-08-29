@@ -17,9 +17,9 @@
 
 (const FRAME_HEADER_BYTES 4)
 
-;; A peer must not be able to make us allocate arbitrarily by claiming a huge
-;; length. 16 MiB is far above any real envelope and far below anything that
-;; threatens the process.
+;;; A peer must not be able to make us allocate arbitrarily by claiming a huge
+;;; length. 16 MiB is far above any real envelope and far below anything that
+;;; threatens the process.
 (const MAX_FRAME_BYTES 16777216)
 
 (const FRAME_OK 0)
@@ -38,15 +38,15 @@
         (= code FRAME_OOM) "out of memory"
         :else "unknown framing error"))
 
-;; Array lengths must be literals, so this 4 and FRAME_HEADER_BYTES are checked
-;; against each other below rather than sharing one definition.
+;;; Array lengths must be literals, so this 4 and FRAME_HEADER_BYTES are checked
+;;; against each other below rather than sharing one definition.
 (defstruct FrameHeader [(bytes (array u8 4))])
 (static-assert (= (primitive/sizeof FrameHeader) FRAME_HEADER_BYTES)
                "frame header must be exactly FRAME_HEADER_BYTES wide")
 
-;; A stream read returns what it has, not what was asked for, so every read of a
-;; known-length region has to loop. Getting this wrong shows up only under
-;; fragmentation, which is why it lives in one place.
+;;; A stream read returns what it has, not what was asked for, so every read of a
+;;; known-length region has to loop. Getting this wrong shows up only under
+;;; fragmentation, which is why it lives in one place.
 (defn read-exactly [(transport (dyn Transport))
                     (buffer (ptr i8))
                     (length i64)] (-> i64)
@@ -87,8 +87,8 @@
                              :else (do (store! sent (+ (load sent) n)) 0)))))
            FRAME_OK)))
 
-;; Big-endian so a frame header reads the same on every machine and is legible
-;; in a hex dump.
+;;; Big-endian so a frame header reads the same on every machine and is legible
+;;; in a hex dump.
 (defn header-encode! [(header (ptr FrameHeader)) (length i64)] (-> i64)
   (let [bytes (primitive/cast (ptr u8) (field header bytes))]
     (store! (primitive/index bytes 0) (primitive/cast u8 (primitive/iand (primitive/ishr length 24) 255)))
@@ -104,7 +104,7 @@
        (+ (primitive/ishl (primitive/cast i64 (load (primitive/index bytes 2))) 8)
           (primitive/cast i64 (load (primitive/index bytes 3)))))))
 
-;; Write one frame. Returns FRAME_OK or a negative code.
+;;; Write one frame. Returns FRAME_OK or a negative code.
 (defn frame-write! [(transport (dyn Transport)) (payload (slice u8))] (-> i64)
   (let [length (slice-len payload)
         header (primitive/alloc-stack FrameHeader)]
@@ -126,8 +126,8 @@
                                (primitive/cast (ptr i8) (slice-data payload))
                                length))))))))
 
-;; Read one frame into `out`. Returns FRAME_OK, FRAME_EOF when the peer closed
-;; cleanly between frames, or a negative code.
+;;; Read one frame into `out`. Returns FRAME_OK, FRAME_EOF when the peer closed
+;;; cleanly between frames, or a negative code.
 (defn frame-read [(transport (dyn Transport))
                   (allocator (dyn Allocator))
                   (out (ptr (slice u8)))] (-> i64)

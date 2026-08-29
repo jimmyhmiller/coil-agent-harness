@@ -6,8 +6,8 @@
 (import "harness-tui-render-inline" :use *)
 (import "harness-tui-terminal" :use *)
 
-;; Repeatedly redraw a one-row response. The final stable commit is the only
-;; operation in this fixture that may advance scrollback.
+;;; Repeatedly redraw a one-row response. The final stable commit is the only
+;;; operation in this fixture that may advance scrollback.
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [allocator (malloc-allocator)
         overrides (terminal-overrides-from-env allocator)

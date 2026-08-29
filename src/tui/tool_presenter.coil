@@ -41,14 +41,14 @@
                              (summary (slice u8))] (-> ToolPresentation)
   (tool-presentation-full label subject summary ""))
 
-;; A tool subject is one heading line. Arguments are arbitrary text: a bash command
-;; can carry embedded newlines and tabs, and the flow layout turns a raw newline into
-;; a hard row break with the continuation indent applied mid-argument.
-;;
-;; Escaping rather than collapsing is deliberate. Replacing a newline with a space
-;; would render `a\nb` and `a b` identically, and those are different shell commands
-;; -- the heading would be compact and wrong. A visible two-character escape keeps
-;; the record on one row and still says exactly what was run.
+;;; A tool subject is one heading line. Arguments are arbitrary text: a bash command
+;;; can carry embedded newlines and tabs, and the flow layout turns a raw newline into
+;;; a hard row break with the continuation indent applied mid-argument.
+;;;
+;;; Escaping rather than collapsing is deliberate. Replacing a newline with a space
+;;; would render `a\nb` and `a b` identically, and those are different shell commands
+;;; -- the heading would be compact and wrong. A visible two-character escape keeps
+;;; the record on one row and still says exactly what was run.
 (defn tool-inline-text [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] text)
         (mut out) (sb-new allocator)
@@ -108,10 +108,10 @@
         (+ (load lines) 1)
         (load lines))))
 
-;; The first few lines of an output, each clipped to a sane width, with a count
-;; of what was left out. Newlines are KEPT here -- unlike the heading, a preview
-;; is allowed to be several rows, and the flow layout turns each newline into a
-;; row with the continuation indent, which is exactly the shape wanted.
+;;; The first few lines of an output, each clipped to a sane width, with a count
+;;; of what was left out. Newlines are KEPT here -- unlike the heading, a preview
+;;; is allowed to be several rows, and the flow layout turns each newline into a
+;;; row with the continuation indent, which is exactly the shape wanted.
 (defn tool-preview-lines [(allocator (dyn Allocator)) (text (slice u8))] (-> (slice u8))
   (let [n (slice-len [u8] text)]
     (if (= n 0)
@@ -157,9 +157,9 @@
 (defn tool-json-int [(value Json) (key (slice u8))] (-> i64)
   (json-number-i64 (json-get value key)))
 
-;; Bash shows what it printed. On failure stderr wins, because a non-zero exit
-;; with empty stdout is the case where the interesting text is the one nobody
-;; would otherwise see.
+;;; Bash shows what it printed. On failure stderr wins, because a non-zero exit
+;;; with empty stdout is the case where the interesting text is the one nobody
+;;; would otherwise see.
 (defn tool-bash-presentation [(allocator (dyn Allocator))
                               (arguments Json)
                               (result Json)] (-> ToolPresentation)
@@ -196,7 +196,7 @@
                           detail
                           ""))
 
-;; Tool-specific extraction stays outside both the event adapter and layout engine.
+;;; Tool-specific extraction stays outside both the event adapter and layout engine.
 (defn present-tool [(allocator (dyn Allocator))
                     (name (slice u8))
                     (arguments Json)

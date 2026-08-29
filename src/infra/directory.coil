@@ -34,9 +34,9 @@
 (extern chmod :cc c [(ptr i8) u32] (-> i32))
 (extern access :cc c [(ptr i8) i32] (-> i32))
 
-;; hygiene: these platform constants intentionally enter this module's public
-;; namespace -- the code below refers to them by hand, so the generator publishes
-;; the bare name explicitly rather than leaving it in its own template context.
+;;; hygiene: these platform constants intentionally enter this module's public
+;;; namespace -- the code below refers to them by hand, so the generator publishes
+;;; the bare name explicitly rather than leaving it in its own template context.
 (defn dirent--public-name [(name Code)] (-> Code)
   (primitive/syntax->datum name))
 (defn gen-dirent-layout [] (-> Code)
@@ -49,15 +49,15 @@
          (const ~(dirent--public-name `DIRENT_TYPE_OFFSET) 20))))
 (meta (gen-dirent-layout))
 
-;; DT_SOCK, for callers that want to skip non-sockets without a stat.
+;;; DT_SOCK, for callers that want to skip non-sockets without a stat.
 (const DIRENT_TYPE_SOCKET 12)
 (const DIRENT_TYPE_UNKNOWN 0)
 
-;; F_OK: does the path exist at all.
+;;; F_OK: does the path exist at all.
 (const ACCESS_EXISTS 0)
 
-;; A directory entry name is bounded by the struct itself; this is only a guard
-;; against a missing NUL walking off the end of the record.
+;;; A directory entry name is bounded by the struct itself; this is only a guard
+;;; against a missing NUL walking off the end of the record.
 (const DIRENT_NAME_MAX 1024)
 
 (defn dirent-name [(allocator (dyn Allocator)) (entry (ptr i8))] (-> (slice u8))
@@ -86,10 +86,10 @@
                           (primitive/cast (ptr u8) entry)
                           DIRENT_TYPE_OFFSET))))
 
-;; Every name in `path`, excluding `.` and `..`. Returns an empty list when the
-;; directory cannot be opened, which callers treat as "no peers" rather than as
-;; an error: a missing socket directory means nobody is listening, and that is a
-;; normal state, not a failure.
+;;; Every name in `path`, excluding `.` and `..`. Returns an empty list when the
+;;; directory cannot be opened, which callers treat as "no peers" rather than as
+;;; an error: a missing socket directory means nobody is listening, and that is a
+;;; normal state, not a failure.
 (defn directory-entries [(allocator (dyn Allocator))
                          (path (slice u8))] (-> (ArrayList (slice u8)))
   (let [(mut names) (al-new [(slice u8)] allocator)
@@ -107,9 +107,9 @@
       0)
     (load names)))
 
-;; Entries whose name ends with `suffix`. The socket directory holds one file
-;; per session named `<pid>.sock`, so this is how a caller asks for sockets
-;; without needing the entry type -- which some filesystems report as unknown.
+;;; Entries whose name ends with `suffix`. The socket directory holds one file
+;;; per session named `<pid>.sock`, so this is how a caller asks for sockets
+;;; without needing the entry type -- which some filesystems report as unknown.
 (defn directory-entries-with-suffix [(allocator (dyn Allocator))
                                      (path (slice u8))
                                      (suffix (slice u8))] (-> (ArrayList (slice u8)))
@@ -145,16 +145,16 @@
 (defn path-exists? [(allocator (dyn Allocator)) (path (slice u8))] (-> bool)
   (= (primitive/cast i64 (access (str->cstr allocator path) ACCESS_EXISTS)) 0))
 
-;; Create `path` and every missing parent.
-;;
-;; `mkdir` creates one level, which is not enough for any directory nested more
-;; than one deep below something that exists -- and a realm's registry is three
-;; levels down. Without this, the first run of a private realm fails to create
-;; its directories and then reports "no peers", which reads as an empty
-;; namespace rather than as a namespace that was never made.
-;;
-;; An existing directory is success, not an error: EEXIST is the normal outcome
-;; on every run after the first.
+;;; Create `path` and every missing parent.
+;;;
+;;; `mkdir` creates one level, which is not enough for any directory nested more
+;;; than one deep below something that exists -- and a realm's registry is three
+;;; levels down. Without this, the first run of a private realm fails to create
+;;; its directories and then reports "no peers", which reads as an empty
+;;; namespace rather than as a namespace that was never made.
+;;;
+;;; An existing directory is success, not an error: EEXIST is the normal outcome
+;;; on every run after the first.
 (defn directory-create-all [(allocator (dyn Allocator))
                             (path (slice u8))
                             (mode i64)] (-> i64)
@@ -173,7 +173,7 @@
                 (set! i (+ (load i) 1)))))
     (if (path-exists? allocator path) 0 -1)))
 
-;; Join two path components with a single separator.
+;;; Join two path components with a single separator.
 (defn path-join [(allocator (dyn Allocator))
                  (base (slice u8))
                  (name (slice u8))] (-> (slice u8))

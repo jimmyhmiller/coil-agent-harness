@@ -12,8 +12,8 @@
 (import "harness-directory" :use *)
 (import "harness-json" :use *)
 
-;; A factory is deliberately data on disk: one small metadata file plus Markdown
-;; worker/context files. Nothing here knows about any particular product.
+;;; A factory is deliberately data on disk: one small metadata file plus Markdown
+;;; worker/context files. Nothing here knows about any particular product.
 (defstruct FactoryWorker
   [(file (slice u8))
    (instructions (slice u8))

@@ -15,8 +15,8 @@
 (import "coil.str" :use *)
 (import "harness-bus-protocol" :use *)
 
-;; Handle returned by attach. Callers pair it with whatever transport they hold
-;; for that participant; the router never learns what that is.
+;;; Handle returned by attach. Callers pair it with whatever transport they hold
+;;; for that participant; the router never learns what that is.
 (const ROUTER_NO_PARTICIPANT -1)
 
 (defstruct Participant
@@ -40,8 +40,8 @@
 (defn router-participant [(router (ptr Router)) (handle i64)] (-> (ptr Participant))
   (primitive/index (load (field (field router participants) data)) handle))
 
-;; Find an attached participant by address. Detached slots are skipped so a
-;; handle is never silently reused for a different participant.
+;;; Find an attached participant by address. Detached slots are skipped so a
+;;; handle is never silently reused for a different participant.
 (defn router-find [(router (ptr Router)) (address Address)] (-> i64)
   (let [n (router-count router)
         (mut i) 0
@@ -55,9 +55,9 @@
                     (set! i (+ (load i) 1))))))
     (load found)))
 
-;; Attach a participant, returning its handle. Attaching an address that is
-;; already attached returns the existing handle rather than creating a second
-;; mailbox for one identity.
+;;; Attach a participant, returning its handle. Attaching an address that is
+;;; already attached returns the existing handle rather than creating a second
+;;; mailbox for one identity.
 (defn router-attach! [(router (ptr Router)) (address Address)] (-> i64)
   (let [existing (router-find router address)]
     (if (!= existing ROUTER_NO_PARTICIPANT)
@@ -69,8 +69,8 @@
           (al-push! [Participant] (mut (.participants router)) (load participant))
           (- (router-count router) 1)))))
 
-;; Detaching leaves the slot in place so existing handles stay meaningful; the
-;; participant simply stops receiving.
+;;; Detaching leaves the slot in place so existing handles stay meaningful; the
+;;; participant simply stops receiving.
 (defn router-detach! [(router (ptr Router)) (handle i64)] (-> i64)
   (if (or (< handle 0) (>= handle (router-count router)))
       0
@@ -90,8 +90,8 @@
                   (set! i (+ (load i) 1)))))
     (load found)))
 
-;; Subscribing twice is a no-op rather than an error: a client that reconnects
-;; and re-subscribes should not accumulate duplicate deliveries.
+;;; Subscribing twice is a no-op rather than an error: a client that reconnects
+;;; and re-subscribes should not accumulate duplicate deliveries.
 (defn router-subscribe! [(router (ptr Router)) (handle i64) (topic (slice u8))] (-> i64)
   (if (or (< handle 0) (>= handle (router-count router)))
       0
@@ -124,11 +124,11 @@
                       (set! i (+ (load i) 1)))))
         (load removed))))
 
-;; Should this participant receive this envelope?
-;;
-;; A sender never receives its own message. Without that rule a broadcast would
-;; echo, and a participant subscribed to a topic it also publishes on would
-;; process its own traffic -- which reads as a loop the first time it happens.
+;;; Should this participant receive this envelope?
+;;;
+;;; A sender never receives its own message. Without that rule a broadcast would
+;;; echo, and a participant subscribed to a topic it also publishes on would
+;;; process its own traffic -- which reads as a loop the first time it happens.
 (defn delivers-to? [(participant (ptr Participant))
                     (envelope (ptr Envelope))] (-> bool)
   (if (not (.attached participant))
@@ -143,9 +143,9 @@
               ;; Service messages are for the harness, not for participants.
               (Service [] false))))))
 
-;; Append the handle of every participant that should receive `envelope`.
-;; Returns the number appended. The caller does the writing, so a slow or
-;; broken peer cannot stall routing for everyone else.
+;;; Append the handle of every participant that should receive `envelope`.
+;;; Returns the number appended. The caller does the writing, so a slow or
+;;; broken peer cannot stall routing for everyone else.
 (defn router-recipients [(router (ptr Router))
                          (envelope (ptr Envelope))
                          (out (mut (ArrayList i64)))] (-> i64)

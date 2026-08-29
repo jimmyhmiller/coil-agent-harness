@@ -32,9 +32,9 @@
 ;; Addressing
 ;; ---------------------------------------------------------------------------
 
-;; A destination. `Agent` is one mailbox -- a run, a subagent, an attached TUI.
-;; `Topic` is publish/subscribe, which is what lets several observers watch one
-;; run without the run knowing they exist. `Service` is the harness itself.
+;;; A destination. `Agent` is one mailbox -- a run, a subagent, an attached TUI.
+;;; `Topic` is publish/subscribe, which is what lets several observers watch one
+;;; run without the run knowing they exist. `Service` is the harness itself.
 (defsum Address
   (Agent [(id (slice u8))])
   (Topic [(name (slice u8))])
@@ -70,9 +70,9 @@
                (Topic [_] false)
                (Broadcast [] false)))))
 
-;; True when a message addressed to `to` should be delivered to `subject`.
-;; Broadcast reaches everyone; a topic reaches its subscribers, which the
-;; router resolves before calling this.
+;;; True when a message addressed to `to` should be delivered to `subject`.
+;;; Broadcast reaches everyone; a topic reaches its subscribers, which the
+;;; router resolves before calling this.
 (defn address-matches? [(to Address) (subject Address)] (-> bool)
   (match to
     (Broadcast [] true)
@@ -84,8 +84,8 @@
 ;; Messages
 ;; ---------------------------------------------------------------------------
 
-;; What a message is for. Kept deliberately small: anything richer belongs in
-;; the body, where it can evolve without a protocol version bump.
+;;; What a message is for. Kept deliberately small: anything richer belongs in
+;;; the body, where it can evolve without a protocol version bump.
 (defsum MessageKind
   (Instruction [])
   (Reply [])
@@ -99,9 +99,9 @@
 
 (const PROTOCOL_VERSION 1)
 
-;; One routable message. `correlation` carries the id of the message being
-;; answered, which is what makes request/response work over a bus that is
-;; otherwise fire-and-forget.
+;;; One routable message. `correlation` carries the id of the message being
+;;; answered, which is what makes request/response work over a bus that is
+;;; otherwise fire-and-forget.
 (defstruct Envelope
   [(version i64)
    (id (slice u8))
@@ -128,8 +128,8 @@
     (set! (.body envelope) body)
     (load envelope)))
 
-;; A reply is an ordinary message that names the message it answers, so the
-;; router needs no special case for it.
+;;; A reply is an ordinary message that names the message it answers, so the
+;;; router needs no special case for it.
 (defn envelope-reply [(id (slice u8))
                       (request (ptr Envelope))
                       (from Address)
@@ -143,13 +143,13 @@
 ;; Codec -- how an envelope becomes bytes
 ;; ---------------------------------------------------------------------------
 
-;; A wire format. Adding a format is one impl and touches nothing else.
-;;
-;; Envelopes cross this boundary by pointer, never by value: passing an
-;; aggregate containing sums through a trait object is not ABI-stable across
-;; Coil backends, and the failure mode is a segfault at the call rather than a
-;; type error. `codec-decode` therefore writes through `out` and returns only a
-;; status. The same convention is used for dynamic calls in run_service.
+;;; A wire format. Adding a format is one impl and touches nothing else.
+;;;
+;;; Envelopes cross this boundary by pointer, never by value: passing an
+;;; aggregate containing sums through a trait object is not ABI-stable across
+;;; Coil backends, and the failure mode is a segfault at the call rather than a
+;;; type error. `codec-decode` therefore writes through `out` and returns only a
+;;; status. The same convention is used for dynamic calls in run_service.
 (deftrait Codec [Self]
   (codec-name [(self (ptr Self))] (-> (slice u8)))
   (codec-encode [(self (ptr Self))
@@ -162,7 +162,7 @@
                  (out (ptr Envelope))]
                 (-> (Result i64 DeError))))
 
-;; The default on the wire: compact, binary, no escaping cost.
+;;; The default on the wire: compact, binary, no escaping cost.
 (defstruct MessagePackCodec [(reserved u8)])
 
 (impl Codec MessagePackCodec
@@ -181,7 +181,7 @@
                   (Err [failure] (Err failure))
                   (Ok [decoded] (do (set! out decoded) (Ok 0))))))
 
-;; For debugging, journals, and clients that would rather not speak binary.
+;;; For debugging, journals, and clients that would rather not speak binary.
 (defstruct JsonCodec [(reserved u8)])
 
 (impl Codec JsonCodec
@@ -204,11 +204,11 @@
 ;; Transport -- how bytes move
 ;; ---------------------------------------------------------------------------
 
-;; Transport results are plain integers rather than a Result, on purpose.
-;; Aggregates crossing a trait object are not ABI-stable across Coil backends,
-;; and the transport is the hottest dyn call in the system -- every frame byte
-;; goes through it. A non-negative value is a byte count (0 means the peer
-;; closed cleanly); a negative value is one of these codes.
+;;; Transport results are plain integers rather than a Result, on purpose.
+;;; Aggregates crossing a trait object are not ABI-stable across Coil backends,
+;;; and the transport is the hottest dyn call in the system -- every frame byte
+;;; goes through it. A non-negative value is a byte count (0 means the peer
+;;; closed cleanly); a negative value is one of these codes.
 (const TRANSPORT_CLOSED -1)
 (const TRANSPORT_FAILED -2)
 
@@ -217,9 +217,9 @@
         (= code TRANSPORT_FAILED) "transport failed"
         :else "unknown transport error"))
 
-;; A bidirectional byte stream. Deliberately smaller than a socket: a unix
-;; socket, a TCP connection, and an in-memory pipe used by tests all satisfy it,
-;; which is what keeps local and remote on one code path.
+;;; A bidirectional byte stream. Deliberately smaller than a socket: a unix
+;;; socket, a TCP connection, and an in-memory pipe used by tests all satisfy it,
+;;; which is what keeps local and remote on one code path.
 (deftrait Transport [Self]
   (transport-read [(self (ptr Self)) (buffer (ptr i8)) (length i64)] (-> i64))
   (transport-write [(self (ptr Self)) (buffer (ptr i8)) (length i64)] (-> i64))

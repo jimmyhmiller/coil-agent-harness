@@ -44,8 +44,8 @@
     (set! (.initialized context) false)
     (load context)))
 
-;; Codex is a provider capability; App Server and direct subscription HTTP are
-;; interchangeable execution strategies behind this lifecycle boundary.
+;;; Codex is a provider capability; App Server and direct subscription HTTP are
+;;; interchangeable execution strategies behind this lifecycle boundary.
 (deftrait CodexExecutionStrategy [Self]
   (codex-strategy-name [(self (ptr Self))] (-> (slice u8)))
   (codex-strategy-prepare! [(self (ptr Self)) (allocator (dyn Allocator))] (-> i64))
@@ -74,9 +74,9 @@
    (process subprocess/Child)
    (error (slice u8))])
 
-;; The protocol depends on newline-delimited JSON, not on subprocess mechanics.
-;; Tests can supply an in-memory transport while the production implementation
-;; delegates to Coil's hosted child-process and I/O libraries.
+;;; The protocol depends on newline-delimited JSON, not on subprocess mechanics.
+;;; Tests can supply an in-memory transport while the production implementation
+;;; delegates to Coil's hosted child-process and I/O libraries.
 (deftrait CodexTransport [Self]
   (codex-transport-send [(self (ptr Self))
                          (allocator (dyn Allocator))
@@ -91,9 +91,9 @@
 
 (defstruct CodexConnection [(transport (dyn CodexTransport))])
 
-;; A service-owned context keeps one initialized app-server process for all Codex
-;; turns. The mutex serializes the current fixed-ID JSON-RPC client over its single
-;; stdio stream.
+;;; A service-owned context keeps one initialized app-server process for all Codex
+;;; turns. The mutex serializes the current fixed-ID JSON-RPC client over its single
+;;; stdio stream.
 (defn codex-context-init-persistent! [(context (ptr CodexAppServerContext))
                                       (owner (dyn Allocator))
                                       (cwd (slice u8))] (-> i64)
@@ -626,8 +626,8 @@
             (model-failure "codex-app-server" 0 (.error started))
             (codex-turn-loop allocator process emitter request thread-id)))))
 
-;; Send one request and wait for its matching response. Keeping write and read
-;; failure together prevents a failed write from surfacing later as a read timeout.
+;;; Send one request and wait for its matching response. Keeping write and read
+;;; failure together prevents a failed write from surfacing later as a read timeout.
 (defn codex-call [(allocator (dyn Allocator))
                   (process (ptr CodexConnection))
                   (emitter (ptr EventEmitter))
@@ -660,9 +660,9 @@
         (Ok thread-id)
         (Err "thread/start omitted thread id"))))
 
-;; The fixed App Server handshake is intentionally linear. Each failed operation
-;; short-circuits with the message for that operation; process ownership stays with
-;; codex-execute, which closes it exactly once.
+;;; The fixed App Server handshake is intentionally linear. Each failed operation
+;;; short-circuits with the message for that operation; process ownership stays with
+;;; codex-execute, which closes it exactly once.
 (defn codex-initialize-connection [(request (ptr ModelRequest))
                                    (emitter (ptr EventEmitter))
                                    (allocator (dyn Allocator))
@@ -706,7 +706,7 @@
     (Ok [thread-id]
         (codex-start-and-run-turn allocator process emitter request thread-id))))
 
-;; Translate the terminal result into exactly one request lifecycle event.
+;;; Translate the terminal result into exactly one request lifecycle event.
 (defn codex-finish [(emitter (ptr EventEmitter))
                     (request (ptr ModelRequest))
                     (allocator (dyn Allocator))
@@ -752,9 +752,9 @@
                             (JsonString (.message failed)))
                 (ModelErr failed)))))
 
-;; Own one connected transport for exactly one model request. This seam keeps spawn
-;; policy outside protocol tests while making close and terminal-event invariants
-;; deterministic under an in-memory transport.
+;;; Own one connected transport for exactly one model request. This seam keeps spawn
+;;; policy outside protocol tests while making close and terminal-event invariants
+;;; deterministic under an in-memory transport.
 (defn codex-execute-connection [(context (ptr CodexAppServerContext))
                                 (request (ptr ModelRequest))
                                 (emitter (ptr EventEmitter))
@@ -935,7 +935,7 @@
                                          emitter
                                          allocator)))
 
-;; Build a request that appends input to an active turn without starting a new turn.
+;;; Build a request that appends input to an active turn without starting a new turn.
 (defn codex-steer-request [(allocator (dyn Allocator))
                            (id i64)
                            (thread-id (slice u8))
@@ -952,8 +952,8 @@
     (json-object-put! (mut params) "input" (load input))
     (codex-rpc-request allocator id "turn/steer" (load params))))
 
-;; Build a cancellation request. A successful response only acknowledges the request;
-;; callers confirm cancellation from the later interrupted turn/completed event.
+;;; Build a cancellation request. A successful response only acknowledges the request;
+;;; callers confirm cancellation from the later interrupted turn/completed event.
 (defn codex-interrupt-request [(allocator (dyn Allocator))
                                (id i64)
                                (thread-id (slice u8))

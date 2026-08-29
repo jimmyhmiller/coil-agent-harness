@@ -66,8 +66,8 @@
           depth))
       0))
 
-;; This deliberately uses a high threshold. Expression-tree depth is at most a
-;; weak maintainability signal, and normal composition should not produce lint.
+;;; This deliberately uses a high threshold. Expression-tree depth is at most a
+;;; weak maintainability signal, and normal composition should not produce lint.
 (defn nd-warn-depth [(form Code) (depth i64)] (-> i64)
   (if (> depth (nd-maximum))
       (do

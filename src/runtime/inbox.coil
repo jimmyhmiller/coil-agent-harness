@@ -38,9 +38,9 @@
 
 (const INBOX_DIRECTORY ".factory-inbox")
 
-;; How far into the file this reader has already read. Only whole lines are
-;; consumed, so a message being appended while this runs is picked up next time
-;; rather than delivered in half.
+;;; How far into the file this reader has already read. Only whole lines are
+;;; consumed, so a message being appended while this runs is picked up next time
+;;; rather than delivered in half.
 (defstruct RunInbox [(path (slice u8)) (consumed i64)])
 
 (defn inbox-env-or [(allocator (dyn Allocator))
@@ -56,8 +56,8 @@
 (defn inbox-root [(allocator (dyn Allocator))] (-> (slice u8))
   (inbox-env-or allocator "HARNESS_INBOX_DIR" INBOX_DIRECTORY))
 
-;; The inbox of one run. Run ids are already file-safe: they are built from a
-;; factory name and a timestamp.
+;;; The inbox of one run. Run ids are already file-safe: they are built from a
+;;; factory name and a timestamp.
 (defn inbox-path [(allocator (dyn Allocator)) (run-id (slice u8))] (-> (slice u8))
   (let [(mut name) (sb-new allocator)]
     (sb-push-str! (mut name) run-id)
@@ -70,9 +70,9 @@
     (set! (.consumed inbox) 0)
     (load inbox)))
 
-;; Put a message in a run's inbox. Appending is the whole protocol: no lock, no
-;; handshake, and nothing to clean up if the run has already finished -- an
-;; unread inbox is just a file nobody opened.
+;;; Put a message in a run's inbox. Appending is the whole protocol: no lock, no
+;;; handshake, and nothing to clean up if the run has already finished -- an
+;;; unread inbox is just a file nobody opened.
 (defn inbox-send! [(allocator (dyn Allocator))
                    (path (slice u8))
                    (text (slice u8))] (-> bool)
@@ -108,9 +108,9 @@
               (set! at (+ (load at) 1))))
     (load at)))
 
-;; Everything written since the last drain, oldest first. A malformed line is
-;; skipped rather than failing the drain: a run must not die because something
-;; wrote nonsense into its mailbox.
+;;; Everything written since the last drain, oldest first. A malformed line is
+;;; skipped rather than failing the drain: a run must not die because something
+;;; wrote nonsense into its mailbox.
 (defn inbox-drain! [(allocator (dyn Allocator))
                     (inbox (ptr RunInbox))] (-> (ArrayList (slice u8)))
   (let [(mut out) (al-new [(slice u8)] allocator)]

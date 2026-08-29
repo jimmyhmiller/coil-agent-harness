@@ -127,10 +127,10 @@
                       (load cells)
                       (.role flow))))
 
-;; Code rows are laid out one source line per frame row, highlighted, and clipped
-;; rather than wrapped. Wrapping code re-flows it into something that is no longer
-;; the code that was written, and a half-line of a shell command is worse than a
-;; visibly clipped one.
+;;; Code rows are laid out one source line per frame row, highlighted, and clipped
+;;; rather than wrapped. Wrapping code re-flows it into something that is no longer
+;;; the code that was written, and a half-line of a shell command is worse than a
+;;; visibly clipped one.
 (defn view-layout-code! [(frame (ptr Frame))
                          (value (ptr ViewCode))
                          (width i64)] (-> i64)
@@ -351,9 +351,9 @@
             (set! (.cursor-column result) (.cursor-column full-value))
             (load result))))))
 
-;; A suffix was selected before layout, so omitted input must be represented even
-;; when that suffix happens to occupy fewer rows than the screen budget (for
-;; example, a long run of zero-width combining marks).
+;;; A suffix was selected before layout, so omitted input must be represented even
+;;; when that suffix happens to occupy fewer rows than the screen budget (for
+;;; example, a long run of zero-width combining marks).
 (defn view-layout-omitted-tail [(allocator (dyn Allocator))
                                 (source ViewLayout)
                                 (row-budget i64)] (-> ViewLayout)
@@ -419,14 +419,14 @@
 
 (const VIEW_MENU_MAX_ROWS 8)
 
-;; `text-cell-width` returns -1 for invalid UTF-8. A menu label is ours, not the
-;; model's, but detail text could come from an extension later, so fall back to
-;; the byte count rather than propagating a negative width into the arithmetic.
+;;; `text-cell-width` returns -1 for invalid UTF-8. A menu label is ours, not the
+;;; model's, but detail text could come from an extension later, so fall back to
+;;; the byte count rather than propagating a negative width into the arithmetic.
 (defn view-menu-cells [(text (slice u8))] (-> i64)
   (let [width (text-cell-width text)]
     (if (< width 0) (slice-len [u8] text) width)))
 
-;; Truncate to a cell budget on a scalar boundary, with an ellipsis when cut.
+;;; Truncate to a cell budget on a scalar boundary, with an ellipsis when cut.
 (defn view-menu-truncate [(allocator (dyn Allocator))
                           (text (slice u8))
                           (budget i64)] (-> (slice u8))
@@ -462,7 +462,7 @@
         (sb-push-str! (mut out) "…")
         (sb-finish! (mut out)))))
 
-;; `int->str` is a comptime primitive, so a runtime count is formatted by hand.
+;;; `int->str` is a comptime primitive, so a runtime count is formatted by hand.
 (defn view-menu-decimal [(allocator (dyn Allocator)) (value i64)] (-> (slice u8))
   (if (<= value 0)
       "0"
@@ -507,9 +507,9 @@
               (do (sb-push-byte! (mut out) (cast u8 32)) (set! i (+ (load i) 1)))))
     (sb-finish! (mut out))))
 
-;; Append the menu to a laid-out composer. The selected row is marked with a
-;; pointer glyph AND a role change: colour alone would make the selection
-;; invisible under NO_COLOR, which the layout contract forbids.
+;;; Append the menu to a laid-out composer. The selected row is marked with a
+;;; pointer glyph AND a role change: colour alone would make the selection
+;;; invisible under NO_COLOR, which the layout contract forbids.
 (defn view-layout-append-menu! [(allocator (dyn Allocator))
                                 (layout (ptr ViewLayout))
                                 (menu (ptr (ArrayList ViewMenuEntry)))
@@ -566,7 +566,7 @@
           0)
         0)))
 
-;; Resolve a semantic input anchor through the same flow algorithm as its text.
+;;; Resolve a semantic input anchor through the same flow algorithm as its text.
 (defn view-layout-input [(allocator (dyn Allocator))
                          (input ViewInput)
                          (width i64)] (-> ViewLayout)

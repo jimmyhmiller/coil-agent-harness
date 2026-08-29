@@ -59,11 +59,11 @@
         (do (alloc/abort) (load (field job results-data)))
         (primitive/index (load (field job results-data)) at))))
 
-;; macOS gives pthread workers a 512 KiB default stack. That is not enough for
-;; the subprocess capture path used by the bash tool: execute-bash ->
-;; subprocess/run crossed the guard page in a real TUI run and surfaced as the
-;; misleading shell message `bus error`. Tool implementations are an extension
-;; boundary, so give every tool worker an explicit, portable stack contract.
+;;; macOS gives pthread workers a 512 KiB default stack. That is not enough for
+;;; the subprocess capture path used by the bash tool: execute-bash ->
+;;; subprocess/run crossed the guard page in a real TUI run and surfaced as the
+;;; misleading shell message `bus error`. Tool implementations are an extension
+;;; boundary, so give every tool worker an explicit, portable stack contract.
 (const TOOL_WORKER_STACK_SIZE 8388608)
 (const TOOL_WORKER_GUARD_SIZE 65536)
 
@@ -85,9 +85,9 @@
               model
               payload))
 
-;; The proposal is the authoritative immutable description of a tool call. Later
-;; lifecycle events reference the same operation ID and do not need to duplicate or
-;; reconstruct these facts.
+;;; The proposal is the authoritative immutable description of a tool call. Later
+;;; lifecycle events reference the same operation ID and do not need to duplicate or
+;;; reconstruct these facts.
 (defn tool-proposal-payload [(allocator (dyn Allocator))
                              (call (ref ToolCall))] (-> Json)
   (let [(mut payload) (json-object allocator)]
@@ -170,10 +170,10 @@
     (set! (.finished-at-ms result) (now-ms))
     (load result)))
 
-;; Execute all schema-valid calls, using at most `max-parallel` worker threads. Results
-;; retain input order even though completion events reflect actual completion order.
-;; Each handler receives a thread-confined child region. Only the deeply promoted
-;; ToolResult survives in the synchronized run allocator after the worker joins.
+;;; Execute all schema-valid calls, using at most `max-parallel` worker threads. Results
+;;; retain input order even though completion events reflect actual completion order.
+;;; Each handler receives a thread-confined child region. Only the deeply promoted
+;;; ToolResult survives in the synchronized run allocator after the worker joins.
 (defn execute-tools-parallel [(allocator (dyn Allocator)) (request (ptr ToolExecutionRequest))] (-> ToolExecutionBatch)
   (let [(mut results) (al-new [ToolResult] allocator)
         (mut jobs) (al-new [ToolJob] allocator)

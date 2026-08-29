@@ -22,13 +22,13 @@
 (import "harness-model" :use *)
 (import "harness-provider-config" :use *)
 
-;; Whether a model takes a reasoning-effort setting, and what it costs to get it
-;; wrong. Sending `effort` to a model that does not accept it is an API error on
-;; some providers, so this is a real capability flag rather than a display hint.
-;;
-;; `default-effort` is meaningful only when `effort` is true; every row that
-;; cannot take one carries `none`, so the pair is never contradictory
-;; even though the picker would ignore the field either way.
+;;; Whether a model takes a reasoning-effort setting, and what it costs to get it
+;;; wrong. Sending `effort` to a model that does not accept it is an API error on
+;;; some providers, so this is a real capability flag rather than a display hint.
+;;;
+;;; `default-effort` is meaningful only when `effort` is true; every row that
+;;; cannot take one carries `none`, so the pair is never contradictory
+;;; even though the picker would ignore the field either way.
 (defstruct ModelChoice
   [(provider (slice u8))
    (model (slice u8))
@@ -69,8 +69,8 @@
 (defn model-catalog-at [(catalog (ptr ModelCatalog)) (at i64)] (-> (ptr ModelChoice))
   (al-elem [ModelChoice] (mut (.choices catalog)) at))
 
-;; Registration order is menu order, so the list reads newest-and-strongest
-;; first rather than alphabetically.
+;;; Registration order is menu order, so the list reads newest-and-strongest
+;;; first rather than alphabetically.
 (defn model-catalog-default [(allocator (dyn Allocator))] (-> ModelCatalog)
   (let [(mut catalog) (model-catalog-new allocator)]
     (model-catalog-add! (mut catalog)
@@ -170,9 +170,9 @@
                                       "none"))
     (load catalog)))
 
-;; Index of the entry matching a provider/model pair, or -1 when the current
-;; selection was typed rather than picked. The picker uses this to open on
-;; whatever is already selected instead of always at the top.
+;;; Index of the entry matching a provider/model pair, or -1 when the current
+;;; selection was typed rather than picked. The picker uses this to open on
+;;; whatever is already selected instead of always at the top.
 (defn model-catalog-find [(catalog (ptr ModelCatalog))
                           (provider (slice u8))
                           (model (slice u8))] (-> i64)
@@ -209,10 +209,10 @@
 
 (const EFFORT_CHOICE_COUNT 5)
 
-;; The ladder, cheapest first. `none` is deliberately absent: turning thinking
-;; off is a different decision from turning it down, it is rejected outright on
-;; some models and degrades tool calling on others, and a menu row is too easy a
-;; way to reach it by accident.
+;;; The ladder, cheapest first. `none` is deliberately absent: turning thinking
+;;; off is a different decision from turning it down, it is rejected outright on
+;;; some models and degrades tool calling on others, and a menu row is too easy a
+;;; way to reach it by accident.
 (defn effort-choice-at [(at i64)] (-> EffortChoice)
   (cond (= at 0) (effort-choice "low" "low" "short, scoped, latency-sensitive")
         (= at 1) (effort-choice "medium" "medium" "cost-sensitive balance")
@@ -235,13 +235,13 @@
 ;; Declared providers
 ;; ---------------------------------------------------------------------------
 
-;; Append a row for every provider the operator declared.
-;;
-;; They come after the built-ins because the menu is ordered by how often a choice
-;; is wanted, not by where it came from -- but they are in the menu at all, which is
-;; the difference between a provider you can pick and one you have to remember the
-;; name of. A declared provider with no default model is skipped rather than listed:
-;; a row that cannot be selected into a working request is worse than no row.
+;;; Append a row for every provider the operator declared.
+;;;
+;;; They come after the built-ins because the menu is ordered by how often a choice
+;;; is wanted, not by where it came from -- but they are in the menu at all, which is
+;;; the difference between a provider you can pick and one you have to remember the
+;;; name of. A declared provider with no default model is skipped rather than listed:
+;;; a row that cannot be selected into a working request is worse than no row.
 (defn model-catalog-add-declared! [(catalog (ptr ModelCatalog))
                                    (config (ptr ProviderConfig))] (-> i64)
   (let [count (provider-config-count config)
@@ -267,8 +267,8 @@
                 (set! i (+ (load i) 1))))))
   0)
 
-;; The menu an operator actually sees: the built-in shortlist plus whatever they
-;; declared.
+;;; The menu an operator actually sees: the built-in shortlist plus whatever they
+;;; declared.
 (defn model-catalog-with-declared [(allocator (dyn Allocator))
                                    (config (ptr ProviderConfig))] (-> ModelCatalog)
   (let [(mut catalog) (model-catalog-default allocator)]

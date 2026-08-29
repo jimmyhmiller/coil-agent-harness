@@ -75,8 +75,8 @@
    (pending (ArrayList (slice u8)))
    (pending-next i64)])
 
-;; Notifications are emitted by background run threads. Keep their tiny queue
-;; behind its own lock so the input thread never races an append or a /new.
+;;; Notifications are emitted by background run threads. Keep their tiny queue
+;;; behind its own lock so the input thread never races an append or a /new.
 (defn tui-notification-lock! [(source (ptr TuiNotificationSource))] (-> i64)
   (loop (if (= (atomic-cas (field source lock) 0 1) 0) (break) 0))
   0)
@@ -241,11 +241,11 @@
         (tui-output-write-line allocator 1 text)
         text)))
 
-;; The provider names `/model` accepts. `auto` defers to the routing profile; every
-;; other name must be one the runtime factory can actually resolve, which is exactly
-;; what the router already knows. Validating here means a typo is rejected while the
-;; old selection still works, instead of being stored and failing on the next turn
-;; with an error that never names the bad value.
+;;; The provider names `/model` accepts. `auto` defers to the routing profile; every
+;;; other name must be one the runtime factory can actually resolve, which is exactly
+;;; what the router already knows. Validating here means a typo is rejected while the
+;;; old selection still works, instead of being stored and failing on the next turn
+;;; with an error that never names the bad value.
 (defn tui-selectable-provider? [(provider (slice u8))
                                 (config (ptr ProviderConfig))] (-> bool)
   (or (= provider "auto") (route-known-provider? provider config)))
@@ -253,8 +253,8 @@
 (defn tui-provider-choices [] (-> (slice u8))
   "auto, openai, deepseek-openai, deepseek-anthropic, codex, claude")
 
-;; Empty input means "keep what is already selected", so pressing Enter through the
-;; prompts is a no-op rather than a silent reset to auto.
+;;; Empty input means "keep what is already selected", so pressing Enter through the
+;;; prompts is a no-op rather than a silent reset to auto.
 (defn tui-entered-or [(entered (slice u8)) (current (slice u8))] (-> (slice u8))
   (if (= (slice-len [u8] entered) 0) current entered))
 
@@ -938,8 +938,8 @@
                 (set! i (+ (load i) 1)))))
     0))
 
-;; The menu reads one compact summary stream. No run journal is opened or parsed
-;; until the person selects a session.
+;;; The menu reads one compact summary stream. No run journal is opened or parsed
+;;; until the person selects a session.
 (defn tui-indexed-sessions [(allocator (dyn Allocator))
                             (service (ptr RunService))] (-> (ArrayList TuiSession))
   (let [(mut sessions) (al-new [TuiSession] allocator)]
@@ -989,9 +989,9 @@
     (tui-sort-sessions! (mut sessions))
     (load sessions)))
 
-;; Every default TUI invocation owns a journal, so sessions can be enumerated
-;; without a second index that might drift from the durable record. The first
-;; tui-user run is both the session's title source and its originating folder.
+;;; Every default TUI invocation owns a journal, so sessions can be enumerated
+;;; without a second index that might drift from the durable record. The first
+;;; tui-user run is both the session's title source and its originating folder.
 (defn tui-sessions [(allocator (dyn Allocator))
                     (service (ptr RunService))] (-> (ArrayList TuiSession))
   (tui-indexed-sessions allocator service))
@@ -1083,9 +1083,9 @@
         0))
     (load model)))
 
-;; Rebuild the selected conversation with the same event adapter and layout used
-;; by a live run. Resuming therefore restores visible scrollback before the next
-;; composer opens instead of only restoring invisible model context.
+;;; Rebuild the selected conversation with the same event adapter and layout used
+;;; by a live run. Resuming therefore restores visible scrollback before the next
+;;; composer opens instead of only restoring invisible model context.
 (defn tui-replay-session! [(allocator (dyn Allocator))
                            (session (ptr TuiSession))
                            (profile (ref TerminalProfile))] (-> i64)

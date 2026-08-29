@@ -44,14 +44,14 @@
   (InputSuspended [])
   (InputClosed []))
 
-;; `commands` is null for secondary prompts (a run id, a provider name), which is
-;; how those prompts get no completion menu without a separate editor type.
-;;
-;; The completion menu is DERIVED from the text rather than stored: matches are
-;; recomputed from the buffer on every read. Only the selection index and an
-;; explicit dismissal are state, because those are the two things the text cannot
-;; tell you. Storing the match list too would give it a second chance to disagree
-;; with the buffer.
+;;; `commands` is null for secondary prompts (a run id, a provider name), which is
+;;; how those prompts get no completion menu without a separate editor type.
+;;;
+;;; The completion menu is DERIVED from the text rather than stored: matches are
+;;; recomputed from the buffer on every read. Only the selection index and an
+;;; explicit dismissal are state, because those are the two things the text cannot
+;;; tell you. Storing the match list too would give it a second chance to disagree
+;;; with the buffer.
 (defstruct InputEditor
   [(allocator (dyn Allocator))
    (bytes (ArrayList u8))
@@ -236,10 +236,10 @@
 ;; Completion menu
 ;; ---------------------------------------------------------------------------
 
-;; The buffer is a bare slash command -- and so a completion candidate -- only
-;; while it is a single leading-slash word. Once a space or newline appears the
-;; user is typing an argument, not choosing a command, and the menu must get out
-;; of the way.
+;;; The buffer is a bare slash command -- and so a completion candidate -- only
+;;; while it is a single leading-slash word. Once a space or newline appears the
+;;; user is typing an argument, not choosing a command, and the menu must get out
+;;; of the way.
 (defn input-editor-menu-prefix [(editor (ptr InputEditor))] (-> (slice u8))
   (let [text (input-editor-text editor)
         n (slice-len [u8] text)]
@@ -269,8 +269,8 @@
       (let [(mut matches) (input-editor-menu-matches editor)]
         (> (al-len [i64] (load matches)) 0))))
 
-;; Clamp rather than wrap-and-store: the match list shrinks as the user types, so
-;; a stored index is routinely stale by the time it is read.
+;;; Clamp rather than wrap-and-store: the match list shrinks as the user types, so
+;;; a stored index is routinely stale by the time it is read.
 (defn input-editor-menu-selected [(editor (ptr InputEditor))] (-> i64)
   (let [(mut matches) (input-editor-menu-matches editor)
         count (al-len [i64] (load matches))
@@ -290,10 +290,10 @@
           (set! (.menu-index editor) next)
           (InputChanged)))))
 
-;; True when taking the highlighted row would actually change the line. Enter
-;; only steals the keystroke when this holds: with `/quit` typed and `/quit`
-;; highlighted, "accepting" it is a no-op, and a no-op that also swallows Enter
-;; is a composer that will not submit.
+;;; True when taking the highlighted row would actually change the line. Enter
+;;; only steals the keystroke when this holds: with `/quit` typed and `/quit`
+;;; highlighted, "accepting" it is a no-op, and a no-op that also swallows Enter
+;;; is a composer that will not submit.
 (defn input-editor-menu-would-change? [(editor (ptr InputEditor))] (-> bool)
   (let [registry (load (field editor commands))
         (mut matches) (input-editor-menu-matches editor)
@@ -317,9 +317,9 @@
           (set! (.menu-index editor) 0)
           (InputChanged)))))
 
-;; Tab extends to the longest shared prefix first and only accepts the selection
-;; once there is nothing left to share. That is what makes Tab feel like a shell:
-;; it never guesses past the point where the candidates agree.
+;;; Tab extends to the longest shared prefix first and only accepts the selection
+;;; once there is nothing left to share. That is what makes Tab feel like a shell:
+;;; it never guesses past the point where the candidates agree.
 (defn input-editor-complete! [(editor (ptr InputEditor))] (-> InputIntent)
   (let [registry (load (field editor commands))
         prefix (input-editor-menu-prefix editor)]
@@ -379,8 +379,8 @@
                               (set! at (+ (load at) 1))))))
               (load found))))))
 
-;; Search backwards from `from`, newest first. Returns -1 for no match, which
-;; leaves the buffer alone so a failing search does not destroy what was typed.
+;;; Search backwards from `from`, newest first. Returns -1 for no match, which
+;;; leaves the buffer alone so a failing search does not destroy what was typed.
 (defn input-editor-search-find [(editor (ptr InputEditor)) (from i64)] (-> i64)
   (let [needle (input-editor-search-text editor)
         (mut at) from

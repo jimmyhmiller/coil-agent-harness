@@ -8,17 +8,17 @@
 (import "coil.match" :use *)
 (import "harness-tui-frame" :use *)
 
-;; Declarative presentation nodes. They describe hierarchy and intent only; cell
-;; measurement, wrapping, row budgets, and terminal coordinates belong to layout.
+;;; Declarative presentation nodes. They describe hierarchy and intent only; cell
+;;; measurement, wrapping, row budgets, and terminal coordinates belong to layout.
 (defstruct ViewFlow
   [(role StyleRole)
    (first-prefix (slice u8))
    (continuation-prefix (slice u8))
    (text (slice u8))])
 
-;; One row of a selection list rendered beneath the composer. Kept generic on
-;; purpose: the view layer knows about "a list with one row highlighted", not
-;; about slash commands, so the same node serves any future picker.
+;;; One row of a selection list rendered beneath the composer. Kept generic on
+;;; purpose: the view layer knows about "a list with one row highlighted", not
+;;; about slash commands, so the same node serves any future picker.
 (defstruct ViewMenuEntry
   [(label (slice u8))
    (detail (slice u8))
@@ -34,8 +34,8 @@
    (menu (ptr (ArrayList ViewMenuEntry)))
    (menu-overflow i64)])
 
-;; A fenced code block. The language is kept as the author wrote it so the
-;; highlighter, not the view layer, decides what it means.
+;;; A fenced code block. The language is kept as the author wrote it so the
+;;; highlighter, not the view layer, decides what it means.
 (defstruct ViewCode
   [(language (slice u8))
    (code (slice u8))

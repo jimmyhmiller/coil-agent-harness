@@ -154,15 +154,15 @@
                 (set! i (+ (load i) 1))))))
   0)
 
-;; How many times a worker that says "not ready" is sent back in before the run
-;; gives up. A worker reporting what is left is describing work, not failing:
-;; the answer to "not ready" is "carry on", not "stop everything". The bound
-;; exists so a worker that cannot make progress cannot spend forever proving it.
+;;; How many times a worker that says "not ready" is sent back in before the run
+;;; gives up. A worker reporting what is left is describing work, not failing:
+;;; the answer to "not ready" is "carry on", not "stop everything". The bound
+;;; exists so a worker that cannot make progress cannot spend forever proving it.
 (const FACTORY_STAGE_ATTEMPTS 5)
 
-;; What to say to a worker that reported it was not done. Its own sentence is the
-;; instruction: it has just written the most accurate description of the
-;; remaining work that anybody has.
+;;; What to say to a worker that reported it was not done. Its own sentence is the
+;;; instruction: it has just written the most accurate description of the
+;;; remaining work that anybody has.
 (defn factory-continue-prompt [(allocator (dyn Allocator))
                                (prompt (slice u8))
                                (summary (slice u8))
@@ -537,7 +537,7 @@
       0)
     (load result)))
 
-;; What one worker's commit says: the factory, then the worker whose turn it was.
+;;; What one worker's commit says: the factory, then the worker whose turn it was.
 (defn factory-commit-message [(allocator (dyn Allocator))
                               (definition (ref FactoryDefinition))
                               (worker (ref FactoryWorker))] (-> (slice u8))

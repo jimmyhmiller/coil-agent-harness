@@ -14,8 +14,8 @@
 (import "harness-tool" :use *)
 (import "provider-common" :use *)
 
-;; Routing is run state, not factory metadata. Worker files describe the available
-;; topology; these fields record the current traversal through that live topology.
+;;; Routing is run state, not factory metadata. Worker files describe the available
+;;; topology; these fields record the current traversal through that live topology.
 (defstruct FactoryWorkflowState
   [(allocator (dyn Allocator))
    (lock (ptr i64))

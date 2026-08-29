@@ -2,7 +2,7 @@
 
 (import "harness-tui-frame" :use *)
 
-;; Renderer output is data. Only the terminal driver interprets these operations.
+;;; Renderer output is data. Only the terminal driver interprets these operations.
 (defsum TerminalOperation
   (TerminalWrite [(text (slice u8))])
   (TerminalLineBreak [])

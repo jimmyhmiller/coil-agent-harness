@@ -54,35 +54,35 @@
 (const PROVIDER_CONFIG_FILE "providers.json")
 (const PROVIDER_CONFIG_VERSION 1)
 
-;; No wall-clock limit on a request by default.
-;;
-;; A timeout cannot tell a slow answer from a stuck one, so any value picked here
-;; would eventually cut off a legitimate generation: a local model emitting several
-;; thousand tokens at ten to twenty tokens a second can legitimately run for many
-;; minutes, and a request killed mid-file is indistinguishable from a refusal in the
-;; transcript. Liveness belongs to supervision, which can look at whether tokens are
-;; still arriving, rather than to a number chosen in advance.
-;;
-;; Requests remain interruptible: the cancellation token is honoured by the stream
-;; sink, so a cancelled run still stops promptly. An operator who does want a hard
-;; ceiling can set `request_timeout_ms`; 0 means no limit.
+;;; No wall-clock limit on a request by default.
+;;;
+;;; A timeout cannot tell a slow answer from a stuck one, so any value picked here
+;;; would eventually cut off a legitimate generation: a local model emitting several
+;;; thousand tokens at ten to twenty tokens a second can legitimately run for many
+;;; minutes, and a request killed mid-file is indistinguishable from a refusal in the
+;;; transcript. Liveness belongs to supervision, which can look at whether tokens are
+;;; still arriving, rather than to a number chosen in advance.
+;;;
+;;; Requests remain interruptible: the cancellation token is honoured by the stream
+;;; sink, so a cancelled run still stops promptly. An operator who does want a hard
+;;; ceiling can set `request_timeout_ms`; 0 means no limit.
 (const PROVIDER_NO_TIMEOUT 0)
 
-;; The only adapter an operator can currently declare. Naming an unsupported kind
-;; is refused outright rather than defaulted, because guessing the wire format of
-;; someone else's server is how you get a run that fails halfway through.
+;;; The only adapter an operator can currently declare. Naming an unsupported kind
+;;; is refused outright rather than defaulted, because guessing the wire format of
+;;; someone else's server is how you get a run that fails halfway through.
 (const PROVIDER_KIND_OPENAI_CHAT "openai-chat")
 
-;; How a configured provider expresses reasoning effort on the wire. This is a real
-;; incompatibility rather than a preference: llama.cpp ignores a top-level
-;; `reasoning_effort` entirely and only honours the value when it is passed through
-;; to the chat template, while hosted OpenAI-compatible services do the opposite.
+;;; How a configured provider expresses reasoning effort on the wire. This is a real
+;;; incompatibility rather than a preference: llama.cpp ignores a top-level
+;;; `reasoning_effort` entirely and only honours the value when it is passed through
+;;; to the chat template, while hosted OpenAI-compatible services do the opposite.
 (const PROVIDER_REASONING_QWEN_JINJA "qwen-jinja")
 (const PROVIDER_REASONING_OPENAI "openai")
 (const PROVIDER_REASONING_NONE "none")
 
-;; Where the provider's HTTP endpoint is. Direct is an ordinary base URL; ssh means
-;; the harness runs the forward itself and the base URL is not knowable until it has.
+;;; Where the provider's HTTP endpoint is. Direct is an ordinary base URL; ssh means
+;;; the harness runs the forward itself and the base URL is not knowable until it has.
 (defsum ProviderTransport
   (DirectTransport [(base-url (slice u8))])
   (SshTransport [(spec SshTunnelSpec)]))
@@ -121,8 +121,8 @@
 (defn provider-config-at [(config (ptr ProviderConfig)) (at i64)] (-> (ptr ConfiguredProvider))
   (al-elem [ConfiguredProvider] (mut (.providers config)) at))
 
-;; Index of the provider with this name, or -1. Callers use the index rather than a
-;; borrowed pointer so a configuration can be consulted without pinning its storage.
+;;; Index of the provider with this name, or -1. Callers use the index rather than a
+;;; borrowed pointer so a configuration can be consulted without pinning its storage.
 (defn provider-config-find [(config (ptr ProviderConfig)) (name (slice u8))] (-> i64)
   (let [n (provider-config-count config)
         (mut i) 0
@@ -139,8 +139,8 @@
 (defn provider-config-has? [(config (ptr ProviderConfig)) (name (slice u8))] (-> bool)
   (>= (provider-config-find config name) 0))
 
-;; Names the harness resolves itself. A configuration may not claim one: routing is
-;; by name, so shadowing a built-in would silently redirect existing work.
+;;; Names the harness resolves itself. A configuration may not claim one: routing is
+;;; by name, so shadowing a built-in would silently redirect existing work.
 (defn provider-config-reserved-name? [(name (slice u8))] (-> bool)
   (cond (= name "auto") true
         (= name "openai") true
@@ -157,9 +157,9 @@
         (= name "async-tool") true
         :else false))
 
-;; OpenRouter is built in because it is a stable public service, not a machine-local
-;; deployment. It still uses the generic Chat Completions adapter so its wire format
-;; cannot drift from other OpenAI-compatible providers.
+;;; OpenRouter is built in because it is a stable public service, not a machine-local
+;;; deployment. It still uses the generic Chat Completions adapter so its wire format
+;;; cannot drift from other OpenAI-compatible providers.
 (defn openrouter-config [] (-> ConfiguredProvider)
   (let [provider (primitive/alloc-stack ConfiguredProvider)]
     (set! (.name provider) "openrouter")
@@ -207,9 +207,9 @@
       (json-number-i64 (json-get value key))
       fallback))
 
-;; Prefix a message with the entry it came from. An operator with several providers
-;; needs to know which one is wrong, and entries are identified by name -- or by
-;; position when the name itself is what is missing.
+;;; Prefix a message with the entry it came from. An operator with several providers
+;;; needs to know which one is wrong, and entries are identified by name -- or by
+;;; position when the name itself is what is missing.
 (defn config-entry-error [(allocator (dyn Allocator))
                           (name (slice u8))
                           (at i64)
@@ -230,9 +230,9 @@
     (sb-push-str! (mut text) message)
     (sb-str (load text))))
 
-;; Parse the `transport` object. Exactly one of `ssh` or `url` must be present:
-;; accepting both would leave which one wins undefined, and accepting neither
-;; leaves nowhere to send the request.
+;;; Parse the `transport` object. Exactly one of `ssh` or `url` must be present:
+;;; accepting both would leave which one wins undefined, and accepting neither
+;;; leaves nowhere to send the request.
 (defn config-transport [(allocator (dyn Allocator))
                         (entry Json)
                         (transport (mut ProviderTransport))] (-> (slice u8))
@@ -279,7 +279,7 @@
       (or (= dialect PROVIDER_REASONING_OPENAI)
           (= dialect PROVIDER_REASONING_NONE))))
 
-;; Read one entry into `provider`, returning "" or the reason it was rejected.
+;;; Read one entry into `provider`, returning "" or the reason it was rejected.
 (defn config-provider-entry [(allocator (dyn Allocator))
                              (entry Json)
                              (at i64)
@@ -338,8 +338,8 @@
         ""
         "providers.json: unsupported version; this harness reads version 1")))
 
-;; Parse an already-read document. Separate from reading the file so the format has
-;; tests that do not need a filesystem.
+;;; Parse an already-read document. Separate from reading the file so the format has
+;;; tests that do not need a filesystem.
 (defn provider-config-parse [(allocator (dyn Allocator))
                              (source (slice u8))] (-> ProviderConfigResult)
   (let [parsed (json-parse allocator source)]
@@ -374,12 +374,12 @@
                     (ProviderConfigInvalid (load failure))
                     (ProviderConfigLoaded (load config)))))))))
 
-;; Load the operator's configuration.
-;;
-;; A missing file yields an empty configuration, because having none is the normal
-;; case and must behave exactly like having an empty one. A file that exists but
-;; cannot be read is a failure: the operator declared providers and the harness
-;; cannot honour them.
+;;; Load the operator's configuration.
+;;;
+;;; A missing file yields an empty configuration, because having none is the normal
+;;; case and must behave exactly like having an empty one. A file that exists but
+;;; cannot be read is a failure: the operator declared providers and the harness
+;;; cannot honour them.
 (defn provider-config-load [(allocator (dyn Allocator))] (-> ProviderConfigResult)
   (let [path (provider-config-path allocator)]
     (if (not (path-exists? allocator path))
@@ -388,12 +388,12 @@
           (Err [failure] (ProviderConfigInvalid "providers.json exists but could not be read"))
           (Ok [bytes] (provider-config-parse allocator bytes))))))
 
-;; What a configured provider can do.
-;;
-;; Derived from the entry rather than from a table keyed by provider name, because
-;; the harness cannot know what someone else's server supports. This lives beside
-;; the format rather than in the adapter so routing can ask about a provider without
-;; depending on the code that talks to it.
+;;; What a configured provider can do.
+;;;
+;;; Derived from the entry rather than from a table keyed by provider name, because
+;;; the harness cannot know what someone else's server supports. This lives beside
+;;; the format rather than in the adapter so routing can ask about a provider without
+;;; depending on the code that talks to it.
 (defn configured-provider-capabilities [(provider (ptr ConfiguredProvider))] (-> ProviderCapabilities)
   (let [capabilities (primitive/alloc-stack ProviderCapabilities)]
     (set! (.streaming capabilities) true)

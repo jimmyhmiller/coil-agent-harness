@@ -18,15 +18,15 @@
 (import "harness-bus-frame" :use *)
 (import "harness-bus-unix" :use *)
 
-;; Declared here rather than in coil.socket on purpose: externs are not deduped
-;; across modules, and `unlink` already exists in the compiler's own modules, so
-;; a second declaration in the stdlib would break any binary pulling in both.
+;;; Declared here rather than in coil.socket on purpose: externs are not deduped
+;;; across modules, and `unlink` already exists in the compiler's own modules, so
+;;; a second declaration in the stdlib would break any binary pulling in both.
 (extern unlink :cc c [(ptr i8)] (-> i32))
 
 (const SOCKET_PATH "/tmp/harness-bus-unix-test.sock")
 
-;; The stdlib cannot tell a stale socket file from a live server's, so removing
-;; it is the caller's job. Here the test owns the path outright.
+;;; The stdlib cannot tell a stale socket file from a live server's, so removing
+;;; it is the caller's job. Here the test owns the path outright.
 (defn remove-socket-path [] (-> i64)
   (let [c-path (str/str->cstr (malloc-allocator) SOCKET_PATH)]
     (if (= (cast i64 c-path) 0)

@@ -43,8 +43,8 @@
     (set! (.present (.continuation request)) false)
     request))
 
-;; A declared provider built from the configuration parser rather than by hand, so
-;; these tests exercise the same path an operator's file takes.
+;;; A declared provider built from the configuration parser rather than by hand, so
+;;; these tests exercise the same path an operator's file takes.
 (defn declared [(allocator (dyn Allocator)) (source (slice u8))] (-> (ptr OpenAIChatContext))
   (match (provider-config-parse allocator source)
     (ProviderConfigInvalid [message] (cast (ptr OpenAIChatContext) 0))

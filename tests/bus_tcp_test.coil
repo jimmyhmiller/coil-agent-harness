@@ -19,8 +19,8 @@
 (import "harness-bus-frame" :use *)
 (import "harness-bus-tcp" :use *)
 
-;; Bring up a connected pair on the loopback interface. Port 0 lets the kernel
-;; pick, so the test never collides with a real service or another test run.
+;;; Bring up a connected pair on the loopback interface. Port 0 lets the kernel
+;;; pick, so the test never collides with a real service or another test run.
 (defn connect-pair [(allocator (dyn Allocator))
                     (listener (ptr socket/TcpListener))
                     (client (ptr TcpTransport))

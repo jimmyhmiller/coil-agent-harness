@@ -74,7 +74,7 @@
                 (set! i (+ (load i) 1)))))
     (load input)))
 
-;; Translate the common model request into the current Responses API shape.
+;;; Translate the common model request into the current Responses API shape.
 (defn openai-request-json-with-output-limit [(allocator (dyn Allocator))
                                              (request (ptr ModelRequest))
                                              (include-output-limit bool)] (-> Json)

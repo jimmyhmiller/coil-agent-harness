@@ -32,8 +32,8 @@
 (defn utf8-continuation? [(byte i64)] (-> bool)
   (and (>= byte 128) (<= byte 191)))
 
-;; Strict decoding rejects overlong encodings, UTF-16 surrogates, truncated input,
-;; stray continuation bytes, and values above U+10FFFF.
+;;; Strict decoding rejects overlong encodings, UTF-16 surrogates, truncated input,
+;;; stray continuation bytes, and values above U+10FFFF.
 (defn utf8-decode [(text (slice u8)) (at i64)] (-> Utf8Scalar)
   (let [count (slice-len [u8] text)]
     (if (or (< at 0) (>= at count))
@@ -78,8 +78,8 @@
                       (utf8-invalid))
                 :else (utf8-invalid))))))
 
-;; Return -1 for terminal controls or invalid scalar values, matching the useful
-;; contract of wcwidth. Callers decide whether to reject or visibly escape them.
+;;; Return -1 for terminal controls or invalid scalar values, matching the useful
+;;; contract of wcwidth. Callers decide whether to reject or visibly escape them.
 (defn unicode-cell-width [(codepoint i64)] (-> i64)
   (cond (= codepoint 0) 0
         (or (< codepoint 32) (and (>= codepoint 127) (< codepoint 160))) -1

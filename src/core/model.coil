@@ -25,11 +25,11 @@
   (ToolsRequired [])
   (ToolForced [(name (slice u8))]))
 
-;; Provider-neutral continuation data. `previous-output` is deliberately opaque to
-;; the runtime: an adapter can preserve reasoning/signature items without projecting
-;; them into a lossy common message format.
-;; One completed turn: what the model said, and the results of the tools it
-;; called. A wire with no server-side history has to resend every one of these.
+;;; Provider-neutral continuation data. `previous-output` is deliberately opaque to
+;;; the runtime: an adapter can preserve reasoning/signature items without projecting
+;;; them into a lossy common message format.
+;;; One completed turn: what the model said, and the results of the tools it
+;;; called. A wire with no server-side history has to resend every one of these.
 (defstruct ContinuationTurn
   [(output Json)
    (results (ptr (ArrayList ToolResult)))
@@ -163,8 +163,8 @@
     (ModelOk [response] (ModelOk (model-response-clone-into target response)))
     (ModelErr [failure] (ModelErr (model-failure-clone-into target failure)))))
 
-;; Capabilities are explicit provider-boundary facts used by routing and UIs. Cost
-;; tier is a relative policy input (1 is cheapest), not a billing estimate.
+;;; Capabilities are explicit provider-boundary facts used by routing and UIs. Cost
+;;; tier is a relative policy input (1 is cheapest), not a billing estimate.
 (defstruct ProviderCapabilities
   [(streaming bool)
    (harness-tools bool)

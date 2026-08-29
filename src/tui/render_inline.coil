@@ -9,15 +9,15 @@
 (import "harness-tui-frame" :use *)
 (import "harness-tui-terminal-operation" :use *)
 
-;; While a live region exists, the cursor is left on its final row. A trailing LF
-;; would scroll the terminal whenever that row is at the bottom of the viewport,
-;; turning every streamed delta into another scrollback entry. Stable output is
-;; the only output allowed to advance beyond the final rendered row.
-;; `owner` is null for a renderer that does not retain frames, which keeps the
-;; original constructor working and makes diffing strictly opt-in. A retaining
-;; renderer keeps its own deep copy of the last live frame so the next one can
-;; be diffed against it; see harness-tui-diff for why it copies rather than
-;; hashes.
+;;; While a live region exists, the cursor is left on its final row. A trailing LF
+;;; would scroll the terminal whenever that row is at the bottom of the viewport,
+;;; turning every streamed delta into another scrollback entry. Stable output is
+;;; the only output allowed to advance beyond the final rendered row.
+;;; `owner` is null for a renderer that does not retain frames, which keeps the
+;;; original constructor working and makes diffing strictly opt-in. A retaining
+;;; renderer keeps its own deep copy of the last live frame so the next one can
+;;; be diffed against it; see harness-tui-diff for why it copies rather than
+;;; hashes.
 (defstruct InlineRenderer
   [(previous-live-height i64)
    (owner (dyn Allocator))
@@ -26,9 +26,9 @@
    (retained-domain (ptr AllocationDomain))
    (has-retained bool)])
 
-;; Retain the live frame for the next plan, releasing the previous retention.
-;; The old domain is closed only AFTER the new copy exists, so a failed
-;; allocation leaves the renderer with no retention rather than a dangling one.
+;;; Retain the live frame for the next plan, releasing the previous retention.
+;;; The old domain is closed only AFTER the new copy exists, so a failed
+;;; allocation leaves the renderer with no retention rather than a dangling one.
 (defn inline-renderer-retain! [(renderer (ptr InlineRenderer))
                                (live (ptr Frame))] (-> i64)
   (let [owner (load (field renderer owner))]
@@ -49,8 +49,8 @@
                   0)
                 0))))))
 
-;; Release the retained frame. A renderer that outlives its allocator must be
-;; closed, or the last retention leaks.
+;;; Release the retained frame. A renderer that outlives its allocator must be
+;;; closed, or the last retention leaks.
 (defn inline-renderer-close! [(renderer (ptr InlineRenderer))] (-> i64)
   (when (load (field renderer has-retained))
     (allocation-domain-close! (load (field renderer owner))
@@ -59,7 +59,7 @@
     0)
   0)
 
-;; A renderer that diffs consecutive live frames instead of repainting them.
+;;; A renderer that diffs consecutive live frames instead of repainting them.
 (defn inline-renderer-new-retaining [(owner (dyn Allocator))] (-> InlineRenderer)
   (let [renderer (primitive/alloc-stack InlineRenderer)]
     (set! (.previous-live-height renderer) 0)
@@ -98,8 +98,8 @@
                   (store! row (+ (load row) 1)))))))
   0)
 
-;; Streaming output leaves the cursor on its final owned row, unlike the input
-;; renderer which leaves the cursor below its owned region.
+;;; Streaming output leaves the cursor on its final owned row, unlike the input
+;;; renderer which leaves the cursor below its owned region.
 (defn inline-plan-clear-live! [(operations (ptr (ArrayList TerminalOperation)))
                                (height i64)] (-> i64)
   (when (> height 0)
@@ -146,8 +146,8 @@
                 (set! at (+ (load at) 1)))))
     0))
 
-;; Draw mutable rows without advancing past the final row. Inter-row CRLF is
-;; safe; only a line break after the last row would grow scrollback on redraw.
+;;; Draw mutable rows without advancing past the final row. Inter-row CRLF is
+;;; safe; only a line break after the last row would grow scrollback on redraw.
 (defn inline-plan-live-frame! [(operations (ptr (ArrayList TerminalOperation)))
                                (frame (ref Frame))] (-> i64)
   (let [(mut at) 0
@@ -175,10 +175,10 @@
                 (set! at (+ (load at) 1)))))
     0))
 
-;; Make room for a growing live frame before painting any of its content. If the
-;; cursor is already on the terminal's bottom row, these line breaks scroll erased
-;; blank rows into scrollback. Painting first would instead make each partial first
-;; line immutable as the frame grows, which is the streamed-text duplication bug.
+;;; Make room for a growing live frame before painting any of its content. If the
+;;; cursor is already on the terminal's bottom row, these line breaks scroll erased
+;;; blank rows into scrollback. Painting first would instead make each partial first
+;;; line immutable as the frame grows, which is the streamed-text duplication bug.
 (defn inline-plan-reserve-live! [(operations (ptr (ArrayList TerminalOperation)))
                                  (height i64)] (-> i64)
   (when (> height 1)
@@ -192,8 +192,8 @@
     0)
   0)
 
-;; A committed frame is written once after the old live region is erased. The new
-;; live frame is then drawn beneath it and remains the only mutable terminal area.
+;;; A committed frame is written once after the old live region is erased. The new
+;;; live frame is then drawn beneath it and remains the only mutable terminal area.
 (defn inline-renderer-plan-with! [(renderer (ptr InlineRenderer))
                                   (scratch (dyn Allocator))
                                   (committed (ptr Frame))

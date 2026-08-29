@@ -32,9 +32,9 @@
 
 (const SCRATCH "/tmp/harness-cc-discovery-test")
 
-;; Point every directory lookup at scratch space. XDG_RUNTIME_DIR is cleared
-;; because it wins over both CLAUDE_CODE_TMPDIR and TMPDIR, so leaving it set on
-;; a Linux box! would silently test the wrong directories.
+;;; Point every directory lookup at scratch space. XDG_RUNTIME_DIR is cleared
+;;; because it wins over both CLAUDE_CODE_TMPDIR and TMPDIR, so leaving it set on
+;;; a Linux box! would silently test the wrong directories.
 (defn redirect-environment! [(allocator (dyn Allocator))] (-> i64)
   (os/env-unset allocator "XDG_RUNTIME_DIR")
   (os/env-unset allocator "CLAUDE_CODE_MESSAGING_SOCKET")
@@ -66,8 +66,8 @@
                 (set! i (+ (load i) 1)))))
     0))
 
-;; Leftovers from an earlier run look exactly like stale peers, which is a state
-;; some of these tests assert the absence of.
+;;; Leftovers from an earlier run look exactly like stale peers, which is a state
+;;; some of these tests assert the absence of.
 (defn reset-realm! [(realm (ptr CcRealm)) (allocator (dyn Allocator))] (-> i64)
   (clear-directory! allocator (.socket-dir realm))
   (clear-directory! allocator (.sessions-dir realm))
@@ -83,15 +83,15 @@
                           (name (slice u8))] (-> (slice u8))
   (path-join allocator (.sessions-dir realm) name))
 
-;; Bind and keep listening. The caller owns the listener for the rest of the
-;; test, which is what makes the probe see it as alive.
+;;; Bind and keep listening. The caller owns the listener for the rest of the
+;;; test, which is what makes the probe see it as alive.
 (defn listen-at! [(listener (ptr socket/UnixListener)) (path (slice u8))] (-> bool)
   (match (socket/unix-listen listener path 4)
     (Err [failure] false)
     (Ok [_] true)))
 
-;; Bind then close, leaving the socket file behind with nothing serving it --
-;; exactly what a SIGKILLed session leaves in the directory.
+;;; Bind then close, leaving the socket file behind with nothing serving it --
+;;; exactly what a SIGKILLed session leaves in the directory.
 (defn leave-stale-socket! [(path (slice u8))] (-> bool)
   (let [listener (primitive/alloc-stack socket/UnixListener)]
     (if (not (listen-at! listener path))

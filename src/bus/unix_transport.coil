@@ -25,22 +25,22 @@
 
 (defstruct UnixTransport [(connection socket/UnixConnection)])
 
-;; Take ownership of a connection accepted elsewhere (the server side).
+;;; Take ownership of a connection accepted elsewhere (the server side).
 (defn unix-transport-adopt! [(transport (ptr UnixTransport))
                              (connection socket/UnixConnection)] (-> i64)
   (set! (.connection transport) connection)
   0)
 
-;; Dial a peer (the client side). Returns 0, or a negative transport code.
+;;; Dial a peer (the client side). Returns 0, or a negative transport code.
 (defn unix-transport-connect! [(transport (ptr UnixTransport))
                                (path (slice u8))] (-> i64)
   (match (socket/unix-connect (field transport connection) path)
     (Err [failure] TRANSPORT_FAILED)
     (Ok [_] 0)))
 
-;; See tcp_transport.coil: going through coil.socket's own stable error
-;; numbering rather than matching the sum keeps this working as variants are
-;; added, and a peer disconnecting is the only case the bus distinguishes.
+;;; See tcp_transport.coil: going through coil.socket's own stable error
+;;; numbering rather than matching the sum keeps this working as variants are
+;;; added, and a peer disconnecting is the only case the bus distinguishes.
 (const SOCKET_ERROR_CLOSED 2)
 
 (defn socket-error-transport-code [(failure socket/SocketError)] (-> i64)

@@ -114,7 +114,7 @@
               (and (= (slice-get [u8] text (+ at 1)) (cast u8 96))
                    (= (slice-get [u8] text (+ at 2)) (cast u8 96)))))))
 
-;; Push `body` as alternating prose and code nodes.
+;;; Push `body` as alternating prose and code nodes.
 (defn layout-push-markdown! [(allocator (dyn Allocator))
                              (root (ptr ViewNode))
                              (body (slice u8))

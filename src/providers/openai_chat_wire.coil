@@ -42,15 +42,15 @@
     (json-put-string! (mut message) "content" output)
     (load message)))
 
-;; Build the message array. On a tool continuation every prior assistant object is
-;; replayed verbatim rather than reconstructed from parsed fields: that is what
-;; preserves a server's own reasoning channel across turns, including fields this
-;; harness does not model.
-;;
-;; Chat Completions has no server-side history, so the entire conversation is
-;; resent each turn. Replaying only the last one left the model re-deciding from
-;; the same starting point every turn, which is an agent that repeats itself
-;; until its budget runs out.
+;;; Build the message array. On a tool continuation every prior assistant object is
+;;; replayed verbatim rather than reconstructed from parsed fields: that is what
+;;; preserves a server's own reasoning channel across turns, including fields this
+;;; harness does not model.
+;;;
+;;; Chat Completions has no server-side history, so the entire conversation is
+;;; resent each turn. Replaying only the last one left the model re-deciding from
+;;; the same starting point every turn, which is an agent that repeats itself
+;;; until its budget runs out.
 (defn chat-turn-messages! [(allocator (dyn Allocator))
                            (messages (mut Json))
                            (output Json)
@@ -105,11 +105,11 @@
       0)
     (load messages)))
 
-;; Cached-prompt telemetry has two spellings in the wild: DeepSeek reports
-;; `prompt_cache_hit_tokens` at the top of usage, while OpenAI-shaped servers
-;; (including llama.cpp) nest `prompt_tokens_details.cached_tokens`. Both are read
-;; because a provider should not have to declare which dialect of the same number
-;; its server happens to emit.
+;;; Cached-prompt telemetry has two spellings in the wild: DeepSeek reports
+;;; `prompt_cache_hit_tokens` at the top of usage, while OpenAI-shaped servers
+;;; (including llama.cpp) nest `prompt_tokens_details.cached_tokens`. Both are read
+;;; because a provider should not have to declare which dialect of the same number
+;;; its server happens to emit.
 (defn chat-cached-input-tokens [(usage Json)] (-> i64)
   (let [flat (json-number-i64 (json-get usage "prompt_cache_hit_tokens"))]
     (if (> flat 0)
@@ -197,8 +197,8 @@
    (completed bool)
    (failed bool)])
 
-;; Initialize a stream state. Every field is set here so a provider cannot forget
-;; one and get a silently empty buffer or an unattributed event.
+;;; Initialize a stream state. Every field is set here so a provider cannot forget
+;;; one and get a silently empty buffer or an unattributed event.
 (defn openai-chat-stream-state-init! [(state (ptr OpenAIChatStreamState))
                                       (allocator (dyn Allocator))
                                       (request (ptr ModelRequest))
@@ -218,8 +218,8 @@
   (set! (.failed state) false)
   0)
 
-;; Tool call deltas arrive addressed by index and may skip ahead, so slots are
-;; grown to cover the index rather than appended in arrival order.
+;;; Tool call deltas arrive addressed by index and may skip ahead, so slots are
+;;; grown to cover the index rather than appended in arrival order.
 (defn chat-stream-tool! [(state (ptr OpenAIChatStreamState))
                          (index-value i64)] (-> (ptr OpenAIChatStreamTool))
   (loop (if (> (al-len [OpenAIChatStreamTool] (.tools state)) index-value)
@@ -310,10 +310,10 @@
                                    (chat-stream-chunk! self (.value parsed))
                                    (do (set! (.failed self) true) false)))))))
 
-;; Rebuild the non-streamed response document from accumulated deltas, then parse it
-;; with the same code path a non-streamed reply would take. Going through the
-;; document rather than populating a response directly is what lets a continuation
-;; replay the assistant message verbatim.
+;;; Rebuild the non-streamed response document from accumulated deltas, then parse it
+;;; with the same code path a non-streamed reply would take. Going through the
+;;; document rather than populating a response directly is what lets a continuation
+;;; replay the assistant message verbatim.
 (defn openai-chat-stream-response [(state (ptr OpenAIChatStreamState))] (-> ModelResponse)
   (let [allocator (load (field state allocator))
         (mut root) (json-object allocator)
@@ -367,8 +367,8 @@
       (json-object-put! (mut root) "usage" (load usage)))
     (chat-parse-response allocator (load (field state provider)) (load root))))
 
-;; The tools/tool_choice pair, added only when the run actually has tools. Some
-;; servers reject an empty `tools` array outright.
+;;; The tools/tool_choice pair, added only when the run actually has tools. Some
+;;; servers reject an empty `tools` array outright.
 (defn chat-attach-tools! [(allocator (dyn Allocator))
                           (body (mut Json))
                           (request (ptr ModelRequest))] (-> i64)
@@ -387,8 +387,8 @@
     0)
   0)
 
-;; Streaming is always requested with usage included: without it a run has no token
-;; accounting at all, and every server that streams supports asking for it.
+;;; Streaming is always requested with usage included: without it a run has no token
+;;; accounting at all, and every server that streams supports asking for it.
 (defn chat-attach-stream-options! [(allocator (dyn Allocator))
                                    (body (mut Json))] (-> i64)
   (json-put-bool! (mut body) "stream" true)

@@ -34,8 +34,8 @@
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-;; Concatenating every span must reproduce the input byte for byte. A highlighter
-;; that drops or duplicates a byte is a renderer that lies about what was said.
+;;; Concatenating every span must reproduce the input byte for byte. A highlighter
+;;; that drops or duplicates a byte is a renderer that lies about what was said.
 (defn spans-text [(allocator (dyn Allocator))
                   (spans (ptr (ArrayList FrameSpan)))] (-> (slice u8))
   (let [(mut out) (sb-new allocator)

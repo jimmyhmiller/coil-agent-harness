@@ -19,13 +19,13 @@
 
 (defstruct TcpTransport [(connection socket/TcpConnection)])
 
-;; Take ownership of a connection that was accepted elsewhere (the server side).
+;;; Take ownership of a connection that was accepted elsewhere (the server side).
 (defn tcp-transport-adopt! [(transport (ptr TcpTransport))
                             (connection socket/TcpConnection)] (-> i64)
   (set! (.connection transport) connection)
   0)
 
-;; Dial a peer (the client side). Returns 0, or a negative transport code.
+;;; Dial a peer (the client side). Returns 0, or a negative transport code.
 (defn tcp-transport-connect! [(allocator (dyn Allocator))
                               (transport (ptr TcpTransport))
                               (host (slice u8))
@@ -34,10 +34,10 @@
     (Err [failure] TRANSPORT_FAILED)
     (Ok [_] 0)))
 
-;; `socket-error-code` is coil.socket's own stable numbering for its errors, and
-;; 2 is its `Closed`. Going through it rather than matching the sum directly
-;; keeps this file working when new SocketError variants are added -- a
-;; peer disconnecting is the only case the bus distinguishes.
+;;; `socket-error-code` is coil.socket's own stable numbering for its errors, and
+;;; 2 is its `Closed`. Going through it rather than matching the sum directly
+;;; keeps this file working when new SocketError variants are added -- a
+;;; peer disconnecting is the only case the bus distinguishes.
 (const SOCKET_ERROR_CLOSED 2)
 
 (defn socket-error-transport-code [(failure socket/SocketError)] (-> i64)

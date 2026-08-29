@@ -45,9 +45,9 @@
    (tunnel SshTunnel)
    (transport (dyn StreamingHttpTransport))])
 
-;; Build a context for one configured provider. The tunnel is created but not
-;; opened: nothing connects until a request needs it, so declaring a provider that
-;; is currently unreachable does not prevent the harness from starting.
+;;; Build a context for one configured provider. The tunnel is created but not
+;;; opened: nothing connects until a request needs it, so declaring a provider that
+;;; is currently unreachable does not prevent the harness from starting.
 (defn openai-chat-context [(allocator (dyn Allocator))
                            (config ConfiguredProvider)] (-> OpenAIChatContext)
   (let [context (primitive/alloc-stack OpenAIChatContext)]
@@ -67,7 +67,7 @@
   (ChatEndpointReady [(url (slice u8))])
   (ChatEndpointUnavailable [(message (slice u8))]))
 
-;; Resolve the URL to POST to, establishing the tunnel first when there is one.
+;;; Resolve the URL to POST to, establishing the tunnel first when there is one.
 (defn openai-chat-endpoint [(context (ptr OpenAIChatContext))
                             (allocator (dyn Allocator))] (-> ChatEndpoint)
   (let [config (field context config)
@@ -84,13 +84,13 @@
                                                          (ssh-tunnel-base-url allocator port)
                                                          path))))))))
 
-;; Reasoning effort, in the dialect this server actually honours.
-;;
-;; `qwen-jinja` exists because llama.cpp ignores a top-level `reasoning_effort`
-;; outright and only passes the value to the chat template when it is sent as a
-;; template kwarg -- and the Qwen template accepts a narrower ladder than the
-;; harness offers, raising a template exception on anything else. Clamping to what
-;; the template accepts turns a 500 into a slightly coarser effort setting.
+;;; Reasoning effort, in the dialect this server actually honours.
+;;;
+;;; `qwen-jinja` exists because llama.cpp ignores a top-level `reasoning_effort`
+;;; outright and only passes the value to the chat template when it is sent as a
+;;; template kwarg -- and the Qwen template accepts a narrower ladder than the
+;;; harness offers, raising a template exception on anything else. Clamping to what
+;;; the template accepts turns a 500 into a slightly coarser effort setting.
 (defn chat-template-effort [(effort (slice u8))] (-> (slice u8))
   (cond (= effort "low") "low"
         (= effort "medium") "medium"
@@ -126,14 +126,14 @@
           :else 0))
   0)
 
-;; How long to allow this request on the wire, or 0 for no limit.
-;;
-;; A declared provider runs on hardware whose speed the caller cannot know -- the
-;; factory, for instance, applies one figure to every provider -- and a wall-clock
-;; limit cannot tell a slow answer from a stuck one. So the caller's budget is not
-;; imposed here; only an explicitly declared ceiling is. Runs remain interruptible
-;; through the cancellation token, which is what a supervisor uses to stop work that
-;; has genuinely stalled.
+;;; How long to allow this request on the wire, or 0 for no limit.
+;;;
+;;; A declared provider runs on hardware whose speed the caller cannot know -- the
+;;; factory, for instance, applies one figure to every provider -- and a wall-clock
+;;; limit cannot tell a slow answer from a stuck one. So the caller's budget is not
+;;; imposed here; only an explicitly declared ceiling is. Runs remain interruptible
+;;; through the cancellation token, which is what a supervisor uses to stop work that
+;;; has genuinely stalled.
 (defn openai-chat-timeout-ms [(context (ptr OpenAIChatContext))] (-> i64)
   (load (field (field context config) request-timeout-ms)))
 
@@ -161,10 +161,10 @@
   (ChatCredentialAbsent [])
   (ChatCredentialMissing [(message (slice u8))]))
 
-;; A provider that named no environment variable needs no key -- which is the normal
-;; case for a server on a machine the operator controls. One that named a variable
-;; must have it: a declared credential that is not set is a configuration error, and
-;; sending the request unauthenticated instead would fail less clearly.
+;;; A provider that named no environment variable needs no key -- which is the normal
+;;; case for a server on a machine the operator controls. One that named a variable
+;;; must have it: a declared credential that is not set is a configuration error, and
+;;; sending the request unauthenticated instead would fail less clearly.
 (defn openai-chat-credential [(allocator (dyn Allocator))
                               (context (ptr OpenAIChatContext))] (-> ChatCredential)
   (let [variable (load (field (field context config) api-key-env))]
@@ -185,12 +185,12 @@
                                                     "Authorization: Bearer "
                                                     value)))))))
 
-;; What this request is actually talking to, recorded with the run.
-;;
-;; The endpoint is the resolved one, including the loopback port a tunnel happens to
-;; have been given, because "which machine answered this" is not reconstructable
-;; afterwards otherwise. Nothing secret appears here -- a key is read from the
-;; environment and never travels through configuration or events.
+;;; What this request is actually talking to, recorded with the run.
+;;;
+;;; The endpoint is the resolved one, including the loopback port a tunnel happens to
+;;; have been given, because "which machine answered this" is not reconstructable
+;;; afterwards otherwise. Nothing secret appears here -- a key is read from the
+;;; environment and never travels through configuration or events.
 (defn openai-chat-started-payload [(allocator (dyn Allocator))
                                    (context (ptr OpenAIChatContext))
                                    (endpoint (slice u8))] (-> Json)
@@ -230,8 +230,8 @@
   (openai-chat-event context emitter request (ModelRequestFailed) (JsonString message))
   (model-failure (openai-chat-name context) status message))
 
-;; A transport that never completed. Naming the budget makes a timeout obvious
-;; rather than leaving it to look like the server rejected the request.
+;;; A transport that never completed. Naming the budget makes a timeout obvious
+;;; rather than leaving it to look like the server rejected the request.
 (defn openai-chat-transport-message [(allocator (dyn Allocator))
                                      (context (ptr OpenAIChatContext))
                                      (http (ref HttpResponse))] (-> (slice u8))
@@ -251,7 +251,7 @@
       0)
     (sb-str (load text))))
 
-;; A real HTTP error, carrying the code and whatever the server said about it.
+;;; A real HTTP error, carrying the code and whatever the server said about it.
 (defn openai-chat-status-message [(allocator (dyn Allocator))
                                   (status i64)
                                   (body (slice u8))] (-> (slice u8))
@@ -351,13 +351,13 @@
                                          (model-completion-payload allocator request (mut response)))
                       (ModelOk (load response))))))))))))
 
-;; Release the tunnel. Called when the runtime shuts a provider down; a direct
-;; provider has nothing to release and closing its unopened tunnel is a no-op.
+;;; Release the tunnel. Called when the runtime shuts a provider down; a direct
+;;; provider has nothing to release and closing its unopened tunnel is a no-op.
 (defn openai-chat-close! [(context (ptr OpenAIChatContext))] (-> i64)
   (ssh-tunnel-close! (field context tunnel)))
 
-;; Capabilities are derived from the entry by the configuration module, so routing
-;; and the adapter cannot disagree about what a declared provider can do.
+;;; Capabilities are derived from the entry by the configuration module, so routing
+;;; and the adapter cannot disagree about what a declared provider can do.
 (defn openai-chat-capabilities [(context (ptr OpenAIChatContext))] (-> ProviderCapabilities)
   (configured-provider-capabilities (field context config)))
 

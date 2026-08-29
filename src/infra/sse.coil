@@ -9,8 +9,8 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 
-;; Delivery is synchronous: returning false applies backpressure by aborting the
-;; decoder and, once connected to HTTP, the libcurl write callback.
+;;; Delivery is synchronous: returning false applies backpressure by aborting the
+;;; decoder and, once connected to HTTP, the libcurl write callback.
 (deftrait SseEventSink [Self]
   (consume-sse-event [(self (ptr Self))
                       (event-name (slice u8))
@@ -149,8 +149,8 @@
               (sse-decoder-drain! decoder)
               (do (set! (.failed decoder) true) false))))))
 
-;; Accept an arbitrary transport chunk. Frames may span chunks or share one chunk.
-;; False is sticky and means either bounded-buffer overflow or downstream rejection.
+;;; Accept an arbitrary transport chunk. Frames may span chunks or share one chunk.
+;;; False is sticky and means either bounded-buffer overflow or downstream rejection.
 (defn sse-decoder-feed! [(decoder (ptr SseDecoder)) (chunk (slice u8))] (-> bool)
   (if (.failed decoder)
       false

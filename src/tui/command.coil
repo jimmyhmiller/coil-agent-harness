@@ -22,9 +22,9 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 
-;; Whether a command reads follow-up input after being submitted. The menu uses
-;; this to hint the argument, and it is the reason `/status` cannot be silently
-;; completed and submitted in one keystroke.
+;;; Whether a command reads follow-up input after being submitted. The menu uses
+;;; this to hint the argument, and it is the reason `/status` cannot be silently
+;;; completed and submitted in one keystroke.
 (defsum CommandArgument
   (CommandNoArgument [])
   (CommandPrompts [(hint (slice u8))]))
@@ -61,8 +61,8 @@
 (defn command-at [(registry (ptr CommandRegistry)) (at i64)] (-> (ptr CommandSpec))
   (al-elem [CommandSpec] (mut (.commands registry)) at))
 
-;; Registration order is display order: the list a user reads in `/help` and the
-;; list they arrow through in the menu are the same list in the same order.
+;;; Registration order is display order: the list a user reads in `/help` and the
+;;; list they arrow through in the menu are the same list in the same order.
 (defn command-registry-builtin [(allocator (dyn Allocator))] (-> CommandRegistry)
   (let [(mut registry) (command-registry-new allocator)]
     (command-register! (mut registry)
@@ -134,12 +134,12 @@
                 (set! i (+ (load i) 1)))))
     (load found)))
 
-;; `/exit` is accepted but not listed: it is a synonym nobody needs to be taught,
-;; and putting it in the menu would show two rows that do the same thing.
+;;; `/exit` is accepted but not listed: it is a synonym nobody needs to be taught,
+;;; and putting it in the menu would show two rows that do the same thing.
 (defn command-known? [(registry (ptr CommandRegistry)) (name (slice u8))] (-> bool)
   (or (>= (command-exact registry name) 0) (= name "/exit")))
 
-;; Indices of every command whose name starts with `prefix`, in registration order.
+;;; Indices of every command whose name starts with `prefix`, in registration order.
 (defn command-matches [(allocator (dyn Allocator))
                        (registry (ptr CommandRegistry))
                        (prefix (slice u8))] (-> (ArrayList i64))
@@ -156,9 +156,9 @@
                 (set! i (+ (load i) 1)))))
     (load out)))
 
-;; The longest prefix shared by every match, which is what Tab should extend to
-;; when the matches have not narrowed to one. Returns `prefix` unchanged when the
-;; matches diverge immediately, so Tab is a no-op rather than a wrong guess.
+;;; The longest prefix shared by every match, which is what Tab should extend to
+;;; when the matches have not narrowed to one. Returns `prefix` unchanged when the
+;;; matches diverge immediately, so Tab is a no-op rather than a wrong guess.
 (defn command-common-prefix [(allocator (dyn Allocator))
                              (registry (ptr CommandRegistry))
                              (matches (ref (ArrayList i64)))] (-> (slice u8))

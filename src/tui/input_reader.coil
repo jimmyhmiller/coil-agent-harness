@@ -45,9 +45,9 @@
 (impl InputIdleObserver NoopInputIdleObserver
   (input-idle-notification? [(self (ptr NoopInputIdleObserver))] (-> bool) false))
 
-;; How long the "press again" offer stands. Long enough to be a deliberate
-;; double-press, short enough that a Ctrl-C you have forgotten about cannot quit
-;; the session minutes later.
+;;; How long the "press again" offer stands. Long enough to be a deliberate
+;;; double-press, short enough that a Ctrl-C you have forgotten about cannot quit
+;;; the session minutes later.
 (const INPUT_QUIT_WINDOW_MS 2000)
 
 (defstruct InputReaderLifecycle
@@ -82,9 +82,9 @@
             0)
           false))))
 
-;; Only as many rows as the menu is allowed to occupy; the rest becomes a count.
-;; A menu that could grow without bound would eventually own more of the screen
-;; than the conversation does.
+;;; Only as many rows as the menu is allowed to occupy; the rest becomes a count.
+;;; A menu that could grow without bound would eventually own more of the screen
+;;; than the conversation does.
 (const INPUT_MENU_MAX_ROWS 8)
 
 (defn input-reader-menu [(allocator (dyn Allocator))
@@ -127,8 +127,8 @@
                     (set! at (+ (load at) 1)))))
         entries)))
 
-;; While reverse search is active the composer shows the query and the matched
-;; line instead of the ordinary prompt, so the mode is never ambiguous.
+;;; While reverse search is active the composer shows the query and the matched
+;;; line instead of the ordinary prompt, so the mode is never ambiguous.
 (defn input-reader-prompt [(allocator (dyn Allocator))
                            (editor (ptr InputEditor))
                            (prompt (slice u8))] (-> (slice u8))
@@ -378,12 +378,12 @@
       (region/region-close! cycle)
       0)))
 
-;; Rebuild the visible subset for a query, best match first.
-;;
-;; Both label and detail are matched, so "subscription" finds the Codex rows and
-;; "opus" finds the Claude ones. Ties keep registration order -- an insertion
-;; sort that only moves a row past a strictly lower score is stable, which is
-;; what stops the list from reshuffling under the cursor as you type.
+;;; Rebuild the visible subset for a query, best match first.
+;;;
+;;; Both label and detail are matched, so "subscription" finds the Codex rows and
+;;; "opus" finds the Claude ones. Ties keep registration order -- an insertion
+;;; sort that only moves a row past a strictly lower score is stable, which is
+;;; what stops the list from reshuffling under the cursor as you type.
 (defn input-choice-filter! [(entries (ptr (ArrayList ChoiceEntry)))
                             (query (slice u8))
                             (out (ptr (ArrayList i64)))
@@ -431,7 +431,7 @@
 (defn input-choice-query [(query (ptr (ArrayList u8)))] (-> (slice u8))
   (slice-new [u8] (load (field query data)) (al-len [u8] (load query))))
 
-;; Apply a key to the filter query. Returns whether the query changed.
+;;; Apply a key to the filter query. Returns whether the query changed.
 (defn input-choice-edit! [(query (ptr (ArrayList u8))) (key InputKey)] (-> bool)
   (match key
          (InputInsert [text]
@@ -453,13 +453,13 @@
                                (do (al-clear! [u8] query) true)))
          (_ false)))
 
-;; What a key means to a picker. Collapsing the key to a small code keeps the
-;; read loop flat -- the alternative nests a return-from inside a match arm
-;; inside a loop for every key, which is where this function's first draft went
-;; wrong.
-;;
-;; Up/Down arrive as the history keys: the decoder stays neutral about what a
-;; reader does with an arrow, exactly as it does for Escape.
+;;; What a key means to a picker. Collapsing the key to a small code keeps the
+;;; read loop flat -- the alternative nests a return-from inside a match arm
+;;; inside a loop for every key, which is where this function's first draft went
+;;; wrong.
+;;;
+;;; Up/Down arrive as the history keys: the decoder stays neutral about what a
+;;; reader does with an arrow, exactly as it does for Escape.
 (const CHOICE_ACTION_IGNORE 0)
 (const CHOICE_ACTION_UP 1)
 (const CHOICE_ACTION_DOWN 2)
@@ -478,14 +478,14 @@
          (InputEndOfFile [] CHOICE_ACTION_CLOSED)
          (_ CHOICE_ACTION_IGNORE)))
 
-;; Returns the chosen index into the ORIGINAL entry list. Cancellation is a
-;; distinct result rather than an index of -1, so a caller cannot mistake "the
-;; user backed out" for "the user chose the first row".
-;;
-;; Typing filters. That is the whole reason the picker is worth having over a
-;; numbered list: with a dozen models, `sol` gets you there in three keystrokes
-;; and no reading. A query that matches nothing leaves the previous list on
-;; screen rather than blanking it, so a typo is recoverable with one backspace.
+;;; Returns the chosen index into the ORIGINAL entry list. Cancellation is a
+;;; distinct result rather than an index of -1, so a caller cannot mistake "the
+;;; user backed out" for "the user chose the first row".
+;;;
+;;; Typing filters. That is the whole reason the picker is worth having over a
+;;; numbered list: with a dozen models, `sol` gets you there in three keystrokes
+;;; and no reading. A query that matches nothing leaves the previous list on
+;;; screen rather than blanking it, so a typo is recoverable with one backspace.
 (defn input-read-choice [(allocator (dyn Allocator))
                          (profile (ref TerminalProfile))
                          (prompt (slice u8))
@@ -833,8 +833,8 @@
                                                                               profile)
                                                         (return-from :read (InputReadClosed)))))))))))))
 
-;; A secondary prompt cancels on Ctrl-C; only the main composer offers to quit,
-;; because quitting out of "which run id?" is never what was meant.
+;;; A secondary prompt cancels on Ctrl-C; only the main composer offers to quit,
+;;; because quitting out of "which run id?" is never what was meant.
 (defn input-read-interactive [(allocator (dyn Allocator))
                               (editor (ptr InputEditor))
                               (profile (ref TerminalProfile))

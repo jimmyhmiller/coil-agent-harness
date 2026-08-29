@@ -108,9 +108,9 @@
   (let [prefix (concat-or-empty allocator root "/")]
     (concat-or-empty allocator prefix path)))
 
-;; A NUL anywhere in the first bytes means this is not text. Scanning the whole
-;; buffer would be equally correct but this is enough: every binary format puts
-;; one near the front, and a text file never does.
+;;; A NUL anywhere in the first bytes means this is not text. Scanning the whole
+;;; buffer would be equally correct but this is enough: every binary format puts
+;;; one near the front, and a text file never does.
 (defn file-tool-binary? [(bytes (slice u8))] (-> bool)
   (let [n (slice-len [u8] bytes)
         limit (if (> n 8192) 8192 n)

@@ -6,8 +6,8 @@
 (import "coil.atomic" :use *)
 (import "harness-json" :use *)
 
-;; Stable semantic lifecycle categories. Additions are expected; existing meanings
-;; must not be repurposed because persisted event streams and UIs depend on them.
+;;; Stable semantic lifecycle categories. Additions are expected; existing meanings
+;;; must not be repurposed because persisted event streams and UIs depend on them.
 (defsum EventKind
   (RunCreated [])
   (RunStarted [])
@@ -56,8 +56,8 @@
   (ToolCallFailed [])
   (CodexNotification []))
 
-;; A structured observation. Payload is provider-neutral JSON; adapters may include
-;; provider-specific data under a namespaced member without changing this envelope.
+;;; A structured observation. Payload is provider-neutral JSON; adapters may include
+;;; provider-specific data under a namespaced member without changing this envelope.
 (defstruct Event
   [(version i64)
    (sequence i64)
@@ -71,8 +71,8 @@
    (model (slice u8))
    (payload Json)])
 
-;; Event sinks are synchronous capabilities. Implementations must copy data they
-;; retain and be safe for concurrent calls from the parallel tool executor.
+;;; Event sinks are synchronous capabilities. Implementations must copy data they
+;;; retain and be safe for concurrent calls from the parallel tool executor.
 (deftrait EventSink [Self]
   (publish-event [(self (ptr Self)) (event (ptr Event))] (-> i64)))
 
@@ -81,15 +81,15 @@
 (impl EventSink NoopEventSink
   (publish-event [(self (ptr NoopEventSink)) (event (ptr Event))] (-> i64) 0))
 
-;; An emitter owns global ordering for one run. `next-sequence` is atomic because
-;; model and tool workers may publish concurrently.
+;;; An emitter owns global ordering for one run. `next-sequence` is atomic because
+;;; model and tool workers may publish concurrently.
 (defstruct EventEmitter
   [(sink (ptr (dyn EventSink)))
    (next-sequence (ptr i64))
    (publish-lock i64)])
 
-;; Create an emitter over caller-owned sequence storage. The sequence cell must
-;; outlive every worker that uses the emitter.
+;;; Create an emitter over caller-owned sequence storage. The sequence cell must
+;;; outlive every worker that uses the emitter.
 (defn event-emitter-new [(allocator (dyn alloc/Allocator))
                          (sink (dyn EventSink))
                          (next-sequence (ptr i64))] (-> EventEmitter)
@@ -99,8 +99,8 @@
     (set! (.publish-lock emitter) 0)
     (load emitter)))
 
-;; Initialize long-lived emitters in their final storage. This avoids copying a
-;; dynamic trait object through a returned aggregate at an ownership boundary.
+;;; Initialize long-lived emitters in their final storage. This avoids copying a
+;;; dynamic trait object through a returned aggregate at an ownership boundary.
 (defn event-emitter-init! [(emitter (ptr EventEmitter))
                            (allocator (dyn alloc/Allocator))
                            (sink (dyn EventSink))
@@ -119,7 +119,7 @@
 (defn event-emitter-unlock! [(emitter (ptr EventEmitter))] (-> i64)
   (atomic-store (field emitter publish-lock) 0))
 
-;; Publish one event and return its assigned sequence number.
+;;; Publish one event and return its assigned sequence number.
 (defn emit-event-for-agent [(emitter (ptr EventEmitter))
                             (timestamp-ms i64)
                             (kind EventKind)
@@ -149,8 +149,8 @@
       (event-emitter-unlock! emitter)
       (if (= publish-code 0) sequence -1))))
 
-;; Existing run-scoped events belong to the run's root agent. Delegated agents use
-;; their child run ID, so old call sites gain stable identity without an ambient value.
+;;; Existing run-scoped events belong to the run's root agent. Delegated agents use
+;;; their child run ID, so old call sites gain stable identity without an ambient value.
 (defn emit-event [(emitter (ptr EventEmitter))
                   (timestamp-ms i64)
                   (kind EventKind)
@@ -171,7 +171,7 @@
                         model
                         payload))
 
-;; Stable wire name for an event category.
+;;; Stable wire name for an event category.
 (defn event-kind-name [(kind EventKind)] (-> (slice u8))
   (match kind
     (RunCreated [] "run.created")
@@ -219,7 +219,7 @@
     (ToolCallFailed [] "tool.call.failed")
     (CodexNotification [] "codex.notification")))
 
-;; Canonical versioned wire envelope shared by CLI, journals, and remote transports.
+;;; Canonical versioned wire envelope shared by CLI, journals, and remote transports.
 (defn event-to-json [(allocator (dyn alloc/Allocator)) (event (ptr Event))] (-> Json)
   (let [(mut record) (json-object allocator)]
     (json-object-put! (mut record)

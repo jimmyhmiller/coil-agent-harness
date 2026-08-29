@@ -26,7 +26,7 @@
   [(primary-env (ptr i8))
    (fallback-env (ptr i8))])
 
-;; Return an allocator-owned credential value, trying the primary name first.
+;;; Return an allocator-owned credential value, trying the primary name first.
 (defn api-key [(allocator (dyn Allocator)) (credential ApiCredential)] (-> (slice u8))
   (match (os/env-get allocator (cstr->str (load (field credential primary-env))))
     (Ok [primary]
@@ -108,12 +108,12 @@
                 (set! i (+ (load i) 1)))))
     (load result)))
 
-;; What a person said, as one more input item.
-;;
-;; A wire that continues by response id sends only what is new each turn, so an
-;; interjection has to travel with the tool results rather than in a replayed
-;; transcript -- otherwise the run keeps going as though nobody spoke, which is
-;; exactly how it looked before this existed.
+;;; What a person said, as one more input item.
+;;;
+;;; A wire that continues by response id sends only what is new each turn, so an
+;;; interjection has to travel with the tool results rather than in a replayed
+;;; transcript -- otherwise the run keeps going as though nobody spoke, which is
+;;; exactly how it looked before this existed.
 (defn continuation-interjection [(continuation (ptr ModelContinuation))] (-> (slice u8))
   (let [turns (load (field continuation turns))]
     (if (= (cast i64 turns) 0)
@@ -259,8 +259,8 @@
               (JsonNull)))
     (load call)))
 
-;; `int->str` is a comptime primitive, so a runtime status code is formatted by
-;; hand. Lives here because every provider needs it to describe a failure.
+;;; `int->str` is a comptime primitive, so a runtime status code is formatted by
+;;; hand. Lives here because every provider needs it to describe a failure.
 (defn model-decimal [(allocator (dyn Allocator)) (value i64)] (-> (slice u8))
   (if (<= value 0)
       "0"

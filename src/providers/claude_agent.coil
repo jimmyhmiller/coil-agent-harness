@@ -12,9 +12,9 @@
 (import "deepseek-anthropic" :use *)
 (import "provider-common" :use *)
 
-;; Anthropic subscription traffic uses the native Messages API and the same
-;; provider-neutral tool loop as every other HTTP adapter. Credentials are read
-;; directly from the provider's configured environment variables.
+;;; Anthropic subscription traffic uses the native Messages API and the same
+;;; provider-neutral tool loop as every other HTTP adapter. Credentials are read
+;;; directly from the provider's configured environment variables.
 (defstruct ClaudeAnthropicContext [(messages DeepSeekAnthropicContext)])
 
 (defn claude-login [(allocator (dyn Allocator))] (-> i64)

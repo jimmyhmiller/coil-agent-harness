@@ -23,10 +23,10 @@
     (Some [value] value)
     (None [] false)))
 
-;; A provider is routable when the harness resolves it itself or when the operator
-;; declared it. Configuration is consulted rather than assumed absent, so a declared
-;; provider is a first-class routing target and not a special case bolted on after
-;; the decision has already been made.
+;;; A provider is routable when the harness resolves it itself or when the operator
+;;; declared it. Configuration is consulted rather than assumed absent, so a declared
+;;; provider is a first-class routing target and not a special case bolted on after
+;;; the decision has already been made.
 (defn route-known-provider? [(provider (slice u8))
                              (config (ptr ProviderConfig))] (-> bool)
   (if (provider-config-has? config provider)
@@ -34,8 +34,8 @@
       (let [capabilities (provider-capabilities-for provider)]
         (> (.cost-tier capabilities) 0))))
 
-;; Capabilities for either kind of provider. A declared provider describes itself;
-;; a built-in one is described by the capability table.
+;;; Capabilities for either kind of provider. A declared provider describes itself;
+;;; a built-in one is described by the capability table.
 (defn route-capabilities [(provider (slice u8))
                           (config (ptr ProviderConfig))] (-> ProviderCapabilities)
   (let [at (provider-config-find config provider)]
@@ -43,8 +43,8 @@
         (configured-provider-capabilities (provider-config-at config at))
         (provider-capabilities-for provider))))
 
-;; The model to use when a provider was pinned without one. A declared provider
-;; supplies its own, which is what lets an operator pin the provider alone.
+;;; The model to use when a provider was pinned without one. A declared provider
+;;; supplies its own, which is what lets an operator pin the provider alone.
 (defn route-default-model [(provider (slice u8))
                            (config (ptr ProviderConfig))] (-> (slice u8))
   (let [at (provider-config-find config provider)]

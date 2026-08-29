@@ -40,9 +40,9 @@
 
 (const CC_REALM_CLAUDE_CODE "claude-code")
 
-;; The realm used when nothing says otherwise. Interop is the default because
-;; it is what the harness was built to do first and what is verified against a
-;; live session; a private realm is one flag away.
+;;; The realm used when nothing says otherwise. Interop is the default because
+;;; it is what the harness was built to do first and what is verified against a
+;;; live session; a private realm is one flag away.
 (const CC_REALM_DEFAULT CC_REALM_CLAUDE_CODE)
 
 (defstruct CcRealm
@@ -62,11 +62,11 @@
 ;; Resolution
 ;; ---------------------------------------------------------------------------
 
-;; Where a private realm keeps its sockets. Under the temp directory rather than
-;; the config directory for the same reason Claude Code does it: `sockaddr_un`
-;; caps a socket path at 104 bytes on the BSD layout macOS inherits, and a path
-;; under a home directory plus a realm name can exceed that. A short base keeps
-;; the length fallback in `cc-socket-path` from ever being needed.
+;;; Where a private realm keeps its sockets. Under the temp directory rather than
+;;; the config directory for the same reason Claude Code does it: `sockaddr_un`
+;;; caps a socket path at 104 bytes on the BSD layout macOS inherits, and a path
+;;; under a home directory plus a realm name can exceed that. A short base keeps
+;;; the length fallback in `cc-socket-path` from ever being needed.
 (defn cc-realm-socket-base [(allocator (dyn Allocator))] (-> (slice u8))
   (cc-env-or allocator
              "XDG_RUNTIME_DIR"
@@ -94,15 +94,15 @@
                         name)
              "sessions"))
 
-;; The realm named by the environment, or the default.
+;;; The realm named by the environment, or the default.
 (defn cc-realm-configured-name [(allocator (dyn Allocator))] (-> (slice u8))
   (let [configured (cc-env-or allocator "HARNESS_BUS_REALM" "")]
     (if (= (slice-len [u8] configured) 0) CC_REALM_DEFAULT configured)))
 
-;; Populate `realm` for `name`.
-;;
-;; An empty name means "whatever the environment says", so a caller with no
-;; opinion and a caller that was given `--realm` go through one path.
+;;; Populate `realm` for `name`.
+;;;
+;;; An empty name means "whatever the environment says", so a caller with no
+;;; opinion and a caller that was given `--realm` go through one path.
 (defn cc-realm-init! [(realm (ptr CcRealm))
                       (allocator (dyn Allocator))
                       (name (slice u8))] (-> i64)
@@ -130,9 +130,9 @@
           (set! (.interop realm) false)
           0))))
 
-;; Claude Code's registry. `CLAUDE_CONFIG_DIR` relocates it, but every
-;; participant must agree on the same value, so it is not an escape from writing
-;; the file -- only from writing it under the home directory.
+;;; Claude Code's registry. `CLAUDE_CONFIG_DIR` relocates it, but every
+;;; participant must agree on the same value, so it is not an escape from writing
+;;; the file -- only from writing it under the home directory.
 (defn cc-claude-sessions-dir [(allocator (dyn Allocator))] (-> (slice u8))
   (let [configured (cc-env-or allocator "CLAUDE_CONFIG_DIR" "")]
     (if (> (slice-len [u8] configured) 0)
@@ -141,7 +141,7 @@
                    (path-join allocator (cc-env-or allocator "HOME" "/tmp") ".claude")
                    "sessions"))))
 
-;; The socket path a participant with this pid would bind in this realm.
+;;; The socket path a participant with this pid would bind in this realm.
 (defn cc-realm-socket-path [(realm (ptr CcRealm))
                             (allocator (dyn Allocator))
                             (pid i64)] (-> (slice u8))
@@ -150,13 +150,13 @@
     (sb-push-str! (mut buffer) ".sock")
     (path-join allocator (.socket-dir realm) (sb-str (load buffer)))))
 
-;; Create the realm's directories. Private realms own theirs, so this is how one
-;; comes into existence; for the claude-code realm the directories already exist
-;; and this is a no-op in practice.
-;;
-;; 0700 throughout: a unix socket path's permissions are the whole access
-;; boundary, and a world-listable registry would advertise every session on the
-;; machine to any local process.
+;;; Create the realm's directories. Private realms own theirs, so this is how one
+;;; comes into existence; for the claude-code realm the directories already exist
+;;; and this is a no-op in practice.
+;;;
+;;; 0700 throughout: a unix socket path's permissions are the whole access
+;;; boundary, and a world-listable registry would advertise every session on the
+;;; machine to any local process.
 (defn cc-realm-ensure-directories! [(realm (ptr CcRealm))
                                     (allocator (dyn Allocator))] (-> i64)
   (directory-create-all allocator (.socket-dir realm) 448)

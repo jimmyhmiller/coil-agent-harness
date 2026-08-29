@@ -9,8 +9,8 @@
 (import "harness-tui-view" :use *)
 (import "harness-tui-view-layout" :use *)
 
-;; PTY-only fixture for the exact regression seen in the interactive prompt:
-;; redraw once per typed character, then commit the line once.
+;;; PTY-only fixture for the exact regression seen in the interactive prompt:
+;;; redraw once per typed character, then commit the line once.
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [allocator (malloc-allocator)
         overrides (terminal-overrides-from-env allocator)

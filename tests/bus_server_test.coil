@@ -41,7 +41,7 @@
   (let [c-path (str/str->cstr (malloc-allocator) path)]
     (if (= (cast i64 c-path) 0) 0 (do (unlink c-path) 0))))
 
-;; Connect a client and complete the Subscribe handshake from its side.
+;;; Connect a client and complete the Subscribe handshake from its side.
 (defn subscribe-client! [(allocator (dyn Allocator))
                          (client (ptr UnixTransport))
                          (codec (dyn Codec))
@@ -53,7 +53,7 @@
         (try (let [bytes (try-or! (codec-encode codec allocator envelope) false)]
                   (= (frame-write! client bytes) FRAME_OK))))))
 
-;; Read one event name off a client socket, or "" if nothing arrives.
+;;; Read one event name off a client socket, or "" if nothing arrives.
 (defn receive-event-kind [(transport (ptr UnixTransport))
                           (codec (dyn Codec))
                           (allocator (dyn Allocator))] (-> (slice u8))

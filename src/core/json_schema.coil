@@ -176,9 +176,9 @@
                       (load valid)))
          (_ false)))
 
-;; Validate the JSON Schema subset shared by OpenAI strict tools and DeepSeek:
-;; object/properties/required/additionalProperties, arrays/items, primitive types,
-;; nullable type unions, enum, and anyOf. Unknown annotation keywords are ignored.
+;;; Validate the JSON Schema subset shared by OpenAI strict tools and DeepSeek:
+;;; object/properties/required/additionalProperties, arrays/items, primitive types,
+;;; nullable type unions, enum, and anyOf. Unknown annotation keywords are ignored.
 (defn json-schema-validate-depth [(allocator (dyn Allocator))
                                   (schema Json)
                                   (value Json)
@@ -205,10 +205,10 @@
 (defn json-schema-validate [(allocator (dyn Allocator)) (schema Json) (value Json)] (-> SchemaValidation)
   (json-schema-validate-depth allocator schema value "$" 0))
 
-;; OpenAI strict function schemas require every declared object property to be
-;; named in `required`, and forbid additional properties. Check this recursively
-;; before a tool can advertise itself as strict so provider rejection cannot be
-;; deferred until a live model request.
+;;; OpenAI strict function schemas require every declared object property to be
+;;; named in `required`, and forbid additional properties. Check this recursively
+;;; before a tool can advertise itself as strict so provider rejection cannot be
+;;; deferred until a live model request.
 (defn schema-required-contains? [(required Json) (key (slice u8))] (-> bool)
   (match required
          (JsonArray [items]

@@ -33,21 +33,21 @@
 (const CC_MSG_VERSION 1)
 (const CC_PEER_PROTOCOL 1)
 
-;; A connection accumulating this much without a newline is dropped by the
-;; receiver. Enforced on our side too, so an oversized frame fails where it is
-;; built rather than as an unexplained disconnect.
+;;; A connection accumulating this much without a newline is dropped by the
+;;; receiver. Enforced on our side too, so an oversized frame fails where it is
+;;; built rather than as an unexplained disconnect.
 (const CC_MAX_LINE_BYTES 1048576)
 
 ;; ---------------------------------------------------------------------------
 ;; Message ids
 ;; ---------------------------------------------------------------------------
 
-;; Restated rather than imported: `coil.fs` exports this as a const, which the
-;; module alias does not carry across.
+;;; Restated rather than imported: `coil.fs` exports this as a const, which the
+;;; module alias does not carry across.
 (const CC_O_RDONLY 0)
 
-;; Sixteen bytes from the kernel. `read-file` is not usable here: it reads to
-;; EOF, and /dev/urandom has none.
+;;; Sixteen bytes from the kernel. `read-file` is not usable here: it reads to
+;;; EOF, and /dev/urandom has none.
 (defn cc-random-bytes [(allocator (dyn Allocator))
                        (buffer (ptr u8))
                        (length i64)] (-> bool)
@@ -67,10 +67,10 @@
 (defn cc-hex-lower [(value i64)] (-> u8)
   (cast u8 (if (< value 10) (+ 48 value) (+ 87 value))))
 
-;; A version 4 UUID, formatted as the receiver's own ids are. Randomness comes
-;; from the kernel rather than a seeded generator because two harness processes
-;; started in the same millisecond must not mint colliding ids -- a receipt is
-;; matched to an outstanding message by this value alone.
+;;; A version 4 UUID, formatted as the receiver's own ids are. Randomness comes
+;;; from the kernel rather than a seeded generator because two harness processes
+;;; started in the same millisecond must not mint colliding ids -- a receipt is
+;;; matched to an outstanding message by this value alone.
 (defn cc-new-message-id [(allocator (dyn Allocator))] (-> (slice u8))
   (let [bytes (primitive/alloc-stack (array u8 16))]
     (if (not (cc-random-bytes allocator (cast (ptr u8) bytes) 16))
@@ -98,11 +98,11 @@
 ;; Building frames
 ;; ---------------------------------------------------------------------------
 
-;; A `user` frame: the one that lands in a session's prompt queue.
-;;
-;; `session-id` empty means "do not pin", which is almost always what you want.
-;; `from` empty means "no reply address", which is legal -- a one-shot sender
-;; that never listens can still deliver.
+;;; A `user` frame: the one that lands in a session's prompt queue.
+;;;
+;;; `session-id` empty means "do not pin", which is almost always what you want.
+;;; `from` empty means "no reply address", which is legal -- a one-shot sender
+;;; that never listens can still deliver.
 (defn cc-user-frame [(allocator (dyn Allocator))
                      (message-id (slice u8))
                      (content (slice u8))
@@ -147,9 +147,9 @@
     (json-object-put! (mut frame) "name" (JsonString name))
     (load frame)))
 
-;; A delivery receipt for a message someone sent us. The receiver accepts one
-;; only if `from` lives in the same socket directory as its own socket, so the
-;; address here must be our real bound path.
+;;; A delivery receipt for a message someone sent us. The receiver accepts one
+;;; only if `from` lives in the same socket directory as its own socket, so the
+;;; address here must be our real bound path.
 (defn cc-status-frame [(allocator (dyn Allocator))
                        (message-id (slice u8))
                        (status (slice u8))
@@ -167,9 +167,9 @@
     (json-object-put! (mut frame) "orig_msg_id" (JsonString original-id))
     (load frame)))
 
-;; Serialize a frame as one NDJSON line, trailing newline included. Returns an
-;; empty slice if the result would exceed what the receiver will read, so an
-;; oversized frame fails here rather than as a dropped connection.
+;;; Serialize a frame as one NDJSON line, trailing newline included. Returns an
+;;; empty slice if the result would exceed what the receiver will read, so an
+;;; oversized frame fails here rather than as a dropped connection.
 (defn cc-frame-line [(allocator (dyn Allocator)) (frame Json)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) (json-stringify allocator frame))
@@ -220,9 +220,9 @@
     (None [] fallback)
     (Some [text] text)))
 
-;; Parse one NDJSON line. Returns false when the line is not JSON or not an
-;; object; an unrecognized `type` parses successfully as CcUnknownFrame, because
-;; a future frame kind is not a protocol error and must not drop the connection.
+;;; Parse one NDJSON line. Returns false when the line is not JSON or not an
+;;; object; an unrecognized `type` parses successfully as CcUnknownFrame, because
+;;; a future frame kind is not a protocol error and must not drop the connection.
 (defn cc-frame-parse [(allocator (dyn Allocator))
                       (line (slice u8))
                       (out (ptr CcFrame))] (-> bool)

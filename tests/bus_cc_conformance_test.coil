@@ -33,7 +33,7 @@
                 (set! i (+ (load i) 1)))))
     (sb-finish! (mut buffer))))
 
-;; U+00E9, to prove the 64-code-point clamp is not a 64-byte clamp.
+;;; U+00E9, to prove the 64-code-point clamp is not a 64-byte clamp.
 (defn repeated-accent [(allocator (dyn Allocator)) (count i64)] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         (mut i) 0]
@@ -64,8 +64,8 @@
 (defn hop-ids-upper [(allocator (dyn Allocator)) (count i64)] (-> (slice u8))
   (hop-ids-of allocator count 65))
 
-;; Two distinct ids, so the separator is proved to join different values rather
-;; than being invisible inside a run of one repeated character.
+;;; Two distinct ids, so the separator is proved to join different values rather
+;;; than being invisible inside a run of one repeated character.
 (defn hop-ids-ab [(allocator (dyn Allocator))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
     (sb-push-str! (mut buffer) (repeated allocator 97 24))

@@ -789,9 +789,9 @@
            (assert-eq (load (field counts completed)) 0)
            (assert-eq (load (field counts failed)) 1)))
 
-;; A wire with no server-side history has to carry the whole conversation. When
-;; it carried only the last turn, a model re-decided from the same starting point
-;; every turn: the agent read the same file over and over and never did the work.
+;;; A wire with no server-side history has to carry the whole conversation. When
+;;; it carried only the last turn, a model re-decided from the same starting point
+;;; every turn: the agent read the same file over and over and never did the work.
 (defn turn-of [(allocator (dyn Allocator))
                (output (slice u8))
                (call-id (slice u8))

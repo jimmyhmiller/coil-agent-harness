@@ -41,7 +41,7 @@
 (const CC_OPEN "<cross-session-message")
 (const CC_CLOSE "\n</cross-session-message>")
 
-;; The receiver clamps a display name to 64 code points and appends an ellipsis.
+;;; The receiver clamps a display name to 64 code points and appends an ellipsis.
 (const CC_NAME_MAX_CHARS 64)
 (const CC_SESSION_MAX_BYTES 80)
 (const CC_HOP_ID_BYTES 24)
@@ -93,9 +93,9 @@
 (defn cc-lower-hex-byte? [(byte i64)] (-> bool)
   (or (and (>= byte 48) (<= byte 57)) (and (>= byte 97) (<= byte 102))))
 
-;; `24hex(,24hex){0,31}` -- a bounded relay path. The bound matters: a hop chain
-;; is the only field an intermediary appends to, so an unbounded one would let a
-;; relay loop grow a message without limit.
+;;; `24hex(,24hex){0,31}` -- a bounded relay path. The bound matters: a hop chain
+;;; is the only field an intermediary appends to, so an unbounded one would let a
+;;; relay loop grow a message without limit.
 (defn cc-hop-chain-valid? [(value (slice u8))] (-> bool)
   (let [n (slice-len [u8] value)
         (mut ok) (> n 0)
@@ -130,9 +130,9 @@
 (defn cc-mode-valid? [(value (slice u8))] (-> bool)
   (or (= value "bypass") (= value "prompting")))
 
-;; The name as it may appear between the quotes: anything except a quote, an
-;; angle bracket, or a line break. Those would let a name close its own
-;; attribute or the tag.
+;;; The name as it may appear between the quotes: anything except a quote, an
+;;; angle bracket, or a line break. Those would let a name close its own
+;;; attribute or the tag.
 (defn cc-name-byte-allowed? [(byte i64)] (-> bool)
   (not (or (or (= byte 34) (= byte 60))
            (or (= byte 62) (or (= byte 10) (= byte 13))))))
@@ -141,9 +141,9 @@
 ;; UTF-8, for code-point-accurate name clamping
 ;; ---------------------------------------------------------------------------
 
-;; Length in bytes of the UTF-8 sequence starting at `index`. Returns 1 for a
-;; malformed lead byte so that scanning always advances -- a name is display
-;; metadata and must never be able to hang the parser.
+;;; Length in bytes of the UTF-8 sequence starting at `index`. Returns 1 for a
+;;; malformed lead byte so that scanning always advances -- a name is display
+;;; metadata and must never be able to hang the parser.
 (defn cc-utf8-length [(text (slice u8)) (index i64)] (-> i64)
   (let [byte (cast i64 (slice-get [u8] text index))
         n (slice-len [u8] text)
@@ -171,14 +171,14 @@
                   (+ (* (- (cast i64 (slice-get [u8] text (+ index 2))) 128) 64)
                      (- (cast i64 (slice-get [u8] text (+ index 3))) 128)))))))
 
-;; Code points the receiver strips from a display name: Cc, Cf, Cs, Zl, Zp.
-;;
-;; This is the common-case subset, not the complete Unicode tables, and the
-;; shortfall is deliberate. Getting it wrong for an exotic name costs the
-;; sender's display name on one message -- the round-trip check fails and the
-;; text is delivered as an opaque body. It cannot corrupt a body or misattribute
-;; a peer, so a full category table is not worth carrying for a field that is
-;; cosmetic by construction. Names we originate are ASCII anyway.
+;;; Code points the receiver strips from a display name: Cc, Cf, Cs, Zl, Zp.
+;;;
+;;; This is the common-case subset, not the complete Unicode tables, and the
+;;; shortfall is deliberate. Getting it wrong for an exotic name costs the
+;;; sender's display name on one message -- the round-trip check fails and the
+;;; text is delivered as an opaque body. It cannot corrupt a body or misattribute
+;;; a peer, so a full category table is not worth carrying for a field that is
+;;; cosmetic by construction. Names we originate are ASCII anyway.
 (defn cc-name-stripped-codepoint? [(codepoint i64)] (-> bool)
   (or (or (< codepoint 32) (= codepoint 127))
       (or (or (and (>= codepoint 128) (<= codepoint 159)) (= codepoint 173))
@@ -196,9 +196,9 @@
       (or (or (= byte 10) (= byte 13))
           (or (= byte 11) (= byte 12)))))
 
-;; Strip format and control code points, trim, and clamp to 64 code points with
-;; an ellipsis. Mirrors the receiver's own normalization so that a name we send
-;; survives its round-trip check unchanged.
+;;; Strip format and control code points, trim, and clamp to 64 code points with
+;;; an ellipsis. Mirrors the receiver's own normalization so that a name we send
+;;; survives its round-trip check unchanged.
 (defn cc-sanitize-name [(allocator (dyn Allocator)) (name (slice u8))] (-> (slice u8))
   (let [(mut stripped) (sb-new allocator)
         (mut i) 0
@@ -278,10 +278,10 @@
                 (set! i (+ (load i) 1)))))
     (load ok)))
 
-;; Rewrite `</cross-session-message` to `<\/cross-session-message` so a body
-;; cannot terminate the envelope. Case-insensitive, and only when the tag name
-;; is followed by `>`, whitespace, `/`, or end of input -- otherwise
-;; `</cross-session-messages` would be needlessly mangled.
+;;; Rewrite `</cross-session-message` to `<\/cross-session-message` so a body
+;;; cannot terminate the envelope. Case-insensitive, and only when the tag name
+;;; is followed by `>`, whitespace, `/`, or end of input -- otherwise
+;;; `</cross-session-messages` would be needlessly mangled.
 (defn cc-scrub-close-tag [(allocator (dyn Allocator)) (body (slice u8))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)
         n (slice-len [u8] body)
@@ -329,16 +329,16 @@
   (sb-push-byte! (mut buffer) (cast u8 34))
   0)
 
-;; An attribute present but invalid is omitted rather than rejected, matching
-;; the reference: the message still goes, minus a field that would have been
-;; discarded anyway.
+;;; An attribute present but invalid is omitted rather than rejected, matching
+;;; the reference: the message still goes, minus a field that would have been
+;;; discarded anyway.
 (defn cc-optional-attribute [(value (Option (slice u8)))] (-> (slice u8))
   (match value
     (None [] "")
     (Some [text] text)))
 
-;; Render the envelope. This is the normative form -- the parser validates by
-;; calling it, and the receiver validates by doing the same on its side.
+;;; Render the envelope. This is the normative form -- the parser validates by
+;;; calling it, and the receiver validates by doing the same on its side.
 (defn cc-envelope-render [(allocator (dyn Allocator))
                           (envelope (ptr CcEnvelope))] (-> (slice u8))
   (let [(mut buffer) (sb-new allocator)]
@@ -376,10 +376,10 @@
 ;; Parsing
 ;; ---------------------------------------------------------------------------
 
-;; Try to read ` name="value"` at `index`. On success writes the value and the
-;; index just past the closing quote; on absence leaves both untouched and
-;; returns false. `allowed?` is the per-attribute character class, which is what
-;; keeps this from accepting a value the reference's pattern would reject.
+;;; Try to read ` name="value"` at `index`. On success writes the value and the
+;;; index just past the closing quote; on absence leaves both untouched and
+;;; returns false. `allowed?` is the per-attribute character class, which is what
+;;; keeps this from accepting a value the reference's pattern would reject.
 (defn cc-read-attribute [(text (slice u8))
                          (index i64)
                          (name (slice u8))
@@ -424,13 +424,13 @@
                     (set! out-index (+ (load at) 1))
                     true)))))))
 
-;; Parse `text` as an envelope. Returns false when it is not one -- including
-;; when it merely looks like one -- and the caller must then treat the text as
-;; an ordinary body.
-;;
-;; The final check is the important one: everything above only proposes a
-;; reading, and the reading is accepted only if re-rendering it reproduces the
-;; input exactly.
+;;; Parse `text` as an envelope. Returns false when it is not one -- including
+;;; when it merely looks like one -- and the caller must then treat the text as
+;;; an ordinary body.
+;;;
+;;; The final check is the important one: everything above only proposes a
+;;; reading, and the reading is accepted only if re-rendering it reproduces the
+;;; input exactly.
 (defn cc-envelope-parse [(allocator (dyn Allocator))
                          (text (slice u8))
                          (out (ptr CcEnvelope))] (-> bool)
@@ -482,8 +482,8 @@
                       ;; the acceptance test.
                       (= (cc-envelope-render allocator out) text)))))))))
 
-;; Wrap a body for sending. The common path: our address, our name, and the
-;; permission mode we attest to.
+;;; Wrap a body for sending. The common path: our address, our name, and the
+;;; permission mode we attest to.
 (defn cc-envelope-wrap [(allocator (dyn Allocator))
                         (from (slice u8))
                         (from-name (slice u8))

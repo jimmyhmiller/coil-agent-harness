@@ -40,20 +40,20 @@
         (= code CC_SEND_TOO_LARGE) "the frame exceeds the receiver's line limit"
         :else "unknown send failure"))
 
-;; Wait before closing, because closing immediately after the write can deliver
-;; an RST that costs the peer the payload. The reference client does the same
-;; and for the same reason; this is a real observed behavior on macOS, not
-;; superstition. It is the one place a sender has to be patient.
+;;; Wait before closing, because closing immediately after the write can deliver
+;;; an RST that costs the peer the payload. The reference client does the same
+;;; and for the same reason; this is a real observed behavior on macOS, not
+;;; superstition. It is the one place a sender has to be patient.
 (const CC_LINGER_MS 150)
 
-;; What we assert about ourselves. `from-mode` is self-asserted and nothing
-;; verifies it, so the only honest value is the one describing how this process
-;; actually treats tool permissions.
-;;
-;; It matters which we send: a receiver in bypass mode HOLDS a message from a
-;; sender that attested nothing, but accepts one whose attested mode matches.
-;; Attesting nothing is treated more suspiciously than attesting a match, so a
-;; harness that stays silent here looks like the more dangerous peer.
+;;; What we assert about ourselves. `from-mode` is self-asserted and nothing
+;;; verifies it, so the only honest value is the one describing how this process
+;;; actually treats tool permissions.
+;;;
+;;; It matters which we send: a receiver in bypass mode HOLDS a message from a
+;;; sender that attested nothing, but accepts one whose attested mode matches.
+;;; Attesting nothing is treated more suspiciously than attesting a match, so a
+;;; harness that stays silent here looks like the more dangerous peer.
 (defstruct CcIdentity
   [;; Our reply address, or empty when we are not listening. Empty is legal:
    ;; the message still lands, it just cannot be answered.
@@ -70,9 +70,9 @@
   (set! (.mode identity) (if (= (slice-len [u8] mode) 0) "bypass" mode))
   0)
 
-;; Write every byte of `line`, or fail. A partial write is a truncated frame,
-;; which the receiver drops when the newline never arrives -- so reporting
-;; success on a short write would report a message that was never delivered.
+;;; Write every byte of `line`, or fail. A partial write is a truncated frame,
+;;; which the receiver drops when the newline never arrives -- so reporting
+;;; success on a short write would report a message that was never delivered.
 (defn write-all-bytes [(connection (ptr socket/UnixConnection))
                        (line (slice u8))] (-> bool)
   (let [length (slice-len [u8] line)
@@ -91,7 +91,7 @@
                         (set! sent (+ (load sent) n)))))))
     (and (load ok) (>= (load sent) length))))
 
-;; Deliver one already-serialized NDJSON line to a socket path.
+;;; Deliver one already-serialized NDJSON line to a socket path.
 (defn cc-send-line [(allocator (dyn Allocator))
                     (socket-path (slice u8))
                     (line (slice u8))] (-> i64)
@@ -108,12 +108,12 @@
                 (socket/unix-connection-close! connection)
                 (if written CC_SEND_OK CC_SEND_WRITE_FAILED)))))))
 
-;; Send `body` to `target`, which may be a name, a pid, a session id, a name
-;; prefix, or a raw address.
-;;
-;; `session-id` is almost always empty. Pinning a session that does not match
-;; makes the receiver drop the frame silently, so it is opt-in: a wrong guess
-;; here is indistinguishable from the message never being sent.
+;;; Send `body` to `target`, which may be a name, a pid, a session id, a name
+;;; prefix, or a raw address.
+;;;
+;;; `session-id` is almost always empty. Pinning a session that does not match
+;;; makes the receiver drop the frame silently, so it is opt-in: a wrong guess
+;;; here is indistinguishable from the message never being sent.
 (defn cc-peer-send [(realm (ptr CcRealm))
                     (allocator (dyn Allocator))
                     (identity (ptr CcIdentity))
@@ -138,8 +138,8 @@
                                session-id)]
           (cc-send-line allocator socket-path (cc-frame-line allocator frame))))))
 
-;; Ask a peer to display us under a different name. A courtesy, not a
-;; requirement: the roster is a name directory and nothing routes on it.
+;;; Ask a peer to display us under a different name. A courtesy, not a
+;;; requirement: the roster is a name directory and nothing routes on it.
 (defn cc-peer-rename [(realm (ptr CcRealm))
                       (allocator (dyn Allocator))
                       (target (slice u8))
@@ -154,9 +154,9 @@
                                                       (cc-new-message-id allocator)
                                                       name))))))
 
-;; Tell a sender what became of a message it sent us. Only accepted by the
-;; receiver when our `from` lives in the same socket directory as theirs, so
-;; `identity.address` must be a path we really bound.
+;;; Tell a sender what became of a message it sent us. Only accepted by the
+;;; receiver when our `from` lives in the same socket directory as theirs, so
+;;; `identity.address` must be a path we really bound.
 (defn cc-peer-report-status [(realm (ptr CcRealm))
                              (allocator (dyn Allocator))
                              (identity (ptr CcIdentity))

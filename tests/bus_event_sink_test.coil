@@ -9,8 +9,8 @@
 (import "harness-json" :use *)
 (import "harness-bus-event-sink" :use *)
 
-;; Records what it saw and can be told to fail, so ordering and failure handling
-;; are observable rather than inferred.
+;;; Records what it saw and can be told to fail, so ordering and failure handling
+;;; are observable rather than inferred.
 (defstruct RecordingSink
   [(calls i64)
    (last-sequence i64)
