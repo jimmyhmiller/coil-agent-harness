@@ -122,9 +122,9 @@
   (write-line 2 "  run   allows the model to choose whether to call the echo tool")
   (write-line 2 "  projects lists the checkouts declared in projects.json")
   (write-line 2 "  say   delivers a message into a run that is already going")
-  (write-line 2 "  --project names a declared project; its checkout becomes the workspace,")
-  (write-line 2 "        so a workflow changes a codebase that already exists instead of")
-  (write-line 2 "        running in a fresh scratch directory")
+  (write-line 2 "  --project names a declared project; the run works in a git worktree of")
+  (write-line 2 "        its checkout, on a branch of its own, committing as each worker")
+  (write-line 2 "        finishes. The checkout itself is never the workspace.")
   (write-line 2 "  tool  requires the model to call the echo tool")
   (write-line 2 "  peers lists reachable Claude Code sessions; --all keeps dead sockets")
   (write-line 2 "  send  delivers a message into a session's prompt queue")
@@ -177,13 +177,24 @@
                                        (let [created (path-join allocator root (sb-finish! (mut name)))]
                                          (directory-create-all allocator created 448)
                                          created)))
-                               workspace
+                               requested-workspace-path
                                  (if (starts-with selected-workspace "/")
                                      selected-workspace
                                      (match (os/current-dir allocator)
                                        (Ok [owned]
                                            (path-join allocator (os/owned-string-slice owned) selected-workspace))
                                        (Err [failure] selected-workspace)))
+                               ;; A checkout is never the workspace. It becomes a
+                               ;; worktree of itself, on a branch of its own, and
+                               ;; the run commits there: what an agent does is
+                               ;; then reviewable, and the worst any tool of its
+                               ;; can throw away is its own work.
+                               isolation
+                                 (isolate-workspace allocator
+                                                    requested-workspace-path
+                                                    (.name definition)
+                                                    (factory-worktree-root allocator))
+                               workspace (.directory isolation)
                                source-directory
                                  (if (starts-with factory-directory "/")
                                      factory-directory
@@ -195,6 +206,13 @@
                                        (Err [failure] factory-directory)))
                                runs-root (path-join allocator ".factory-runs" (.name definition))
                                (mut run-name) (sb-new allocator)]
+                           ;; Isolation is not best-effort. If a worktree of the
+                           ;; checkout could not be made, the run does not start:
+                           ;; the only fallback would be the checkout itself.
+                           (when (> (slice-len [u8] (.message isolation)) 0)
+                             (write-line 2 (.message isolation))
+                             (os/_exit 74)
+                             0)
                            (directory-create-all allocator workspace 448)
                            (directory-create-all allocator runs-root 448)
                            (sb-push-str! (mut run-name)
@@ -203,6 +221,12 @@
                            (let [journal-path (path-join allocator runs-root (sb-finish! (mut run-name)))
                                  (mut journal) (cast (ptr EventJournal) 0)]
                              (write-line 1 (concat-or-empty allocator "factory workspace: " workspace))
+                             (when (> (slice-len [u8] (.branch isolation)) 0)
+                               (write-line 1
+                                           (concat-or-empty allocator
+                                                            "factory branch: "
+                                                            (.branch isolation)))
+                               0)
                              (write-line 1 (concat-or-empty allocator "factory journal: " journal-path))
                              (match (snapshot-factory-definition allocator
                                                                  source-directory
@@ -988,51 +1012,51 @@
     (region/region-init scratch-region owner)
     (let [allocator (region/region-allocator scratch-region)
           state-root
-            (match (os/env-get allocator "HARNESS_STATE_DIR")
-              (Ok [configured]
-                  (match configured
-                    (Some [value] (os/owned-string-slice value))
-                    (None []
-                          (match (os/env-get allocator "HOME")
-                            (Ok [home]
-                                (match home
-                                  (Some [value]
-                                        (path-join allocator
-                                                   (os/owned-string-slice value)
-                                                   ".coil-harness"))
-                                  (None [] "/tmp/coil-harness")))
-                            (Err [home-failure] "/tmp/coil-harness")))))
-              (Err [missing]
-                   (match (os/env-get allocator "HOME")
-                     (Ok [home]
-                         (match home
-                           (Some [value]
-                                 (path-join allocator
-                                            (os/owned-string-slice value)
-                                            ".coil-harness"))
-                           (None [] "/tmp/coil-harness")))
-                     (Err [home-missing] "/tmp/coil-harness"))))
+          (match (os/env-get allocator "HARNESS_STATE_DIR")
+            (Ok [configured]
+                (match configured
+                  (Some [value] (os/owned-string-slice value))
+                  (None []
+                        (match (os/env-get allocator "HOME")
+                          (Ok [home]
+                              (match home
+                                (Some [value]
+                                      (path-join allocator
+                                                 (os/owned-string-slice value)
+                                                 ".coil-harness"))
+                                (None [] "/tmp/coil-harness")))
+                          (Err [home-failure] "/tmp/coil-harness")))))
+            (Err [missing]
+                 (match (os/env-get allocator "HOME")
+                   (Ok [home]
+                       (match home
+                         (Some [value]
+                               (path-join allocator
+                                          (os/owned-string-slice value)
+                                          ".coil-harness"))
+                         (None [] "/tmp/coil-harness")))
+                   (Err [home-missing] "/tmp/coil-harness"))))
           runs-directory (path-join allocator state-root "runs")
           process-id (json-stringify allocator (json-integer allocator (process/id)))
           timestamp (json-stringify allocator (json-integer allocator (now-ms)))
           filename
-            (concat-or-empty allocator
-                             "tui."
-                             (concat-or-empty allocator
-                                              process-id
-                                              (concat-or-empty allocator
-                                                               "."
-                                                               (concat-or-empty allocator
-                                                                                timestamp
-                                                                                ".jsonl"))))
+          (concat-or-empty allocator
+                           "tui."
+                           (concat-or-empty allocator
+                                            process-id
+                                            (concat-or-empty allocator
+                                                             "."
+                                                             (concat-or-empty allocator
+                                                                              timestamp
+                                                                              ".jsonl"))))
           path (path-join allocator runs-directory filename)
           directory-result (directory-create-all allocator runs-directory 448)
           result
-            (if (= directory-result 0)
-                (cli-tui path force-plain)
-                (do
-                  (write-line 2 "error: could not create the Coil harness state directory")
-                  73))]
+          (if (= directory-result 0)
+              (cli-tui path force-plain)
+              (do
+                (write-line 2 "error: could not create the Coil harness state directory")
+                73))]
       (region/region-close! scratch-region)
       result)))
 

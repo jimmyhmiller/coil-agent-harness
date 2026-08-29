@@ -51,8 +51,12 @@ dist/
 /.factory-artifacts/
 /.factory-runs/
 /.factory-workspaces/
+# The worktree a run of a project gets. A run never works in the checkout.
+/.factory-worktrees/
 # A run's inbox and the window's own scratch: local conversation, not source.
 /.factory-inbox/
+# What you said to a finished run, written out so the next one can read it.
+/.factory-followups/
 /.coil-gui-service-*.jsonl
 /.coil-gui-last-run.log
 **/.factory/

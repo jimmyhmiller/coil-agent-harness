@@ -10,11 +10,188 @@
 (import "coil.result" :use *)
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
+(import "coil.os" :as os)
 (import "coil.subprocess" :as subprocess)
 (import "coil.time" :as time)
 (import "harness-directory" :use *)
 (import "harness-json" :use *)
 (import "harness-system" :use *)
+
+;; ---------------------------------------------------------------------------
+;; Isolation
+;; ---------------------------------------------------------------------------
+;;
+;; A run never works in somebody's checkout. It works in a git worktree of it,
+;; created for that run and thrown at nothing else, and it commits what it does
+;; there. The reason is not tidiness: an agent has ordinary tools, and ordinary
+;; tools include `git checkout -- .`. On 2026-08-29 a worker decided that the
+;; uncommitted work in the checkout it had been handed was a mistake and reverted
+;; ten files, destroying work that had never been committed. A worktree makes
+;; that failure impossible to reach: the worst it can throw away is its own.
+
+(defstruct GitOutcome [(code i64) (message (slice u8))])
+
+;; Run git in a directory. Argv, not shell source, so nothing in a path can be
+;; read as a command; what git said is copied out before the run result is freed.
+(defn git-in [(allocator (dyn Allocator))
+              (directory (slice u8))
+              (args (slice (slice u8)))] (-> GitOutcome)
+  (let [run-result (primitive/alloc-stack subprocess/RunResult)
+        outcome (primitive/alloc-stack GitOutcome)
+        options
+          (subprocess/run-options "/usr/bin/git"
+                                  args
+                                  directory
+                                  65536
+                                  65536
+                                  (None [time/Instant])
+                                  (cast (ptr native-cancellation/Cancellation) 0)
+                                  (zeroed time/Duration))]
+    (set! (.code outcome) -1)
+    (set! (.message outcome) "")
+    (match (subprocess/run allocator run-result options)
+      (Err [failure] 0)
+      (Ok [completed]
+          (let [(mut said) (sb-new allocator)
+                stderr-text (str-trim (.stderr completed))]
+            (sb-push-str! (mut said)
+                          (if (> (slice-len [u8] stderr-text) 0)
+                              stderr-text
+                              (str-trim (.stdout completed))))
+            (set! (.code outcome)
+                  (match (.status completed)
+                    (subprocess/Exited [code] code)
+                    (subprocess/Signaled [signal] -1)))
+            (set! (.message outcome) (sb-finish! (mut said)))
+            (subprocess/run-result-free allocator completed)
+            0)))
+    (load outcome)))
+
+;; Is this directory inside a git working tree? Only then is there anything to
+;; isolate a run from.
+(defn git-checkout? [(allocator (dyn Allocator)) (directory (slice u8))] (-> bool)
+  (let [args (primitive/alloc-stack (array (slice u8) 2))]
+    (set! (index args 0) "rev-parse")
+    (set! (index args 1) "--is-inside-work-tree")
+    (let [outcome (git-in allocator directory (slice-new [(slice u8)] (index args 0) 2))
+          code (.code outcome)]
+      (= code 0))))
+
+;; Where a run works, and what it must say when it cannot get there. An empty
+;; `message` means this is usable; a non-empty one is the reason the run must not
+;; start, because the alternative — falling back to the checkout itself — is the
+;; exact thing this exists to prevent.
+(defstruct IsolatedWorkspace
+  [(directory (slice u8))
+   (branch (slice u8))
+   (message (slice u8))])
+
+(defn isolation-failed [(allocator (dyn Allocator))
+                        (checkout (slice u8))
+                        (why (slice u8))] (-> IsolatedWorkspace)
+  (let [out (primitive/alloc-stack IsolatedWorkspace)
+        (mut text) (sb-new allocator)]
+    (sb-push-str! (mut text) "refusing to run in ")
+    (sb-push-str! (mut text) checkout)
+    (sb-push-str! (mut text) " itself: a run works in a worktree of a checkout, never in the checkout. ")
+    (sb-push-str! (mut text) why)
+    (set! (.directory out) "")
+    (set! (.branch out) "")
+    (set! (.message out) (sb-finish! (mut text)))
+    (load out)))
+
+;; Worktrees live beside the harness's other run-owned directories, never inside
+;; the checkout: a run leaves nothing at all in the project it works on, not even
+;; an ignored directory.
+(const FACTORY_WORKTREE_DIRECTORY ".factory-worktrees")
+
+(defn factory-worktree-root [(allocator (dyn Allocator))] (-> (slice u8))
+  (let [relative FACTORY_WORKTREE_DIRECTORY]
+    (match (os/current-dir allocator)
+      (Ok [owned] (path-join allocator (os/owned-string-slice owned) relative))
+      (Err [failure] relative))))
+
+(defn run-stamp [(allocator (dyn Allocator)) (name (slice u8))] (-> (slice u8))
+  (let [(mut text) (sb-new allocator)]
+    (sb-push-str! (mut text) name)
+    (sb-push-str! (mut text) "-")
+    (sb-push-str! (mut text) (json-stringify allocator (json-integer allocator (now-ms))))
+    (sb-finish! (mut text))))
+
+;; The workspace a run actually gets. A directory that is not a checkout is
+;; handed back untouched — a scratch workspace is already nobody's working copy —
+;; and a checkout becomes a fresh worktree of itself, on a branch of its own,
+;; outside the checkout so that nothing appears inside it at all.
+(defn isolate-workspace [(allocator (dyn Allocator))
+                         (requested (slice u8))
+                         (factory-name (slice u8))
+                         (worktree-root (slice u8))] (-> IsolatedWorkspace)
+  (let [out (primitive/alloc-stack IsolatedWorkspace)]
+    (set! (.branch out) "")
+    (set! (.message out) "")
+    (if (not (and (path-exists? allocator requested) (git-checkout? allocator requested)))
+        (do (set! (.directory out) requested) (load out))
+        (let [stamp (run-stamp allocator factory-name)
+              directory (path-join allocator worktree-root stamp)
+              (mut branch) (sb-new allocator)]
+          (sb-push-str! (mut branch) "factory/")
+          (sb-push-str! (mut branch) stamp)
+          ;; `git worktree add -b <branch> <dir>` checks out HEAD, so the run
+          ;; starts from what is committed. Whatever is uncommitted in the
+          ;; checkout stays there, untouched and out of reach, which is the point.
+          (let [branch-name (sb-finish! (mut branch))
+                args (primitive/alloc-stack (array (slice u8) 5))]
+            (directory-create-all allocator worktree-root 448)
+            (set! (index args 0) "worktree")
+            (set! (index args 1) "add")
+            (set! (index args 2) "-b")
+            (set! (index args 3) branch-name)
+            (set! (index args 4) directory)
+            (let [outcome (git-in allocator requested (slice-new [(slice u8)] (index args 0) 5))
+                  code (.code outcome)]
+              (if (= code 0)
+                  (do
+                    (set! (.directory out) directory)
+                    (set! (.branch out) branch-name)
+                    (load out))
+                  (isolation-failed allocator requested (.message outcome)))))))))
+
+;; What the run did, recorded where it can be reviewed. A worker finishing is the
+;; moment its work exists; leaving it uncommitted means the next worker's tools
+;; can quietly undo it and nobody can see what changed. "nothing to commit" is a
+;; normal answer -- a worker that only read things changed nothing.
+(defn commit-workspace! [(allocator (dyn Allocator))
+                         (workspace (slice u8))
+                         (message (slice u8))] (-> bool)
+  (if (not (git-checkout? allocator workspace))
+      false
+      ;; What a run brings with it -- its private copy of the definition, the
+      ;; tool output it captured, its inbox -- is not the work. Committing it
+      ;; would bury the change somebody has to review.
+      (let [add-args (primitive/alloc-stack (array (slice u8) 8))]
+        (set! (index add-args 0) "add")
+        (set! (index add-args 1) "-A")
+        (set! (index add-args 2) "--")
+        (set! (index add-args 3) ".")
+        (set! (index add-args 4) ":(exclude).factory")
+        (set! (index add-args 5) ":(exclude).factory-artifacts")
+        (set! (index add-args 6) ":(exclude).factory-inbox")
+        (set! (index add-args 7) ":(exclude).factory-issues")
+        (let [add-outcome (git-in allocator
+                                  workspace
+                                  (slice-new [(slice u8)] (index add-args 0) 8))
+              added (.code add-outcome)]
+          (if (= added 0)
+              (let [commit-args (primitive/alloc-stack (array (slice u8) 3))]
+                (set! (index commit-args 0) "commit")
+                (set! (index commit-args 1) "-m")
+                (set! (index commit-args 2) message)
+                (let [commit-outcome (git-in allocator
+                                             workspace
+                                             (slice-new [(slice u8)] (index commit-args 0) 3))
+                      committed (.code commit-outcome)]
+                  (= committed 0)))
+              false)))))
 
 (defsum FactorySnapshotResult
   (FactorySnapshotCreated [(directory (slice u8))])
