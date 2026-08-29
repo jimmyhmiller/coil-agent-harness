@@ -10,6 +10,7 @@
 ;; that produced the implementation.
 ;;
 (module harness-bus-cc-conformance-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

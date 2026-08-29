@@ -6,6 +6,7 @@
 ;; set -- round-trips perfectly here and is silently degraded to opaque text on
 ;; the wire. The expected strings below come from the reference client.
 (module harness-bus-cc-address-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

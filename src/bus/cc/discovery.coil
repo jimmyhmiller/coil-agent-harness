@@ -21,6 +21,7 @@
 ;; socket connect is the truth. This needs no heartbeat and no lease, and it
 ;; self-heals: a stale entry is discovered by whoever next tries to use it.
 (module harness-bus-cc-discovery)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

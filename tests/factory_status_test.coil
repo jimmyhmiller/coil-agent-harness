@@ -1,4 +1,5 @@
 (module harness-factory-status-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

@@ -26,6 +26,7 @@
 ;; from-mode. Body newlines are significant -- exactly one after the open tag
 ;; and one before the close tag -- and the body is not XML-escaped.
 (module harness-bus-cc-envelope)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

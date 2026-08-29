@@ -4,8 +4,12 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.cancellation" :as cancellation)
+(import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
+(import "coil.subprocess" :as subprocess)
 (import "coil.thread" :use *)
+(import "coil.time" :as time)
 (import "harness-json" :use *)
 (import "harness-model" :use *)
 (import "harness-tool" :use *)
@@ -38,8 +42,36 @@
     (store! (load (field job completed)) (load at))
     (cast (ptr i8) 0)))
 
+;; Exercise subprocess argv/capture allocation plus child spawn/reap without auth,
+;; credentials, shell interpretation, output, or network access. The completed
+;; result is explicitly freed before request serialization starts.
+(defn perturb-subprocess [(allocator (dyn Allocator))] (-> bool)
+  (let [args (primitive/alloc-stack (array (slice u8) 1))
+        result (primitive/alloc-stack subprocess/RunResult)]
+    (store! (index args 0) "--")
+    (match (subprocess/run allocator
+                           result
+                           (subprocess/run-options
+                             "/bin/true"
+                             (slice-new [(slice u8)] (index args 0) 1)
+                             ""
+                             1
+                             1
+                             (None [time/Instant])
+                             (cast (ptr cancellation/Cancellation) 0)
+                             (zeroed time/Duration)))
+      (Err [failure] false)
+      (Ok [completed]
+          (let [succeeded
+                  (match (load (field completed status))
+                    (subprocess/Exited [code] (= code 0))
+                    (subprocess/Signaled [signal] false))]
+            (subprocess/run-result-free allocator completed)
+            succeeded)))))
+
 ;; Compile this fixture with optimization: the production crash occurred while an
-;; optimized worker serialized the Claude request tree containing native tools.
+;; optimized worker serialized the Claude request tree containing native tools,
+;; immediately after subprocess allocation and lifecycle activity.
 (defn main [(argc i32) (argv (ptr (ptr i8)))] (-> i64)
   (let [owner (malloc-allocator)
         registry (box! owner ToolRegistry (tool-registry-new owner))
@@ -74,13 +106,11 @@
                 (store! (field request tools) registry)
                 (store! (field request tool-choice) (ToolsAuto))
                 (store! (field request parallel-tool-calls) true)
-                (store! (field request reasoning) (ReasoningMedium))
+                (store! (field request reasoning) "medium")
                 (store! (field request max-output-tokens) 4096)
                 (store! (field (field request continuation) present) false)
                 (store! (field (field request continuation) previous-output) (JsonNull))
-                ;; Exercise the same subprocess/allocation perturbation that occurs
-                ;; immediately before Claude request serialization in production.
-                (claude-oauth-command run-allocator "token" true)
+                (when (not (perturb-subprocess run-allocator)) (store! status 4) 0)
                 (store! (field job allocator) run-allocator)
                 (store! (field job request) request)
                 (store! (field job iterations) 100)

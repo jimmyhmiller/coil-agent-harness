@@ -9,6 +9,7 @@
 ;; Ported from ccpeer/conformance.test.js, which checks the same claims against
 ;; the same capture.
 (module harness-bus-cc-envelope-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

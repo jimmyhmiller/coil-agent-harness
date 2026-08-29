@@ -1,4 +1,5 @@
 (module harness-tui-input-decoder)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

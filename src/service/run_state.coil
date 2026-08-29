@@ -1,4 +1,5 @@
 (module harness-run-state)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

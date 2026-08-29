@@ -4,6 +4,7 @@
 ;; or a mishandled clean close -- so this exercises the one layer that talks to
 ;; the kernel.
 (module harness-bus-tcp-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

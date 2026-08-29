@@ -1,4 +1,5 @@
 (module agent-sdk-provider)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

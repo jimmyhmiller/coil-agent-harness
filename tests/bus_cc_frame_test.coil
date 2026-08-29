@@ -5,6 +5,7 @@
 ;; sending the field is worse than not having it -- a mismatched session_id is
 ;; dropped silently by the receiver, which looks exactly like a network problem.
 (module harness-bus-cc-frame-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

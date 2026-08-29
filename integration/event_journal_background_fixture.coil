@@ -5,6 +5,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.str" :use *)
 (import "harness-agent-runner" :use *)
 (import "harness-allocation-domain" :use *)

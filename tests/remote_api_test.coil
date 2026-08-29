@@ -1,4 +1,5 @@
 (module harness-remote-api-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

@@ -3,6 +3,7 @@
 ;; the fact that this file changes only the setup -- and not a single assertion
 ;; about frames or envelopes -- is the evidence that the abstraction holds.
 (module harness-bus-unix-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

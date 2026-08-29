@@ -10,6 +10,7 @@
 ;; picker, not an allowlist, so a new model works the moment the provider serves
 ;; it -- you just have to type it.
 (module harness-model-catalog)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

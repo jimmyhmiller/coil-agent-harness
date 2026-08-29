@@ -5,6 +5,7 @@
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
 (import "coil.atomic" :use *)
+(import "coil.primitive" :as primitive)
 (import "harness-agent-runner" :use *)
 (import "harness-allocation-domain" :use *)
 (import "harness-bash-tool" :use *)

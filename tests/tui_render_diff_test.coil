@@ -3,6 +3,7 @@
 ;; was built in. These drive the real renderer twice and count what the second
 ;; plan costs.
 (module harness-tui-render-diff-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

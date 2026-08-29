@@ -12,6 +12,7 @@
 ;;   * a subscriber that stops reading cannot stall the run -- it loses events
 ;;     instead, and the loss is counted.
 (module harness-bus-end-to-end-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

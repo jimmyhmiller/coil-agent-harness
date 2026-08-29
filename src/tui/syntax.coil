@@ -11,6 +11,7 @@
 ;; keyword set. Nothing here can fail to produce output, because a highlighter
 ;; that can fail is a renderer that can lose a message.
 (module harness-tui-syntax)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

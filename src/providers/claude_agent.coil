@@ -1,4 +1,5 @@
 (module claude-agent)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

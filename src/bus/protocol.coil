@@ -16,6 +16,7 @@
 ;; understanding payloads, so a relay can forward a message whose type it has
 ;; never seen -- and a payload can use a different codec than the envelope.
 (module harness-bus-protocol)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

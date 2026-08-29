@@ -1,4 +1,5 @@
 (module codex-direct)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

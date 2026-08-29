@@ -1,4 +1,5 @@
 (module harness-model-catalog-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

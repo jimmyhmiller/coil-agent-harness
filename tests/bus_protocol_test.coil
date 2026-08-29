@@ -3,6 +3,7 @@
 ;; a concrete format inside the protocol fails here rather than at a remote
 ;; peer that speaks the other one.
 (module harness-bus-protocol-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

@@ -1,4 +1,5 @@
 (module harness-bus-event-sink-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

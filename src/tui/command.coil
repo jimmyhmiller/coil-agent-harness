@@ -13,6 +13,7 @@
 ;; they register into; the dispatch `cond` gains one fallthrough arm and nothing
 ;; else about this file changes.
 (module harness-tui-command)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

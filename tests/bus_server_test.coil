@@ -9,6 +9,7 @@
 ;; coil.socket (SO_NOSIGPIPE on Darwin, MSG_NOSIGNAL on Linux), so a closed peer
 ;; now surfaces as an ordinary write error and the subscriber is retired.
 (module harness-bus-server-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 

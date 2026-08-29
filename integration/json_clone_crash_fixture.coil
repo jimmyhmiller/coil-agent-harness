@@ -4,6 +4,7 @@
 
 (import "coil.alloc" :as alloc :use *)
 (import "coil.arraylist" :use *)
+(import "coil.primitive" :as primitive)
 (import "coil.slice" :use *)
 (import "harness-allocation-domain" :use *)
 (import "harness-bash-tool" :use *)

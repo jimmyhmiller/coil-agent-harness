@@ -3,6 +3,7 @@
 ;; rather than inspecting a rendered string -- a planner that quietly repainted
 ;; everything would still look right on screen and would still be the bug.
 (module harness-tui-diff-test)
+(import "coil.primitive" :as primitive)
 
 (import "coil.primitive" :as primitive)
 
