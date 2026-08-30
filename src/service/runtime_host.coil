@@ -34,6 +34,35 @@
   (HarnessRuntimeOpened [(runtime HarnessRuntime)])
   (HarnessRuntimeOpenFailed [(exit-code i64) (message (slice u8))]))
 
+;;; The embeddable runtime does not decide which capabilities its agents receive.
+;;; A caller may supply an already-populated registry and independently select the
+;;; built-in bundles it wants added.  A null registry asks the runtime to allocate
+;;; an empty one in `process-allocator`.  The registry and every implementation in
+;;; it must live at least as long as the runtime.
+(defstruct HarnessRuntimeConfig
+  [(registry (ptr ToolRegistry))
+   (workspace (slice u8))
+   (echo-tools bool)
+   (filesystem-tools bool)
+   (bash-tools bool)
+   (orchestration-tools bool)])
+
+(defn harness-runtime-config-empty [] (-> HarnessRuntimeConfig)
+  (let [config (primitive/alloc-stack HarnessRuntimeConfig)]
+    (set! config (zeroed HarnessRuntimeConfig))
+    (set! (.workspace config) ".")
+    (load config)))
+
+;;; Preserve the command-line application's historical tool selection while the
+;;; configurable constructor below remains deterministic and environment-free.
+(defn harness-runtime-config-default [(allocator (dyn Allocator))] (-> HarnessRuntimeConfig)
+  (let [(mut config) (harness-runtime-config-empty)]
+    (set! (.echo-tools config) true)
+    (set! (.filesystem-tools config) (tool-group-enabled? allocator "filesystem"))
+    (set! (.bash-tools config) (tool-group-enabled? allocator "bash"))
+    (set! (.orchestration-tools config) (tool-group-enabled? allocator "orchestration"))
+    (load config)))
+
 (defn harness-runtime-close! [(runtime (ptr HarnessRuntime))] (-> i64)
   (when (.open runtime)
     (runtime-controller-join-all! (.controller runtime))
@@ -43,9 +72,10 @@
     0)
   0)
 
-(defn harness-runtime-open [(process-allocator (dyn Allocator))
-                            (service-allocator (dyn Allocator))
-                            (journal-path (slice u8))] (-> HarnessRuntimeOpenResult)
+(defn harness-runtime-open-configured [(process-allocator (dyn Allocator))
+                                       (service-allocator (dyn Allocator))
+                                       (journal-path (slice u8))
+                                       (config (ref HarnessRuntimeConfig))] (-> HarnessRuntimeOpenResult)
   (let [runtime (primitive/alloc-stack HarnessRuntime)]
     (set! runtime (zeroed HarnessRuntime))
     (set! (.process-allocator runtime) process-allocator)
@@ -68,9 +98,11 @@
                       emitter
                         (box! service-allocator EventEmitter (zeroed EventEmitter))
                       registry
-                        (box! process-allocator
-                              ToolRegistry
-                              (tool-registry-new process-allocator))
+                        (if (= (.registry config) (cast (ptr ToolRegistry) 0))
+                            (box! process-allocator
+                                  ToolRegistry
+                                  (tool-registry-new process-allocator))
+                            (.registry config))
                       provider-factory
                         (box! service-allocator
                               DefaultRuntimeProviderFactory
@@ -110,20 +142,22 @@
                               (box! process-allocator
                                     TuiFixtureProvider
                                     (zeroed TuiFixtureProvider)))
-                        (tool-register! registry (echo-definition process-allocator))
-                        (when (tool-group-enabled? service-allocator "filesystem")
-                          (register-filesystem-tools! registry process-allocator ".")
-                          (register-search-text-tool! registry process-allocator ".")
+                        (when (.echo-tools config)
+                          (tool-register! registry (echo-definition process-allocator))
                           0)
-                        (when (tool-group-enabled? service-allocator "bash")
-                          (register-bash-tool! registry process-allocator ".")
+                        (when (.filesystem-tools config)
+                          (register-filesystem-tools! registry process-allocator (.workspace config))
+                          (register-search-text-tool! registry process-allocator (.workspace config))
+                          0)
+                        (when (.bash-tools config)
+                          (register-bash-tool! registry process-allocator (.workspace config))
                           0)
                         (set! (.allocator service) service-allocator)
                         (set! (.journal-path service) journal-path)
                         (set! (.journal service) (.journal runtime))
                         (set! (.emitter service) emitter)
                         (set! (.controller service) controller)
-                        (when (tool-group-enabled? service-allocator "orchestration")
+                        (when (.orchestration-tools config)
                           (register-orchestration-tools! registry process-allocator service)
                           0)
                         (if (< (service-recover-runs! service) 0)
@@ -135,3 +169,12 @@
                             (do
                               (set! (.open runtime) true)
                               (HarnessRuntimeOpened (load runtime))))))))))))))
+
+(defn harness-runtime-open [(process-allocator (dyn Allocator))
+                            (service-allocator (dyn Allocator))
+                            (journal-path (slice u8))] (-> HarnessRuntimeOpenResult)
+  (let [config (harness-runtime-config-default service-allocator)]
+    (harness-runtime-open-configured process-allocator
+                                     service-allocator
+                                     journal-path
+                                     config)))

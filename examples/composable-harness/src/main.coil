@@ -1,0 +1,84 @@
+(module composable-harness-example)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "harness-json" :use *)
+(import "harness-runtime-host" :use *)
+(import "harness-tool" :use *)
+(import "harness-tool-bundles" :use *)
+
+;;; This tool and bundle belong to the consuming application, not the harness
+;;; repository.  They demonstrate that a downstream Coil package can extend the
+;;; registry through the public interfaces and compose that extension with a
+;;; selected built-in bundle.
+(defstruct ProjectNameTool [(name (slice u8))])
+(defstruct ProjectToolBundle [(name (slice u8))])
+
+(impl ToolImplementation ProjectNameTool
+  (execute-tool [(self (ptr ProjectNameTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (dyn Allocator))]
+                (-> ToolResult)
+                (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
+                  (set! (.output result) (JsonString (.name self)))
+                  (load result))))
+
+(defn empty-object-schema [(allocator (dyn Allocator))] (-> Json)
+  (let [(mut schema) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)]
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(impl ToolBundle ProjectToolBundle
+  (register-tool-bundle! [(self (ptr ProjectToolBundle))
+                          (registry (mut ToolRegistry))
+                          (allocator (dyn Allocator))]
+                         (-> bool)
+                         (let [definition (primitive/alloc-stack ToolDefinition)
+                               implementation
+                                 (box! allocator ProjectNameTool (zeroed ProjectNameTool))]
+                           (set! (.name implementation) (.name self))
+                           (set! (.name (.spec definition)) "project_name")
+                           (set! (.description (.spec definition))
+                                 "Return the consuming application's project name.")
+                           (set! (.input-schema (.spec definition))
+                                 (empty-object-schema allocator))
+                           (set! (.strict (.spec definition)) true)
+                           (set! (.effect (.spec definition)) (ReadOnly))
+                           (set! (.idempotent (.spec definition)) true)
+                           (set! (.timeout-ms (.spec definition)) 1000)
+                           (set! (.implementation definition) implementation)
+                           (tool-register! (mut registry) (load definition)))))
+
+(defn main [] (-> i64)
+  (let [allocator (malloc-allocator)
+      registry (box! allocator ToolRegistry (tool-registry-new allocator))
+        echo (primitive/alloc-stack EchoToolBundle)
+        project (primitive/alloc-stack ProjectToolBundle)
+        (mut config) (harness-runtime-config-empty)]
+    (set! echo (echo-tool-bundle))
+    (set! (.name project) "example")
+    (if (not (register-tool-bundle! echo registry allocator))
+        1
+        (if (not (register-tool-bundle! project registry allocator))
+            2
+            (do
+              ;; The same caller-owned registry can be installed into the durable
+              ;; runtime. This example does not open one because doing so would
+              ;; intentionally create a journal and provider state.
+              (set! (.registry config) registry)
+              (match (tool-find (load registry) "echo")
+              (None [] 3)
+              (Some [echo-tool]
+                    (match (tool-find (load registry) "project_name")
+                      (None [] 4)
+                      (Some [project-tool]
+                            (if (= (.registry config) (cast (ptr ToolRegistry) 0))
+                                5
+                                0))))))))))

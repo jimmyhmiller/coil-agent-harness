@@ -1,0 +1,60 @@
+(module harness-tool-bundles)
+
+(import "coil.alloc" :use *)
+(import "coil.primitive" :as primitive)
+(import "harness-bash-tool" :use *)
+(import "harness-default-tools" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-search-tool" :use *)
+(import "harness-tool" :use *)
+
+;;; Ready-made bundles for the tools shipped by this repository.  Third-party
+;;; packages implement ToolBundle directly; they do not need to modify this file
+;;; or register a global plugin.
+(defstruct EchoToolBundle [(reserved u8)])
+(defstruct FilesystemToolBundle [(root (slice u8))])
+(defstruct BashToolBundle [(workspace (slice u8))])
+
+(defn echo-tool-bundle [] (-> EchoToolBundle)
+  (zeroed EchoToolBundle))
+
+(defn filesystem-tool-bundle [(root (slice u8))] (-> FilesystemToolBundle)
+  (let [bundle (primitive/alloc-stack FilesystemToolBundle)]
+    (set! (.root bundle) root)
+    (load bundle)))
+
+(defn bash-tool-bundle [(workspace (slice u8))] (-> BashToolBundle)
+  (let [bundle (primitive/alloc-stack BashToolBundle)]
+    (set! (.workspace bundle) workspace)
+    (load bundle)))
+
+(impl ToolBundle EchoToolBundle
+  (register-tool-bundle! [(self (ptr EchoToolBundle))
+                          (registry (mut ToolRegistry))
+                          (allocator (dyn Allocator))]
+                         (-> bool)
+                         (tool-register! (mut registry) (echo-definition allocator))))
+
+(impl ToolBundle FilesystemToolBundle
+  (register-tool-bundle! [(self (ptr FilesystemToolBundle))
+                          (registry (mut ToolRegistry))
+                          (allocator (dyn Allocator))]
+                         (-> bool)
+                         (let [files-added
+                                 (register-filesystem-tools! (mut registry)
+                                                             allocator
+                                                             (.root self))
+                               search-added
+                                 (register-search-text-tool! (mut registry)
+                                                             allocator
+                                                             (.root self))]
+                           (and files-added search-added))))
+
+(impl ToolBundle BashToolBundle
+  (register-tool-bundle! [(self (ptr BashToolBundle))
+                          (registry (mut ToolRegistry))
+                          (allocator (dyn Allocator))]
+                         (-> bool)
+                         (register-bash-tool! (mut registry)
+                                              allocator
+                                              (.workspace self))))

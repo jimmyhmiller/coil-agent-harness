@@ -1,0 +1,40 @@
+(module harness-composable-library-test)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "harness-default-tools" :use *)
+(import "harness-runtime-host" :use *)
+(import "harness-tool" :use *)
+(import "harness-tool-bundles" :use *)
+
+(deftest built-in-bundles-compose-in-a-caller-owned-registry
+         (let [allocator (malloc-allocator)
+               (mut registry) (tool-registry-new allocator)
+               echo (primitive/alloc-stack EchoToolBundle)
+               filesystem (primitive/alloc-stack FilesystemToolBundle)]
+           (set! echo (echo-tool-bundle))
+           (set! filesystem (filesystem-tool-bundle "/tmp"))
+           (assert (register-tool-bundle! echo (mut registry) allocator))
+           (assert (register-tool-bundle! filesystem (mut registry) allocator))
+           (assert (match (tool-find (load registry) "echo") (Some [tool] true) (_ false)))
+           (assert (match (tool-find (load registry) "read_text_file") (Some [tool] true) (_ false)))
+           (assert (match (tool-find (load registry) "search_text") (Some [tool] true) (_ false)))
+           ;; A bundle is atomic from the caller's perspective and reports a name
+           ;; collision rather than silently replacing existing authority.
+           (assert (not (register-tool-bundle! echo (mut registry) allocator)))))
+
+(deftest tool-group-selection-is-exact
+         (assert (tool-group-list-has? "filesystem,bash" "filesystem"))
+         (assert (tool-group-list-has? "filesystem,bash" "bash"))
+         (assert (not (tool-group-list-has? "filesystem-extra,not-bash" "filesystem")))
+         (assert (not (tool-group-list-has? "filesystem-extra,not-bash" "bash"))))
+
+(deftest empty-runtime-config-grants-no-tools
+         (let [config (harness-runtime-config-empty)]
+           (assert (= (.registry config) (cast (ptr ToolRegistry) 0)))
+           (assert (= (.workspace config) "."))
+           (assert (not (.echo-tools config)))
+           (assert (not (.filesystem-tools config)))
+           (assert (not (.bash-tools config)))
+           (assert (not (.orchestration-tools config)))))

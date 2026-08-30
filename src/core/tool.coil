@@ -156,6 +156,16 @@
                     (set! i (+ (load i) 1))))))
     (if (load found) (Some (load result)) (None [ToolDefinition]))))
 
+;;; A library can expose one logical capability as a bundle without requiring the
+;;; harness application to know how many concrete tools implement it.  Bundles are
+;;; ordinary in-process values: compose them by registering each selected bundle
+;;; into one registry, then pass that registry to a run or HarnessRuntimeConfig.
+(deftrait ToolBundle [Self]
+  (register-tool-bundle! [(self (ptr Self))
+                          (registry (mut ToolRegistry))
+                          (allocator (dyn Allocator))]
+                         (-> bool)))
+
 (defn tool-result-empty [(call-id (slice u8)) (status ToolStatus)] (-> ToolResult)
   (let [result (primitive/alloc-stack ToolResult)]
     (set! (.call-id result) call-id)

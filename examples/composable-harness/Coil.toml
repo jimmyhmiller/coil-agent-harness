@@ -1,0 +1,7 @@
+[package]
+name = "composable-harness-example"
+entry = "src/main.coil"
+source-roots = ["src"]
+
+[dependencies]
+harness = { path = "../.." }

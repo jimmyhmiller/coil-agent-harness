@@ -13,6 +13,12 @@ The current product milestone is the narrowly scoped distributed software-factor
 MVP described in [docs/software-factory-mvp.md](docs/software-factory-mvp.md). The TUI
 is a client and development workbench, not the product boundary.
 
+The runtime is also consumable as a Coil library. Downstream packages can implement
+tool bundles, compose caller-owned registries, and inject them into either a direct
+agent run or the durable service runtime. See
+[the reusable-library guide](docs/reusable-library.md) and the standalone
+[`examples/composable-harness`](examples/composable-harness) consumer.
+
 The current slice can:
 
 - call OpenAI through the Responses API;

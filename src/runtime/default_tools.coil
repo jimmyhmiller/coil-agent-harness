@@ -9,6 +9,28 @@
 (import "harness-json" :use *)
 (import "harness-tool" :use *)
 
+;;; Exact membership in a comma-separated tool-group list. Registration grants
+;;; execution authority, so a substring such as `not-bash` must never enable the
+;;; `bash` group.
+(defn tool-group-list-has? [(configured (slice u8))
+                            (name (slice u8))] (-> bool)
+  (let [n (slice-len [u8] configured)
+        (mut start) 0
+        (mut at) 0
+        (mut found) false]
+    (loop (if (or (> (load at) n) (load found))
+              (break)
+              (if (or (= (load at) n)
+                      (= (cast i64 (slice-get [u8] configured (load at))) 44))
+                  (do
+                    (when (= (subslice [u8] configured (load start) (load at)) name)
+                      (set! found true)
+                      0)
+                    (set! start (+ (load at) 1))
+                    (set! at (+ (load at) 1)))
+                  (set! at (+ (load at) 1)))))
+    (load found)))
+
 ;;; Tool groups are a deliberately small runtime configuration seam. An absent
 ;;; variable preserves the interactive harness defaults; factories can expose a
 ;;; narrower registry without requiring a different binary.
@@ -22,9 +44,7 @@
           (Some [configured]
                 (let [(mut value) configured
                       enabled
-                        (match (str-find (os/owned-string-slice (load value)) name)
-                          (Some [position] true)
-                          (None [] false))]
+                        (tool-group-list-has? (os/owned-string-slice (load value)) name)]
                   (os/owned-string-free allocator value)
                   enabled))))))
 
