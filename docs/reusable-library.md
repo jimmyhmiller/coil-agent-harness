@@ -97,3 +97,8 @@ deterministic and does not read tool policy from the environment.
 See `examples/composable-harness` for a separate package that imports the harness,
 defines its own tool and bundle, composes it with a built-in bundle, and runs as an
 ordinary Coil project.
+
+Tools do not have to be written in Coil or statically linked. Trusted shared
+libraries can describe and execute tools through the versioned C ABI documented in
+[C tool plugins](c-tool-plugins.md). The loader adapts those descriptors into the
+same `ToolBundle` and `ToolRegistry` interfaces.

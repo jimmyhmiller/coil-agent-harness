@@ -1,0 +1,52 @@
+(module harness-c-tool-plugin-integration)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "harness-c-tool-plugin" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+
+(defn main [] (-> i64)
+  (let [allocator (malloc-allocator)]
+    (match (os/env-get allocator "HARNESS_C_TOOL_PLUGIN")
+      (Err [failure] 10)
+      (Ok [found]
+        (match found
+          (None [] 11)
+          (Some [owned]
+            (match (c-tool-plugin-load allocator (os/owned-string-slice owned))
+              (DynamicCToolPluginLoadFailed [message] 12)
+              (DynamicCToolPluginLoaded [loaded]
+                (let [plugin (box! allocator DynamicCToolPlugin loaded)
+                      registry (box! allocator ToolRegistry (tool-registry-new allocator))]
+                  (if (not (register-tool-bundle! plugin registry allocator))
+                      13
+                      (match (tool-find (load registry) "c_echo")
+                        (None [] 14)
+                        (Some [definition]
+                          (let [tool definition
+                                parsed (json-parse allocator "{\"text\":\"hello from C\"}")
+                                call (primitive/alloc-stack ToolCall)
+                                context (primitive/alloc-stack ToolExecutionContext)]
+                            (if (not (.ok parsed))
+                                15
+                                (do
+                                  (set! call (zeroed ToolCall))
+                                  (set! context (zeroed ToolExecutionContext))
+                                  (set! (.id call) "call-1")
+                                  (set! (.name call) "c_echo")
+                                  (set! (.arguments call) (.value parsed))
+                                  (set! (.raw-arguments call) "{\"text\":\"hello from C\"}")
+                                  (set! (.run-id context) "integration-run")
+                                  (let [result
+                                          (execute-tool (.implementation tool)
+                                                        call
+                                                        context
+                                                        allocator)
+                                        text (json-string-at (.output result) "text")]
+                                    (c-tool-plugin-close! plugin)
+                                    (match text
+                                      (Some [value] (if (= value "hello from C") 0 16))
+                                      (None [] 17))))))))))))))))))

@@ -1,0 +1,17 @@
+(module harness-c-tool-plugin-test)
+
+(import "coil.alloc" :use *)
+(import "harness-c-tool-plugin" :use *)
+(import "harness-tool" :use *)
+
+(deftest missing-native-library-reports-a-load-failure
+         (let [allocator (malloc-allocator)]
+           (assert (match (c-tool-plugin-load allocator
+                                               "/definitely/missing/harness-tool-plugin.so")
+                     (DynamicCToolPluginLoadFailed [message] true)
+                     (DynamicCToolPluginLoaded [plugin] false)))))
+
+(deftest native-effect-values-map-to-public-tool-effects
+         (assert (match (c-tool-effect (cast u32 0)) (ReadOnly [] true) (_ false)))
+         (assert (match (c-tool-effect (cast u32 1)) (Reversible [] true) (_ false)))
+         (assert (match (c-tool-effect (cast u32 2)) (Destructive [] true) (_ false))))
