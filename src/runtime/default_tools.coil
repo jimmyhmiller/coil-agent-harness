@@ -1,0 +1,73 @@
+(module harness-default-tools)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-json" :use *)
+(import "harness-tool" :use *)
+
+;;; Tool groups are a deliberately small runtime configuration seam. An absent
+;;; variable preserves the interactive harness defaults; factories can expose a
+;;; narrower registry without requiring a different binary.
+(defn tool-group-enabled? [(allocator (dyn Allocator))
+                           (name (slice u8))] (-> bool)
+  (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
+    (Err [failure] true)
+    (Ok [found]
+        (match found
+          (None [] true)
+          (Some [configured]
+                (let [(mut value) configured
+                      enabled
+                        (match (str-find (os/owned-string-slice (load value)) name)
+                          (Some [position] true)
+                          (None [] false))]
+                  (os/owned-string-free allocator value)
+                  enabled))))))
+
+(defstruct EchoTool [(reserved u8)])
+
+(defn execute-echo [(self (ptr EchoTool))
+                    (call (ptr ToolCall))
+                    (allocator (dyn Allocator))] (-> ToolResult)
+  (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
+    (set! (.output result) (.arguments call))
+    (load result)))
+
+(impl ToolImplementation EchoTool
+  (execute-tool [(self (ptr EchoTool))
+                 (call (ptr ToolCall))
+                 (context (ptr ToolExecutionContext))
+                 (allocator (dyn Allocator))]
+                (-> ToolResult)
+                (execute-echo self call allocator)))
+
+(defn echo-schema [(allocator (dyn Allocator))] (-> Json)
+  (let [(mut text) (json-object allocator)
+        (mut properties) (json-object allocator)
+        (mut required) (json-array allocator)
+        (mut schema) (json-object allocator)]
+    (json-object-put! (mut text) "type" (JsonString "string"))
+    (json-object-put! (mut properties) "text" (load text))
+    (json-array-push! (mut required) (JsonString "text"))
+    (json-object-put! (mut schema) "type" (JsonString "object"))
+    (json-object-put! (mut schema) "properties" (load properties))
+    (json-object-put! (mut schema) "required" (load required))
+    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
+    (load schema)))
+
+(defn echo-definition [(allocator (dyn Allocator))] (-> ToolDefinition)
+  (let [definition (primitive/alloc-stack ToolDefinition)
+        implementation (box! allocator EchoTool (zeroed EchoTool))]
+    (set! (.name (.spec definition)) "echo")
+    (set! (.description (.spec definition)) "Return the supplied text. Multiple calls may run in parallel.")
+    (set! (.input-schema (.spec definition)) (echo-schema allocator))
+    (set! (.strict (.spec definition)) true)
+    (set! (.effect (.spec definition)) (ReadOnly))
+    (set! (.idempotent (.spec definition)) true)
+    (set! (.timeout-ms (.spec definition)) 10000)
+    (set! (.implementation definition) implementation)
+    (load definition)))

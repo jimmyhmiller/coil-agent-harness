@@ -47,17 +47,20 @@
           0)))
 
 (defn cancellation-requested? [(token (ptr CancellationToken))] (-> bool)
-  (and (!= token (cast (ptr CancellationToken) 0))
-       (and (.initialized token)
-            (native-cancellation/cancellation-requested? (field token native)))))
+  (if (= token (cast (ptr CancellationToken) 0))
+      false
+      (if (.initialized token)
+          (native-cancellation/cancellation-requested? (field token native))
+          false)))
 
 (defn cancellation-token-close! [(token (ptr CancellationToken))] (-> i64)
-  (if (or (= token (cast (ptr CancellationToken) 0))
-          (not (.initialized token)))
+  (if (= token (cast (ptr CancellationToken) 0))
       0
-      (do
-        (set! (.initialized token) false)
-        (native-cancellation/cancellation-close! (field token native)))))
+      (if (not (.initialized token))
+          0
+          (do
+            (set! (.initialized token) false)
+            (native-cancellation/cancellation-close! (field token native))))))
 
 (defstruct ToolExecutionContext
   [(run-id (slice u8))

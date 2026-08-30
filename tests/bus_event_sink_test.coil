@@ -33,9 +33,10 @@
                  (set! (.last-sequence self) (.sequence event))
                  ;; Recording the peer's call count at the moment we run is what
                  ;; makes ordering testable without timestamps.
-                 (when (!= (load (field self peer)) (cast (ptr RecordingSink) 0))
-                   (store! (field self saw-peer-calls)
-                           (load (field (load (field self peer)) calls))))
+                 (if (= (load (field self peer)) (cast (ptr RecordingSink) 0))
+                     0
+                     (store! (field self saw-peer-calls)
+                             (load (field (load (field self peer)) calls))))
                  (.result self)))
 
 (defn sample-event [(event (ptr Event)) (sequence i64)] (-> i64)

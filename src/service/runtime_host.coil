@@ -1,0 +1,137 @@
+(module harness-runtime-host)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-bash-tool" :use *)
+(import "harness-default-tools" :use *)
+(import "harness-event" :use *)
+(import "harness-event-journal" :use *)
+(import "harness-filesystem-tools" :use *)
+(import "harness-orchestration-tools" :use *)
+(import "harness-run-service" :use *)
+(import "harness-runtime-controller" :use *)
+(import "harness-search-tool" :use *)
+(import "harness-tool" :use *)
+(import "tui-fixture-provider" :use *)
+
+;;; Owns every long-lived component behind RunService. Transport frontends do
+;;; not construct partial copies of this graph: the CLI listener and Gatekeeper
+;;; function both open and close the same runtime abstraction.
+(defstruct HarnessRuntime
+  [(process-allocator (dyn Allocator))
+   (service-allocator (dyn Allocator))
+   (journal (ptr EventJournal))
+   (emitter (ptr EventEmitter))
+   (registry (ptr ToolRegistry))
+   (provider-factory (ptr DefaultRuntimeProviderFactory))
+   (controller (ptr RuntimeRunController))
+   (service (ptr RunService))
+   (open bool)])
+
+(defsum HarnessRuntimeOpenResult
+  (HarnessRuntimeOpened [(runtime HarnessRuntime)])
+  (HarnessRuntimeOpenFailed [(exit-code i64) (message (slice u8))]))
+
+(defn harness-runtime-close! [(runtime (ptr HarnessRuntime))] (-> i64)
+  (when (.open runtime)
+    (runtime-controller-join-all! (.controller runtime))
+    (default-runtime-provider-factory-close! (.provider-factory runtime))
+    (event-journal-close! (.journal runtime))
+    (set! (.open runtime) false)
+    0)
+  0)
+
+(defn harness-runtime-open [(process-allocator (dyn Allocator))
+                            (service-allocator (dyn Allocator))
+                            (journal-path (slice u8))] (-> HarnessRuntimeOpenResult)
+  (let [runtime (primitive/alloc-stack HarnessRuntime)]
+    (set! runtime (zeroed HarnessRuntime))
+    (set! (.process-allocator runtime) process-allocator)
+    (set! (.service-allocator runtime) service-allocator)
+    (match (event-journal-open service-allocator journal-path true)
+      (JournalOpenFailed [message] (HarnessRuntimeOpenFailed 74 message))
+      (JournalOpened [opened]
+        (do
+          (set! (.journal runtime)
+                (box! service-allocator EventJournal opened))
+          (let [recovery (event-journal-recover service-allocator journal-path)]
+            (if (not (load (field recovery ok)))
+                (do
+                  (event-journal-close! (.journal runtime))
+                  (HarnessRuntimeOpenFailed 65 (load (field recovery error))))
+                (let [sequence
+                        (box! service-allocator
+                              i64
+                              (+ (load (field recovery last-sequence)) 1))
+                      emitter
+                        (box! service-allocator EventEmitter (zeroed EventEmitter))
+                      registry
+                        (box! process-allocator
+                              ToolRegistry
+                              (tool-registry-new process-allocator))
+                      provider-factory
+                        (box! service-allocator
+                              DefaultRuntimeProviderFactory
+                              (zeroed DefaultRuntimeProviderFactory))
+                      controller
+                        (box! service-allocator
+                              RuntimeRunController
+                              (runtime-controller-new service-allocator
+                                                      registry
+                                                      provider-factory
+                                                      emitter
+                                                      (.journal runtime)
+                                                      journal-path))
+                      service
+                        (box! service-allocator RunService (zeroed RunService))]
+                  (set! (.emitter runtime) emitter)
+                  (set! (.registry runtime) registry)
+                  (set! (.provider-factory runtime) provider-factory)
+                  (set! (.controller runtime) controller)
+                  (set! (.service runtime) service)
+                  (event-emitter-init! emitter service-allocator (.journal runtime) sequence)
+                  (if (< (default-runtime-provider-factory-init! provider-factory
+                                                                  service-allocator)
+                         0)
+                      (let [reason (default-runtime-provider-factory-error provider-factory)]
+                        (default-runtime-provider-factory-close! provider-factory)
+                        (event-journal-close! (.journal runtime))
+                        (HarnessRuntimeOpenFailed
+                          70
+                          (if (> (slice-len [u8] reason) 0)
+                              reason
+                              "could not initialize runtime provider factory")))
+                      (do
+                        (set! (.provider-config service)
+                              (load (default-runtime-provider-factory-config provider-factory)))
+                        (set! (.tui-fixture provider-factory)
+                              (box! process-allocator
+                                    TuiFixtureProvider
+                                    (zeroed TuiFixtureProvider)))
+                        (tool-register! registry (echo-definition process-allocator))
+                        (when (tool-group-enabled? service-allocator "filesystem")
+                          (register-filesystem-tools! registry process-allocator ".")
+                          (register-search-text-tool! registry process-allocator ".")
+                          0)
+                        (when (tool-group-enabled? service-allocator "bash")
+                          (register-bash-tool! registry process-allocator ".")
+                          0)
+                        (set! (.allocator service) service-allocator)
+                        (set! (.journal-path service) journal-path)
+                        (set! (.journal service) (.journal runtime))
+                        (set! (.emitter service) emitter)
+                        (set! (.controller service) controller)
+                        (when (tool-group-enabled? service-allocator "orchestration")
+                          (register-orchestration-tools! registry process-allocator service)
+                          0)
+                        (if (< (service-recover-runs! service) 0)
+                            (do
+                              (runtime-controller-join-all! controller)
+                              (default-runtime-provider-factory-close! provider-factory)
+                              (event-journal-close! (.journal runtime))
+                              (HarnessRuntimeOpenFailed 65 "could not recover durable runs"))
+                            (do
+                              (set! (.open runtime) true)
+                              (HarnessRuntimeOpened (load runtime))))))))))))))

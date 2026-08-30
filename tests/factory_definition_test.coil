@@ -8,7 +8,7 @@
 
 (deftest loads-folder-backed-markdown-factory
          (let [allocator (malloc-allocator)]
-           (match (load-factory-definition allocator "factories/snake")
+           (match (load-factory-definition allocator "factories/archived/snake")
              (FactoryInvalid [message] (assert false))
              (FactoryLoaded [definition]
                             (let [loaded definition]
@@ -22,7 +22,7 @@
 
 (deftest loads-two-worker-factory-without-changing-three-worker-baseline
          (let [allocator (malloc-allocator)]
-           (match (load-factory-definition allocator "factories/snake-two-worker")
+           (match (load-factory-definition allocator "factories/archived/snake-two-worker")
              (FactoryInvalid [message] (assert false))
              (FactoryLoaded [definition]
                             (let [loaded definition]
@@ -70,7 +70,7 @@
 
 (deftest filename-workers-inherit-run-settings
          (let [allocator (malloc-allocator)]
-           (match (load-factory-definition allocator "factories/architecture-3")
+           (match (load-factory-definition allocator "factories/archived/architecture-3")
              (FactoryInvalid [message] (assert false))
              (FactoryLoaded [definition]
                             (let [loaded definition

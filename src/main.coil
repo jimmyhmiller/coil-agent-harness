@@ -32,6 +32,7 @@
 (import "harness-orchestration-tools" :use *)
 (import "harness-run-service" :use *)
 (import "harness-runtime-controller" :use *)
+(import "harness-runtime-host" :use *)
 (import "harness-shutdown-signal" :use *)
 (import "harness-service-http-server" :use *)
 (import "codex-app-server" :use *)
@@ -48,6 +49,7 @@
 (import "provider-common" :use *)
 (import "harness-agent-runner" :use *)
 (import "harness-allocation-domain" :use *)
+(import "harness-default-tools" :use *)
 (import "harness-tui-app" :use *)
 (import "harness-tui-output" :use *)
 (import "harness-tui-terminal" :use *)
@@ -82,25 +84,6 @@
         (alloc/abort)
         (cast (ptr i8) 0))
       (load (primitive/index argv at))))
-
-;;; Tool groups are a deliberately small runtime configuration seam. An absent
-;;; variable preserves the interactive harness defaults; factories can expose a
-;;; narrower registry without requiring a different binary.
-(defn tool-group-enabled? [(allocator (dyn Allocator))
-                           (name (slice u8))] (-> bool)
-  (match (os/env-get allocator "HARNESS_TOOL_GROUPS")
-    (Err [failure] true)
-    (Ok [found]
-        (match found
-          (None [] true)
-          (Some [configured]
-                (let [(mut value) configured
-                      enabled
-                        (match (str-find (os/owned-string-slice (load value)) name)
-                          (Some [position] true)
-                          (None [] false))]
-                  (os/owned-string-free allocator value)
-                  enabled))))))
 
 (defn cli-usage [] (-> i64)
   (write-line 2 "COIL agent harness")
@@ -634,50 +617,6 @@
                  (-> i64)
                  (publish-cli-event self event)))
 
-(defstruct EchoTool [(reserved u8)])
-
-(defn execute-echo [(self (ptr EchoTool))
-                    (call (ptr ToolCall))
-                    (allocator (dyn Allocator))] (-> ToolResult)
-  (let [(mut result) (tool-result-empty (.id call) (ToolSucceeded))]
-    (set! (.output result) (.arguments call))
-    (load result)))
-
-(impl ToolImplementation EchoTool
-  (execute-tool [(self (ptr EchoTool))
-                 (call (ptr ToolCall))
-                 (context (ptr ToolExecutionContext))
-                 (allocator (dyn Allocator))]
-                (-> ToolResult)
-                (execute-echo self call allocator)))
-
-(defn echo-schema [(allocator (dyn Allocator))] (-> Json)
-  (let [(mut text) (json-object allocator)
-        (mut properties) (json-object allocator)
-        (mut required) (json-array allocator)
-        (mut schema) (json-object allocator)]
-    (json-object-put! (mut text) "type" (JsonString "string"))
-    (json-object-put! (mut properties) "text" (load text))
-    (json-array-push! (mut required) (JsonString "text"))
-    (json-object-put! (mut schema) "type" (JsonString "object"))
-    (json-object-put! (mut schema) "properties" (load properties))
-    (json-object-put! (mut schema) "required" (load required))
-    (json-object-put! (mut schema) "additionalProperties" (JsonBool false))
-    (load schema)))
-
-(defn echo-definition [(allocator (dyn Allocator))] (-> ToolDefinition)
-  (let [definition (primitive/alloc-stack ToolDefinition)
-        implementation (box! allocator EchoTool (zeroed EchoTool))]
-    (set! (.name (.spec definition)) "echo")
-    (set! (.description (.spec definition)) "Return the supplied text. Multiple calls may run in parallel.")
-    (set! (.input-schema (.spec definition)) (echo-schema allocator))
-    (set! (.strict (.spec definition)) true)
-    (set! (.effect (.spec definition)) (ReadOnly))
-    (set! (.idempotent (.spec definition)) true)
-    (set! (.timeout-ms (.spec definition)) 10000)
-    (set! (.implementation definition) implementation)
-    (load definition)))
-
 (defn make-request [(allocator (dyn Allocator))
                     (model (slice u8))
                     (prompt (slice u8))
@@ -1064,11 +1003,9 @@
                        (journal-path (slice u8))
                        (process-allocator (dyn Allocator))
                        (service-allocator (dyn Allocator))] (-> i64)
-  (let [allocator service-allocator
-        auth-token (cli-auth-token process-allocator)
+  (let [auth-token (cli-auth-token process-allocator)
         observer-token (cli-observer-token process-allocator)
         service-auth (primitive/alloc-stack ServiceAuth)
-        (mut journal) (cast (ptr EventJournal) 0)
         listener (primitive/alloc-stack HttpListener)]
     (block :serve
            (when (= (slice-len [u8] auth-token) 0)
@@ -1086,113 +1023,49 @@
              (when (or (< port 0) (> port 65535))
                (write-line 2 "serve port must be between 0 and 65535")
                (return-from :serve 64))
-             (match (event-journal-open allocator journal-path true)
-               (JournalOpenFailed [message]
-                                  (do
-                                    (write-line 2 message)
-                                    (return-from :serve 74)))
-               (JournalOpened [opened]
-                              (store! journal (box! allocator EventJournal opened))))
-             (let [recovery (event-journal-recover allocator journal-path)]
-               (when (not (load (field recovery ok)))
-                 (write-line 2 (load (field recovery error)))
-                 (event-journal-close! journal)
-                 (return-from :serve 65))
-               (let [sequence
-                       (box! allocator
-                            i64
-                            (+ (load (field recovery last-sequence)) 1))
-                     emitter (box! allocator EventEmitter (zeroed EventEmitter))
-                     registry
-                       (box! process-allocator
-                            ToolRegistry
-                            (tool-registry-new process-allocator))
-                     provider-factory
-                       (box! allocator
-                            DefaultRuntimeProviderFactory
-                            (zeroed DefaultRuntimeProviderFactory))
-                     controller
-                       (box! allocator
-                            RuntimeRunController
-                            (runtime-controller-new allocator
-                                                    registry
-                                                    provider-factory
-                                                    emitter
-                                                    journal
-                                                    journal-path))
-                     service (box! allocator RunService (zeroed RunService))]
-                 (event-emitter-init! emitter allocator (load journal) sequence)
-                 (store! (field service provider-config)
-                         (load (default-runtime-provider-factory-config provider-factory)))
-                 (when (< (default-runtime-provider-factory-init! provider-factory allocator) 0)
-                   (write-line 2
-                               (let [reason (default-runtime-provider-factory-error provider-factory)]
-                                 (if (> (slice-len [u8] reason) 0)
-                                     reason
-                                     "could not initialize runtime provider factory")))
-                   (event-journal-close! journal)
-                   (return-from :serve 70))
-                 (store! (field provider-factory tui-fixture)
-                         (box! process-allocator
-                              TuiFixtureProvider
-                              (zeroed TuiFixtureProvider)))
-                 (tool-register! registry (echo-definition process-allocator))
-                 (when (tool-group-enabled? allocator "filesystem")
-                   (register-filesystem-tools! registry process-allocator ".")
-                   (register-search-text-tool! registry process-allocator ".")
-                   0)
-                 (when (tool-group-enabled? allocator "bash")
-                   (register-bash-tool! registry process-allocator ".")
-                   0)
-                 (store! (field service allocator) allocator)
-                 (store! (field service journal-path) journal-path)
-                 (store! (field service journal) journal)
-                 (store! (field service emitter) emitter)
-                 (store! (field service controller) controller)
-                 (when (tool-group-enabled? allocator "orchestration")
-                   (register-orchestration-tools! registry process-allocator service)
-                   0)
-                 (match (http-listener-open allocator port)
-                   (ListenerOpenFailed [message]
-                                       (do
-                                         (write-line 2 message)
-                                         (default-runtime-provider-factory-close! provider-factory)
-                                         (event-journal-close! journal)
-                                         (return-from :serve 69)))
-                   (ListenerOpened [opened] (store! listener opened)))
-                 (when (< (service-recover-runs! service) 0)
-                   (write-line 2 "could not recover durable runs")
-                   (runtime-controller-join-all! controller)
-                   (default-runtime-provider-factory-close! provider-factory)
-                   (http-listener-close! listener)
-                   (event-journal-close! journal)
-                   (return-from :serve 65))
-                 (write-line 2
-                             (concat-or-empty allocator
-                                              "listening on 127.0.0.1:"
-                                              (json-stringify allocator
-                                                              (json-integer allocator
-                                                                            (load (field listener port))))))
-                 (let [shutdown (primitive/alloc-stack ShutdownSignal)
-                       (mut server-code) 0]
-                   (store! shutdown (shutdown-signal-new))
-                   (if (or (not (shutdown-signal-valid? shutdown))
-                           (!= (shutdown-signal-install! shutdown) 0))
+             (match (harness-runtime-open process-allocator
+                                          service-allocator
+                                          journal-path)
+               (HarnessRuntimeOpenFailed [exit-code message]
+                 (do
+                   (write-line 2 message)
+                   exit-code))
+               (HarnessRuntimeOpened [opened-runtime]
+                 (let [runtime (primitive/alloc-stack HarnessRuntime)]
+                   (set! runtime opened-runtime)
+                   (match (http-listener-open service-allocator port)
+                     (ListenerOpenFailed [message]
                        (do
-                         (write-line 2 "could not install shutdown signal handlers")
-                         (store! server-code -1))
-                       (store! server-code
-                               (serve-run-service-until-shutdown allocator
-                                                                 listener
-                                                                 service
-                                                                 service-auth
-                                                                 shutdown)))
-                   (shutdown-signal-close! shutdown)
-                   (runtime-controller-join-all! controller)
-                   (default-runtime-provider-factory-close! provider-factory)
-                   (http-listener-close! listener)
-                   (event-journal-close! journal)
-                   (if (= (load server-code) 0) 0 74))))))))
+                         (write-line 2 message)
+                         (harness-runtime-close! runtime)
+                         69))
+                     (ListenerOpened [opened]
+                       (do
+                         (set! listener opened)
+                         (write-line 2
+                           (concat-or-empty service-allocator
+                                            "listening on 127.0.0.1:"
+                                            (json-stringify service-allocator
+                                              (json-integer service-allocator (.port listener)))))
+                         (let [shutdown (primitive/alloc-stack ShutdownSignal)
+                               (mut server-code) 0]
+                           (set! shutdown (shutdown-signal-new))
+                           (if (or (not (shutdown-signal-valid? shutdown))
+                                   (!= (shutdown-signal-install! shutdown) 0))
+                               (do
+                                 (write-line 2 "could not install shutdown signal handlers")
+                                 (set! server-code -1))
+                               (set! server-code
+                                     (serve-run-service-until-shutdown
+                                       service-allocator
+                                       listener
+                                       (.service runtime)
+                                       service-auth
+                                       shutdown)))
+                           (shutdown-signal-close! shutdown)
+                           (http-listener-close! listener)
+                           (harness-runtime-close! runtime)
+                           (if (= (load server-code) 0) 0 74))))))))))))
 
 (defn cli-serve [(port-text (slice u8))
                  (journal-path (slice u8))] (-> i64)

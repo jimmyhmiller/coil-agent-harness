@@ -39,7 +39,7 @@
 
 (deftest factory-tool-groups-control-the-registry
          (let [allocator (malloc-allocator)]
-           (match (load-factory-definition allocator "factories/snake")
+           (match (load-factory-definition allocator "factories/archived/snake")
              (FactoryInvalid [message] (assert false))
              (FactoryLoaded [definition]
                             (let [(mut registry) (tool-registry-new allocator)
@@ -54,13 +54,13 @@
                state
                  (box! allocator
                       FactoryWorkflowState
-                      (factory-workflow-state-new allocator "factories/architecture-3"))
+                      (factory-workflow-state-new allocator "factories/archived/architecture-3"))
                stage (box! allocator i64 0)
                finished (box! allocator bool false)
                result (box! allocator i64 0)]
            ;; Default traversal advances one step.
            (factory-apply-workflow-decision! allocator
-                                             "factories/architecture-3"
+                                             "factories/archived/architecture-3"
                                              state
                                              stage
                                              finished
@@ -70,7 +70,7 @@
            (store! (field state decision) 2)
            (store! (field state target) "03-verify.md")
            (factory-apply-workflow-decision! allocator
-                                             "factories/architecture-3"
+                                             "factories/archived/architecture-3"
                                              state
                                              stage
                                              finished
@@ -79,7 +79,7 @@
            ;; The same mechanism can jump backward.
            (store! (field state target) "01-architect.md")
            (factory-apply-workflow-decision! allocator
-                                             "factories/architecture-3"
+                                             "factories/archived/architecture-3"
                                              state
                                              stage
                                              finished
@@ -88,7 +88,7 @@
            ;; Completion short-circuits successfully.
            (store! (field state decision) 1)
            (factory-apply-workflow-decision! allocator
-                                             "factories/architecture-3"
+                                             "factories/archived/architecture-3"
                                              state
                                              stage
                                              finished

@@ -1,0 +1,511 @@
+(module harness-gatekeeper-function)
+
+(import "coil.alloc" :as alloc :use *)
+(import "coil.atomic" :use *)
+(import "coil.mem" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.region" :as region)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-allocation-domain" :use *)
+(import "harness-json" :use *)
+(import "harness-run-service" :use *)
+(import "harness-runtime-host" :use *)
+(import "harness-system" :use *)
+(import "provider-common" :use *)
+
+;;; Gatekeeper ABI v3. These layouts mirror gatekeeper-abi exactly; only raw
+;;; pointers and fixed-width/word-sized scalars cross the dynamic-library edge.
+(defstruct GkHeader
+  [(name-ptr (ptr i8))
+   (name-len usize)
+   (value-ptr (ptr i8))
+   (value-len usize)])
+
+(defstruct GkRequest
+  [(method-ptr (ptr i8))
+   (method-len usize)
+   (path-ptr (ptr i8))
+   (path-len usize)
+   (query-ptr (ptr i8))
+   (query-len usize)
+   (headers-ptr (ptr GkHeader))
+   (header-count usize)
+   (body-ptr (ptr u8))
+   (body-len usize)])
+
+(defstruct GkResponse
+  [(status u16)
+   (headers-ptr (ptr GkHeader))
+   (header-count usize)
+   (body-ptr (ptr u8))
+   (body-len usize)
+   (body-kind u32)
+   (stream-ptr (ptr u8))])
+
+(static-assert (= (primitive/sizeof GkHeader) 32) "Gatekeeper ABI v2 GkHeader size")
+(static-assert (= (primitive/sizeof GkRequest) 80) "Gatekeeper ABI v2 GkRequest size")
+(static-assert (= (primitive/sizeof GkResponse) 56) "Gatekeeper ABI v3 GkResponse size")
+(static-assert (= (primitive/offsetof GkResponse headers-ptr) 8)
+               "Gatekeeper ABI v2 response header pointer offset")
+(static-assert (= (primitive/offsetof GkResponse body-ptr) 24)
+               "Gatekeeper ABI v3 response body pointer offset")
+(static-assert (= (primitive/offsetof GkResponse body-kind) 40)
+               "Gatekeeper ABI v3 response body-kind offset")
+(static-assert (= (primitive/offsetof GkResponse stream-ptr) 48)
+               "Gatekeeper ABI v3 response stream pointer offset")
+
+;;; The public response is the first field, so gk_free can recover the owner.
+(defstruct OwnedGkResponse
+  [(response GkResponse)
+   (body (slice u8))
+   (headers (slice GkHeader))
+   (header-name (slice u8))
+   (header-value (slice u8))])
+
+(static-assert (= (primitive/offsetof OwnedGkResponse response) 0)
+               "GkResponse must remain the first owned-response field")
+
+(defstruct GatekeeperHarnessState
+  [(process-region region/Region)
+   (service-domain (ptr AllocationDomain))
+   (runtime HarnessRuntime)
+   (init-error (slice u8))])
+
+;;; A stream owns only transport cursor state. The runtime and journal remain
+;;; owned by the process-global service. Each read obtains a short-lived request
+;;; allocation domain, so a slow client never retains a whole recovered journal.
+(defstruct GatekeeperSseStream
+  [(run-id (slice u8))
+   (cursor i64)
+   (pending (slice u8))
+   (pending-offset i64)
+   (last-emission-ms i64)
+   (terminal bool)])
+
+(defn gatekeeper-state-cell [] (-> (ptr i64))
+  (primitive/alloc-static i64))
+
+(defn gatekeeper-state-lock-cell [] (-> (ptr i64))
+  (primitive/alloc-static i64))
+
+(defn gatekeeper-state-lock! [] (-> i64)
+  (loop (if (= (atomic-cas (gatekeeper-state-lock-cell) 0 1) 0) (break) 0))
+  0)
+
+(defn gatekeeper-state-unlock! [] (-> i64)
+  (atomic-store (gatekeeper-state-lock-cell) 0))
+
+(defn gatekeeper-owned-copy [(allocator (dyn Allocator))
+                             (source (slice u8))] (-> (slice u8))
+  (match (alloc [u8] allocator (slice-len [u8] source))
+    (None [] (slice-new [u8] (cast (ptr u8) 0) 0))
+    (Some [memory]
+      (do
+        (when (> (slice-len [u8] source) 0)
+          (mem-copy [u8]
+                    (alloc-slice-data [u8] memory)
+                    (slice-data [u8] source)
+                    (slice-len [u8] source))
+          0)
+        memory))))
+
+(defn gatekeeper-typed-response [(status i64)
+                                 (body (slice u8))
+                                 (content-type (slice u8))] (-> (ptr GkResponse))
+  (let [owner (malloc-allocator)
+        owned (box! owner OwnedGkResponse (zeroed OwnedGkResponse))
+        body-copy (gatekeeper-owned-copy owner body)
+        name-copy (gatekeeper-owned-copy owner "Content-Type")
+        value-copy (gatekeeper-owned-copy owner content-type)]
+    (match (alloc [GkHeader] owner 1)
+      (None []
+        (do
+          (free [u8] owner body-copy)
+          (free [u8] owner name-copy)
+          (free [u8] owner value-copy)
+          (destroy owner owned)
+          (cast (ptr GkResponse) 0)))
+      (Some [headers]
+        (do
+          (set! (.body owned) body-copy)
+          (set! (.headers owned) headers)
+          (set! (.header-name owned) name-copy)
+          (set! (.header-value owned) value-copy)
+          (let [header (alloc-slice-data [GkHeader] headers)]
+            (set! (.name-ptr header) (cast (ptr i8) (slice-data [u8] name-copy)))
+            (set! (.name-len header) (cast usize (slice-len [u8] name-copy)))
+            (set! (.value-ptr header) (cast (ptr i8) (slice-data [u8] value-copy)))
+            (set! (.value-len header) (cast usize (slice-len [u8] value-copy))))
+          (set! (.status (.response owned)) (cast u16 status))
+          (set! (.headers-ptr (.response owned)) (alloc-slice-data [GkHeader] headers))
+          (set! (.header-count (.response owned)) (cast usize 1))
+          (set! (.body-ptr (.response owned)) (slice-data [u8] body-copy))
+          (set! (.body-len (.response owned)) (cast usize (slice-len [u8] body-copy)))
+          (set! (.body-kind (.response owned)) (cast u32 0))
+          (set! (.stream-ptr (.response owned)) (cast (ptr u8) 0))
+          (field owned response))))))
+
+(defn gatekeeper-response [(status i64) (body (slice u8))] (-> (ptr GkResponse))
+  (gatekeeper-typed-response status body "application/json"))
+
+(defn gatekeeper-stream-response [(stream (ptr GatekeeperSseStream))] (-> (ptr GkResponse))
+  (let [response (gatekeeper-typed-response 200 "" "text/event-stream")]
+    (when (!= response (cast (ptr GkResponse) 0))
+      (set! (.body-kind response) (cast u32 1))
+      (set! (.stream-ptr response) (cast (ptr u8) stream))
+      0)
+    response))
+
+(defn gatekeeper-sse-stream-new [(run-id (slice u8))
+                                 (cursor i64)] (-> (ptr GkResponse))
+  (let [owner (malloc-allocator)
+        stream (box! owner GatekeeperSseStream (zeroed GatekeeperSseStream))
+        run-id-copy (gatekeeper-owned-copy owner run-id)]
+    (if (and (> (slice-len [u8] run-id) 0)
+             (= (slice-len [u8] run-id-copy) 0))
+        (do (destroy owner stream) (cast (ptr GkResponse) 0))
+        (do
+          (set! (.run-id stream) run-id-copy)
+          (set! (.cursor stream) cursor)
+          (set! (.pending stream) (slice-new [u8] (cast (ptr u8) 0) 0))
+          (set! (.pending-offset stream) 0)
+          (set! (.last-emission-ms stream) (monotonic-now-ms))
+          (set! (.terminal stream) false)
+          (let [response (gatekeeper-stream-response stream)]
+            (if (= response (cast (ptr GkResponse) 0))
+                (do
+                  (free [u8] owner run-id-copy)
+                  (destroy owner stream)
+                  response)
+                response))))))
+
+(defn gatekeeper-error-response [(message (slice u8))] (-> (ptr GkResponse))
+  (let [owner (malloc-allocator)
+        domain (allocation-domain-open owner)]
+    (if (not (allocation-domain-valid? domain))
+        (gatekeeper-response 500 "{\"error\":\"harness_initialization_failed\"}")
+        (let [allocator (allocation-domain-allocator domain)
+              (mut body) (json-object allocator)]
+          (json-put-string! (mut body) "error" "harness_initialization_failed")
+          (json-put-string! (mut body) "message" message)
+          (let [response (gatekeeper-response 500 (json-stringify allocator (load body)))]
+            (allocation-domain-close! owner domain)
+            response)))))
+
+(defn gatekeeper-journal-path [(allocator (dyn Allocator))] (-> (slice u8))
+  (match (os/env-get allocator "HARNESS_JOURNAL_PATH")
+    (Err [failure] "gatekeeper-harness.jsonl")
+    (Ok [found]
+      (match found
+        (None [] "gatekeeper-harness.jsonl")
+        (Some [value]
+          (let [path (os/owned-string-slice value)]
+            (if (> (slice-len [u8] path) 0) path "gatekeeper-harness.jsonl")))))))
+
+(defn gatekeeper-state-init [] (-> (ptr GatekeeperHarnessState))
+  (let [owner (malloc-allocator)
+        state (box! owner GatekeeperHarnessState (zeroed GatekeeperHarnessState))]
+    (region/region-init (field state process-region) owner)
+    (let [process-allocator (region/region-allocator (field state process-region))
+          service-domain (allocation-domain-open process-allocator)]
+      (set! (.service-domain state) service-domain)
+      (if (not (allocation-domain-valid? service-domain))
+          (set! (.init-error state) "could not create the harness service allocation domain")
+          (match (harness-runtime-open process-allocator
+                                       (allocation-domain-allocator service-domain)
+                                       (gatekeeper-journal-path process-allocator))
+            (HarnessRuntimeOpenFailed [exit-code message]
+              (set! (.init-error state) message))
+            (HarnessRuntimeOpened [runtime]
+              (set! (.runtime state) runtime))))
+      state)))
+
+(defn gatekeeper-state [] (-> (ptr GatekeeperHarnessState))
+  (let [current (atomic-load (gatekeeper-state-cell))]
+    (if (!= current 0)
+        (cast (ptr GatekeeperHarnessState) current)
+        (let [created (gatekeeper-state-init)]
+          (atomic-store (gatekeeper-state-cell) (cast i64 created))
+          created))))
+
+(defn gk-abi-version [] (-> u32) 3)
+
+(defn gatekeeper-stream-run-id [(method (slice u8))
+                                (target (slice u8))] (-> (slice u8))
+  (if (and (= method "GET") (starts-with target "/v1/runs/"))
+      (service-suffixed-run-id (service-target-parts target) "/events/stream")
+      ""))
+
+(defn gatekeeper-ascii-lower [(byte i64)] (-> i64)
+  (if (and (>= byte 65) (<= byte 90)) (+ byte 32) byte))
+
+(defn gatekeeper-header-name=? [(actual (slice u8))
+                                (expected (slice u8))] (-> bool)
+  (if (!= (slice-len [u8] actual) (slice-len [u8] expected))
+      false
+      (let [(mut i) 0 (mut same) true]
+        (loop (if (>= (load i) (slice-len [u8] actual))
+                  (break)
+                  (do
+                    (when (!= (gatekeeper-ascii-lower
+                                 (cast i64 (slice-get [u8] actual (load i))))
+                               (gatekeeper-ascii-lower
+                                 (cast i64 (slice-get [u8] expected (load i)))))
+                      (store! same false)
+                      (break)
+                      0)
+                    (set! i (+ (load i) 1)))))
+        (load same))))
+
+(defn gatekeeper-last-event-id [(request (ptr GkRequest))] (-> i64)
+  (let [(mut cursor) 0 (mut i) 0]
+    (loop (if (>= (load i) (cast i64 (.header-count request)))
+              (break)
+              (let [header (slice-get [GkHeader]
+                                      (slice-new [GkHeader]
+                                                 (.headers-ptr request)
+                                                 (cast i64 (.header-count request)))
+                                      (load i))
+                    name (slice-new [u8]
+                                    (cast (ptr u8) (.name-ptr header))
+                                    (cast i64 (.name-len header)))]
+                (when (gatekeeper-header-name=? name "Last-Event-ID")
+                  (let [value (slice-new [u8]
+                                         (cast (ptr u8) (.value-ptr header))
+                                         (cast i64 (.value-len header)))]
+                    (match (str-parse-int value)
+                      (Some [parsed] (store! cursor parsed))
+                      (None [] 0)))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load cursor)))
+
+(defn gk-handle [(request (ptr GkRequest))] (-> (ptr GkResponse))
+  (gatekeeper-state-lock!)
+  (let [result
+          (if (= request (cast (ptr GkRequest) 0))
+              (gatekeeper-error-response "Gatekeeper passed a null request")
+              (let [state (gatekeeper-state)]
+                (if (> (slice-len [u8] (.init-error state)) 0)
+                    (gatekeeper-error-response (.init-error state))
+                    (let [domain
+                            (allocation-domain-open
+                              (region/region-allocator (field state process-region)))]
+                      (if (not (allocation-domain-valid? domain))
+                          (gatekeeper-error-response "could not allocate request domain")
+                          (let [allocator (allocation-domain-allocator domain)
+                                method
+                                  (slice-new [u8]
+                                             (cast (ptr u8) (.method-ptr request))
+                                             (cast i64 (.method-len request)))
+                                path
+                                  (slice-new [u8]
+                                             (cast (ptr u8) (.path-ptr request))
+                                             (cast i64 (.path-len request)))
+                                query
+                                  (slice-new [u8]
+                                             (cast (ptr u8) (.query-ptr request))
+                                             (cast i64 (.query-len request)))
+                                target
+                                  (if (> (slice-len [u8] query) 0)
+                                      (concat-or-empty allocator
+                                                       path
+                                                       (concat-or-empty allocator "?" query))
+                                      path)
+                                body
+                                  (slice-new [u8]
+                                             (.body-ptr request)
+                                             (cast i64 (.body-len request)))
+                                service-request
+                                  (primitive/alloc-stack ServiceHttpRequest)
+                                service (.service (.runtime state))
+                                previous-allocator (.allocator service)]
+                            (let [stream-run-id (gatekeeper-stream-run-id method path)]
+                              (if (> (slice-len [u8] stream-run-id) 0)
+                                  (do
+                                    (set! (.allocator service) allocator)
+                                    (let [run-response (service-query-run service stream-run-id)
+                                          output
+                                            (if (= (.status run-response) 200)
+                                                (gatekeeper-sse-stream-new
+                                                  stream-run-id
+                                                  (let [query-cursor
+                                                          (service-events-cursor target)
+                                                        header-cursor
+                                                          (gatekeeper-last-event-id request)]
+                                                    (if (> query-cursor header-cursor)
+                                                        query-cursor
+                                                        header-cursor)))
+                                                (gatekeeper-response
+                                                  (.status run-response)
+                                                  (json-stringify allocator
+                                                                  (.body run-response))))]
+                                    (set! (.allocator service) previous-allocator)
+                                    (allocation-domain-close!
+                                      (region/region-allocator (field state process-region))
+                                      domain)
+                                    output))
+                                  (do
+                                    (set! (.method service-request) method)
+                                    (set! (.target service-request) target)
+                                    (set! (.body service-request) body)
+                                    (set! (.principal service-request) "gatekeeper")
+                                    (set! (.can-observe service-request) true)
+                                    (set! (.can-control service-request) true)
+                                    (set! (.allocator service) allocator)
+                                    (let [response (service-handle-http service service-request)
+                                          response-body
+                                            (json-stringify allocator (.body response))
+                                          output
+                                            (gatekeeper-response (.status response) response-body)]
+                                      (set! (.allocator service) previous-allocator)
+                                      (allocation-domain-close!
+                                        (region/region-allocator (field state process-region))
+                                        domain)
+                                      output))))))))))]
+    (gatekeeper-state-unlock!)
+    result))
+
+(defn gk-free-impl [(response (ptr GkResponse))] (-> i64)
+  (when (!= response (cast (ptr GkResponse) 0))
+    (let [owner (malloc-allocator)
+          owned (cast (ptr OwnedGkResponse) response)]
+      (free [u8] owner (.body owned))
+      (free [GkHeader] owner (.headers owned))
+      (free [u8] owner (.header-name owned))
+      (free [u8] owner (.header-value owned))
+      (destroy owner owned)
+      0))
+  0)
+
+(defn gk-free [(response (ptr GkResponse))] (-> void)
+  (forget (gk-free-impl response)))
+
+;;; ABI v3 requires these symbols even when a particular service only returns
+;;; buffered bodies. Streaming response state is added below without changing
+;;; the symbol contract.
+(defn gatekeeper-sse-fill! [(stream (ptr GatekeeperSseStream))] (-> i64)
+  (gatekeeper-state-lock!)
+  (let [state (gatekeeper-state)
+        owner (malloc-allocator)
+        result
+          (if (> (slice-len [u8] (.init-error state)) 0)
+              -1
+              (let [domain
+                      (allocation-domain-open
+                        (region/region-allocator (field state process-region)))]
+                (if (not (allocation-domain-valid? domain))
+                    -1
+                    (let [allocator (allocation-domain-allocator domain)
+                          service (.service (.runtime state))
+                          previous-allocator (.allocator service)]
+                      (set! (.allocator service) allocator)
+                      (let [events-response
+                              (service-query-events service (.run-id stream) (.cursor stream))
+                            events (json-get (.body events-response) "events")
+                            event-count (json-array-length events)
+                            next-cursor
+                              (json-number-i64
+                                (json-get (.body events-response) "next_cursor"))
+                            run-response (service-query-run service (.run-id stream))
+                            terminal
+                              (match (json-bool-value
+                                       (json-get (.body run-response) "terminal"))
+                                (Some [flag] flag)
+                                (None [] false))
+                            encoded
+                              (if (> event-count 0)
+                                  (concat-or-empty
+                                    allocator
+                                    "id: "
+                                    (concat-or-empty
+                                      allocator
+                                      (json-stringify allocator
+                                                      (json-integer allocator next-cursor))
+                                      (concat-or-empty
+                                        allocator
+                                        "\ndata: "
+                                        (concat-or-empty
+                                          allocator
+                                          (json-stringify allocator (.body events-response))
+                                          "\n\n"))))
+                                  (if (and (not terminal)
+                                           (>= (- (monotonic-now-ms)
+                                                  (.last-emission-ms stream))
+                                               15000))
+                                      ": keep-alive\n\n"
+                                      ""))
+                            copied (gatekeeper-owned-copy owner encoded)]
+                        (set! (.allocator service) previous-allocator)
+                        (when (> (slice-len [u8] encoded) 0)
+                          (free [u8] owner (.pending stream))
+                          (set! (.pending stream) copied)
+                          (set! (.pending-offset stream) 0)
+                          (set! (.last-emission-ms stream) (monotonic-now-ms))
+                          0)
+                        (when (> event-count 0) (set! (.cursor stream) next-cursor) 0)
+                        (set! (.terminal stream) terminal)
+                        (allocation-domain-close!
+                          (region/region-allocator (field state process-region))
+                          domain)
+                        (if (> (slice-len [u8] encoded) 0)
+                            1
+                            (if terminal 0 2)))))))]
+    (gatekeeper-state-unlock!)
+    result))
+
+(defn gk-stream-read [(raw-stream (ptr u8))
+                      (output (ptr u8))
+                      (capacity usize)] (-> isize)
+  (if (or (= raw-stream (cast (ptr u8) 0))
+          (= output (cast (ptr u8) 0))
+          (= capacity (cast usize 0)))
+      (cast isize -1)
+      (let [stream (cast (ptr GatekeeperSseStream) raw-stream)]
+        (block :read (loop
+          (let [available
+                  (- (slice-len [u8] (.pending stream)) (.pending-offset stream))]
+            (if (> available 0)
+                (let [count (if (< available (cast i64 capacity))
+                                available
+                                (cast i64 capacity))]
+                  (mem-copy [u8]
+                            output
+                            (slice-data [u8]
+                              (subslice [u8]
+                                        (.pending stream)
+                                        (.pending-offset stream)
+                                        (+ (.pending-offset stream) count)))
+                            count)
+                  (set! (.pending-offset stream) (+ (.pending-offset stream) count))
+                  (return-from :read (cast isize count)))
+                (let [fill (gatekeeper-sse-fill! stream)]
+                  (cond (< fill 0) (return-from :read (cast isize -1))
+                        (= fill 0) (return-from :read (cast isize 0))
+                        (= fill 2) (sleep-ms 100)
+                        :else 0)))))))))
+
+(defn gk-stream-free [(raw-stream (ptr u8))] (-> void)
+  (when (!= raw-stream (cast (ptr u8) 0))
+    (let [owner (malloc-allocator)
+          stream (cast (ptr GatekeeperSseStream) raw-stream)]
+      (free [u8] owner (.pending stream))
+      (free [u8] owner (.run-id stream))
+      (destroy owner stream)
+      0))
+  (forget 0))
+
+(defn gk-describe [] (-> (ptr GkResponse))
+  (gatekeeper-response
+    200
+    "{\"name\":\"coil-agent-harness\",\"summary\":\"Durable agent runs executed in-process by Gatekeeper\",\"endpoints\":[{\"path\":\"/v1/tools\",\"methods\":[\"GET\"],\"summary\":\"list available tools\"},{\"path\":\"/v1/tools/authorize\",\"methods\":[\"POST\"],\"summary\":\"authorize a proposed tool call\"},{\"path\":\"/v1/tools/call\",\"methods\":[\"POST\"],\"summary\":\"invoke a registered tool\"},{\"path\":\"/v1/workers/register\",\"methods\":[\"POST\"],\"summary\":\"register an out-of-process worker\"},{\"path\":\"/v1/workers/claim\",\"methods\":[\"POST\"],\"summary\":\"claim a queued worker assignment\"},{\"path\":\"/v1/workers/heartbeat\",\"methods\":[\"POST\"],\"summary\":\"renew a worker lease\"},{\"path\":\"/v1/workers/progress\",\"methods\":[\"POST\"],\"summary\":\"record worker progress\"},{\"path\":\"/v1/workers/complete\",\"methods\":[\"POST\"],\"summary\":\"complete a worker assignment\"},{\"path\":\"/v1/runs\",\"methods\":[\"POST\"],\"summary\":\"create a durable run\"},{\"path\":\"/v1/runs/{run_id}\",\"methods\":[\"GET\"],\"summary\":\"inspect a run\"},{\"path\":\"/v1/runs/{run_id}/events\",\"methods\":[\"GET\"],\"summary\":\"read durable events after an optional cursor\"},{\"path\":\"/v1/runs/{run_id}/events/stream\",\"methods\":[\"GET\"],\"stream\":\"sse\",\"summary\":\"stream durable events until the run reaches a terminal state\"},{\"path\":\"/v1/runs/{run_id}/cancel\",\"methods\":[\"POST\"],\"summary\":\"cancel a run\"},{\"path\":\"/v1/runs/{run_id}/assessments\",\"methods\":[\"POST\"],\"summary\":\"record a supervisor assessment\"},{\"path\":\"/v1/runs/{run_id}/interventions\",\"methods\":[\"POST\"],\"summary\":\"request a supervisor intervention\"},{\"path\":\"/v1/workflows/{workflow_id}\",\"methods\":[\"GET\"],\"summary\":\"inspect a durable workflow\"}]}"))
+
+(export-c
+  [gk-abi-version :as "gk_abi_version"]
+  [gk-handle :as "gk_handle"]
+  [gk-free :as "gk_free"]
+  [gk-stream-read :as "gk_stream_read"]
+  [gk-stream-free :as "gk_stream_free"]
+  [gk-describe :as "gk_describe"])

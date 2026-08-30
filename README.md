@@ -134,10 +134,49 @@ cancel, and inspect runs; observer credentials can only inspect runs and
 events. Remote/non-loopback deployment still needs TLS termination and transport
 hardening.
 
+### Running inside Gatekeeper
+
+Gatekeeper can own the complete HTTP boundary—listener, TLS, path normalization,
+authentication, and request delivery—while loading the harness as a pinned
+in-process service function:
+
+```sh
+scripts/build_gatekeeper_function.sh
+export HARNESS_JOURNAL_PATH="$HOME/.coil-agent-harness/gatekeeper.jsonl"
+```
+
+```toml
+[[route]]
+path = "/agents"
+function = {
+  library = "/absolute/path/to/coil-agent-harness/build/libcoil_agent_harness.dylib",
+  lifecycle = "service"
+}
+# private by default
+```
+
+Requests such as `/agents/v1/runs/<id>` reach `RunService` as `/v1/runs/<id>`.
+Gatekeeper authenticates the route and the adapter assigns the non-client-spoofable
+`gatekeeper` actor with observe/control capability. No harness port or bearer token
+is involved. `HARNESS_JOURNAL_PATH` selects the durable journal; when absent it
+defaults to `gatekeeper-harness.jsonl` in Gatekeeper's working directory.
+
+The `service` lifecycle is mandatory: runs continue on background threads after
+`gk_handle` returns. Gatekeeper therefore pins the dylib until process exit and a
+new build is deployed by restarting Gatekeeper, never by hot-unmapping live code.
+
 The version 1 service routes are `POST /v1/runs`,
 `POST /v1/runs/{run_id}/cancel`, `GET /v1/runs/{run_id}`, and
 `GET /v1/runs/{run_id}/events?after={sequence}`. Mutation bodies carry a
 stable `command_id`; replaying the same command does not repeat its effect.
+
+`GET /v1/runs/{run_id}/events/stream` is the incremental SSE form. It emits
+durable event envelopes as `data:` records, uses the durable sequence cursor as
+the SSE `id`, accepts either `?after=<sequence>` or `Last-Event-ID` for resume,
+sends a keep-alive comment during idle periods, and closes after the run reaches
+a terminal state. Model token deltas appear as `model.response.delta` events.
+Gatekeeper performs authentication before opening the stream and owns HTTP
+chunking, backpressure, and disconnect cleanup.
 
 Runs with `"execution_target":"worker"` remain durably queued for an
 out-of-process worker instead of launching inside the server. Worker control is part

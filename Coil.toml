@@ -6,6 +6,3 @@ source-roots = ["src", "tests", "tools", "/Users/jimmyhmiller/Documents/Code/pro
 [test]
 roots = ["tests"]
 suffixes = ["_test.coil"]
-
-[link]
-libs = ["curl"]
