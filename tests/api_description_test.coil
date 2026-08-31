@@ -16,6 +16,7 @@
                        (Some [name] (= name "coil-agent-harness"))
                        (None [] false)))
              (assert-eq (json-array-length operations) 16)
+             (assert (json-object-has? document "primary_use"))
              (assert (match (json-string-at (json-array-get operations 0) "path")
                        (Some [path] (= path "/v1/tools"))
                        (None [] false)))
@@ -23,15 +24,15 @@
 
 (deftest text-description-gives-a-zero-context-agent-working-entry-points
          (let [guide (harness-api-description-text)]
-           (assert (match (str-find guide "GET /agents/v1/tools")
+           (assert (match (str-find guide "harness projects")
                      (Some [at] true)
                      (None [] false)))
-           (assert (match (str-find guide "POST /agents/v1/runs")
+           (assert (match (str-find guide "harness factory new")
                      (Some [at] true)
                      (None [] false)))
-           (assert (match (str-find guide "POST /agents/v1/workers/claim")
+           (assert (match (str-find guide "harness factory run factories/review --project my-repo")
                      (Some [at] true)
                      (None [] false)))
-           (assert (match (str-find guide "GET /agents?format=json")
+           (assert (match (str-find guide "/agents?format=json")
                      (Some [at] true)
                      (None [] false)))))

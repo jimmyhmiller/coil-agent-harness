@@ -60,8 +60,8 @@ grep -q '"lifecycle": "service"' "$describe"
 
 curl -fsS -H "Authorization: Bearer $token" \
   "http://127.0.0.1:$port/agents" > "$guide"
-grep -q '^COIL AGENT HARNESS API v1' "$guide"
-grep -q 'POST /agents/v1/workers/claim' "$guide"
+grep -q '^COIL SOFTWARE FACTORY' "$guide"
+grep -q 'harness factory run factories/review --project my-repo' "$guide"
 
 curl -fsS -H "Authorization: Bearer $token" \
   -H 'Accept: application/json' \
