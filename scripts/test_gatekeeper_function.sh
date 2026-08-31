@@ -58,6 +58,10 @@ grep -q '"name": "coil-agent-harness"' "$describe"
 grep -q '"lifecycle": "service"' "$describe"
 
 curl -fsS -H "Authorization: Bearer $token" \
+  "http://127.0.0.1:$port/agents" > "$describe"
+grep -q '"name":"coil-agent-harness"' "$describe"
+
+curl -fsS -H "Authorization: Bearer $token" \
   "http://127.0.0.1:$port/agents/v1/tools" > "$tools"
 grep -q '"name":"echo"' "$tools"
 

@@ -337,8 +337,15 @@
                                   (primitive/alloc-stack ServiceHttpRequest)
                                 service (.service (.runtime state))
                                 previous-allocator (.allocator service)]
-                            (let [stream-run-id (gatekeeper-stream-run-id method path)]
-                              (if (> (slice-len [u8] stream-run-id) 0)
+                            (if (and (= method "GET")
+                                     (or (= path "") (= path "/")))
+                                (do
+                                  (allocation-domain-close!
+                                    (region/region-allocator (field state process-region))
+                                    domain)
+                                  (gk-describe))
+                                (let [stream-run-id (gatekeeper-stream-run-id method path)]
+                                  (if (> (slice-len [u8] stream-run-id) 0)
                                   (do
                                     (set! (.allocator service) allocator)
                                     (let [run-response (service-query-run service stream-run-id)
@@ -379,7 +386,7 @@
                                       (allocation-domain-close!
                                         (region/region-allocator (field state process-region))
                                         domain)
-                                      output))))))))))]
+                                      output)))))))))))]
     (gatekeeper-state-unlock!)
     result))
 
