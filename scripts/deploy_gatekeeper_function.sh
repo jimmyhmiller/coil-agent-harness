@@ -26,21 +26,22 @@ project_dir=$1
 revision=$2
 library=$3
 service=$4
-worktree_root="$project_dir/.worktrees"
-worktree="$worktree_root/deploy-$revision"
-artifact="$worktree/build/libcoil_agent_harness.so"
+build_root=$(mktemp -d /tmp/coil-agent-harness-deploy.XXXXXX)
+source_dir="$build_root/source"
+artifact="$source_dir/build/libcoil_agent_harness.so"
 backup="$library.pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)"
+
+cleanup() {
+  rm -rf "$build_root"
+}
+trap cleanup EXIT INT TERM
 
 git -C "$project_dir" fetch origin main
 git -C "$project_dir" cat-file -e "$revision^{commit}"
-mkdir -p "$worktree_root"
-git -C "$project_dir" worktree prune
-if [ ! -d "$worktree" ]; then
-  git -C "$project_dir" worktree add --detach "$worktree" "$revision"
-fi
-test "$(git -C "$worktree" rev-parse HEAD)" = "$revision"
+mkdir -p "$source_dir"
+git -C "$project_dir" archive "$revision" | tar -x -C "$source_dir"
 
-PATH="$HOME/.local/bin:$PATH" "$worktree/scripts/build_gatekeeper_function.sh"
+PATH="$HOME/.local/bin:$PATH" "$source_dir/scripts/build_gatekeeper_function.sh"
 test -s "$artifact"
 nm -D "$artifact" | grep -q ' gk_abi_version$'
 nm -D "$artifact" | grep -q ' gk_handle$'
