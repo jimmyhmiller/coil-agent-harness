@@ -19,5 +19,5 @@ esac
 
 output="$project_dir/build/libcoil_agent_harness.$extension"
 mkdir -p "$project_dir/build"
-coil build "$project_dir/src/gatekeeper_function.coil" --shared $curl_link -o "$output"
+(cd "$project_dir" && coil build src/gatekeeper_function.coil --shared $curl_link -o "$output")
 printf '%s\n' "$output"
