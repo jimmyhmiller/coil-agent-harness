@@ -57,7 +57,7 @@ sudo mv "$library.new" "$library"
 sudo systemctl restart "$service"
 sudo systemctl is-active --quiet "$service"
 
-installed_sha=$(sha256sum "$library" | awk '{print $1}')
+installed_sha=$(sudo sha256sum "$library" | awk '{print $1}')
 artifact_sha=$(sha256sum "$artifact" | awk '{print $1}')
 test "$installed_sha" = "$artifact_sha"
 printf 'Installed %s (sha256 %s); backup: %s\n' "$revision" "$installed_sha" "$backup"
