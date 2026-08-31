@@ -1,0 +1,37 @@
+(module harness-api-description-test)
+
+(import "coil.alloc" :use *)
+(import "coil.match" :use *)
+(import "coil.str" :use *)
+(import "harness-api-description" :use *)
+(import "harness-json" :use *)
+
+(deftest machine-description-is-valid-and-covers-the-routed-api
+         (let [allocator (malloc-allocator)
+               parsed (json-parse allocator (harness-api-description-json))]
+           (assert (load (field parsed ok)))
+           (let [document (load (field parsed value))
+                 operations (json-get document "endpoints")]
+             (assert (match (json-string-at document "name")
+                       (Some [name] (= name "coil-agent-harness"))
+                       (None [] false)))
+             (assert-eq (json-array-length operations) 16)
+             (assert (match (json-string-at (json-array-get operations 0) "path")
+                       (Some [path] (= path "/v1/tools"))
+                       (None [] false)))
+             (assert-eq (json-array-length (json-get document "worker_protocol")) 5))))
+
+(deftest text-description-gives-a-zero-context-agent-working-entry-points
+         (let [guide (harness-api-description-text)]
+           (assert (match (str-find guide "GET /agents/v1/tools")
+                     (Some [at] true)
+                     (None [] false)))
+           (assert (match (str-find guide "POST /agents/v1/runs")
+                     (Some [at] true)
+                     (None [] false)))
+           (assert (match (str-find guide "POST /agents/v1/workers/claim")
+                     (Some [at] true)
+                     (None [] false)))
+           (assert (match (str-find guide "GET /agents?format=json")
+                     (Some [at] true)
+                     (None [] false)))))

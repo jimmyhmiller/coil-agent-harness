@@ -9,6 +9,7 @@
 (import "coil.slice" :use *)
 (import "coil.str" :use *)
 (import "harness-allocation-domain" :use *)
+(import "harness-api-description" :use *)
 (import "harness-json" :use *)
 (import "harness-run-service" :use *)
 (import "harness-runtime-host" :use *)
@@ -297,6 +298,46 @@
                 (set! i (+ (load i) 1)))))
     (load cursor)))
 
+(defn gatekeeper-header-contains? [(request (ptr GkRequest))
+                                   (header-name (slice u8))
+                                   (needle (slice u8))] (-> bool)
+  (let [(mut found) false (mut i) 0]
+    (loop (if (>= (load i) (cast i64 (.header-count request)))
+              (break)
+              (let [header (slice-get [GkHeader]
+                                      (slice-new [GkHeader]
+                                                 (.headers-ptr request)
+                                                 (cast i64 (.header-count request)))
+                                      (load i))
+                    name (slice-new [u8]
+                                    (cast (ptr u8) (.name-ptr header))
+                                    (cast i64 (.name-len header)))]
+                (when (gatekeeper-header-name=? name header-name)
+                  (let [value (slice-new [u8]
+                                         (cast (ptr u8) (.value-ptr header))
+                                         (cast i64 (.value-len header)))]
+                    (match (str-find value needle)
+                      (Some [position] (store! found true))
+                      (None [] 0)))
+                  0)
+                (set! i (+ (load i) 1)))))
+    (load found)))
+
+(defn gatekeeper-description-wants-json? [(request (ptr GkRequest))
+                                          (query (slice u8))] (-> bool)
+  (or (match (str-find query "format=json")
+        (Some [position] true)
+        (None [] false))
+      (gatekeeper-header-contains? request "Accept" "application/json")))
+
+(defn gatekeeper-api-description [(request (ptr GkRequest))
+                                  (query (slice u8))] (-> (ptr GkResponse))
+  (if (gatekeeper-description-wants-json? request query)
+      (gatekeeper-response 200 (harness-api-description-json))
+      (gatekeeper-typed-response 200
+                                 (harness-api-description-text)
+                                 "text/plain; charset=utf-8")))
+
 (defn gk-handle [(request (ptr GkRequest))] (-> (ptr GkResponse))
   (gatekeeper-state-lock!)
   (let [result
@@ -343,7 +384,7 @@
                                   (allocation-domain-close!
                                     (region/region-allocator (field state process-region))
                                     domain)
-                                  (gk-describe))
+                                  (gatekeeper-api-description request query))
                                 (let [stream-run-id (gatekeeper-stream-run-id method path)]
                                   (if (> (slice-len [u8] stream-run-id) 0)
                                   (do
@@ -520,9 +561,7 @@
   (forget 0))
 
 (defn gk-describe [] (-> (ptr GkResponse))
-  (gatekeeper-response
-    200
-    "{\"name\":\"coil-agent-harness\",\"summary\":\"Durable agent runs executed in-process by Gatekeeper\",\"endpoints\":[{\"path\":\"/v1/tools\",\"methods\":[\"GET\"],\"summary\":\"list available tools\"},{\"path\":\"/v1/tools/authorize\",\"methods\":[\"POST\"],\"summary\":\"authorize a proposed tool call\"},{\"path\":\"/v1/tools/call\",\"methods\":[\"POST\"],\"summary\":\"invoke a registered tool\"},{\"path\":\"/v1/workers/register\",\"methods\":[\"POST\"],\"summary\":\"register an out-of-process worker\"},{\"path\":\"/v1/workers/claim\",\"methods\":[\"POST\"],\"summary\":\"claim a queued worker assignment\"},{\"path\":\"/v1/workers/heartbeat\",\"methods\":[\"POST\"],\"summary\":\"renew a worker lease\"},{\"path\":\"/v1/workers/progress\",\"methods\":[\"POST\"],\"summary\":\"record worker progress\"},{\"path\":\"/v1/workers/complete\",\"methods\":[\"POST\"],\"summary\":\"complete a worker assignment\"},{\"path\":\"/v1/runs\",\"methods\":[\"POST\"],\"summary\":\"create a durable run\"},{\"path\":\"/v1/runs/{run_id}\",\"methods\":[\"GET\"],\"summary\":\"inspect a run\"},{\"path\":\"/v1/runs/{run_id}/events\",\"methods\":[\"GET\"],\"summary\":\"read durable events after an optional cursor\"},{\"path\":\"/v1/runs/{run_id}/events/stream\",\"methods\":[\"GET\"],\"stream\":\"sse\",\"summary\":\"stream durable events until the run reaches a terminal state\"},{\"path\":\"/v1/runs/{run_id}/cancel\",\"methods\":[\"POST\"],\"summary\":\"cancel a run\"},{\"path\":\"/v1/runs/{run_id}/assessments\",\"methods\":[\"POST\"],\"summary\":\"record a supervisor assessment\"},{\"path\":\"/v1/runs/{run_id}/interventions\",\"methods\":[\"POST\"],\"summary\":\"request a supervisor intervention\"},{\"path\":\"/v1/workflows/{workflow_id}\",\"methods\":[\"GET\"],\"summary\":\"inspect a durable workflow\"}]}"))
+  (gatekeeper-response 200 (harness-api-description-json)))
 
 (export-c
   [gk-abi-version :as "gk_abi_version"]

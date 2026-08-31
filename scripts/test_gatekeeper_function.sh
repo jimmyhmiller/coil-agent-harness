@@ -15,6 +15,7 @@ journal=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.jsonl")
 log=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.log")
 unauthorized=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.out")
 describe=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.describe.json")
+guide=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.guide.txt")
 tools=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.tools.json")
 created=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.created.json")
 events=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.events.json")
@@ -27,7 +28,7 @@ cleanup() {
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
   fi
-  rm -f "$config" "$journal" "$log" "$unauthorized" "$describe" "$tools" "$created" "$events" "$stream" "$worker_result" "$resumed"
+  rm -f "$config" "$journal" "$log" "$unauthorized" "$describe" "$guide" "$tools" "$created" "$events" "$stream" "$worker_result" "$resumed"
 }
 trap cleanup EXIT INT TERM
 
@@ -58,8 +59,19 @@ grep -q '"name": "coil-agent-harness"' "$describe"
 grep -q '"lifecycle": "service"' "$describe"
 
 curl -fsS -H "Authorization: Bearer $token" \
+  "http://127.0.0.1:$port/agents" > "$guide"
+grep -q '^COIL AGENT HARNESS API v1' "$guide"
+grep -q 'POST /agents/v1/workers/claim' "$guide"
+
+curl -fsS -H "Authorization: Bearer $token" \
+  -H 'Accept: application/json' \
   "http://127.0.0.1:$port/agents" > "$describe"
 grep -q '"name":"coil-agent-harness"' "$describe"
+grep -q '"worker_protocol"' "$describe"
+
+curl -fsS -H "Authorization: Bearer $token" \
+  "http://127.0.0.1:$port/agents?format=json" > "$describe"
+grep -q '"endpoints"' "$describe"
 
 curl -fsS -H "Authorization: Bearer $token" \
   "http://127.0.0.1:$port/agents/v1/tools" > "$tools"

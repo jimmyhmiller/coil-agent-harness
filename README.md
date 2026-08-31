@@ -164,6 +164,9 @@ function = {
 ```
 
 Requests such as `/agents/v1/runs/<id>` reach `RunService` as `/v1/runs/<id>`.
+An authenticated `GET /agents` returns a plain-text, zero-context guide intended
+to be handed directly to an agent. Request `GET /agents?format=json` or send
+`Accept: application/json` for the same API as structured discovery metadata.
 Gatekeeper authenticates the route and the adapter assigns the non-client-spoofable
 `gatekeeper` actor with observe/control capability. No harness port or bearer token
 is involved. `HARNESS_JOURNAL_PATH` selects the durable journal; when absent it
