@@ -204,6 +204,16 @@
           (let [path (os/owned-string-slice value)]
             (if (> (slice-len [u8] path) 0) path "gatekeeper-harness.jsonl")))))))
 
+(defn gatekeeper-workspace-path [(allocator (dyn Allocator))] (-> (slice u8))
+  (match (os/env-get allocator "HARNESS_WORKSPACE_PATH")
+    (Err [failure] ".")
+    (Ok [found]
+      (match found
+        (None [] ".")
+        (Some [value]
+          (let [path (os/owned-string-slice value)]
+            (if (> (slice-len [u8] path) 0) path ".")))))))
+
 (defn gatekeeper-state-init [] (-> (ptr GatekeeperHarnessState))
   (let [owner (malloc-allocator)
         state (box! owner GatekeeperHarnessState (zeroed GatekeeperHarnessState))]
@@ -213,13 +223,18 @@
       (set! (.service-domain state) service-domain)
       (if (not (allocation-domain-valid? service-domain))
           (set! (.init-error state) "could not create the harness service allocation domain")
-          (match (harness-runtime-open process-allocator
-                                       (allocation-domain-allocator service-domain)
-                                       (gatekeeper-journal-path process-allocator))
-            (HarnessRuntimeOpenFailed [exit-code message]
-              (set! (.init-error state) message))
-            (HarnessRuntimeOpened [runtime]
-              (set! (.runtime state) runtime))))
+          (let [config (primitive/alloc-stack HarnessRuntimeConfig)]
+            (set! config (harness-runtime-config-default process-allocator))
+            (set! (.workspace config) (gatekeeper-workspace-path process-allocator))
+            (match (harness-runtime-open-configured
+                     process-allocator
+                     (allocation-domain-allocator service-domain)
+                     (gatekeeper-journal-path process-allocator)
+                     config)
+              (HarnessRuntimeOpenFailed [exit-code message]
+                (set! (.init-error state) message))
+              (HarnessRuntimeOpened [runtime]
+                (set! (.runtime state) runtime)))))
       state)))
 
 (defn gatekeeper-state [] (-> (ptr GatekeeperHarnessState))

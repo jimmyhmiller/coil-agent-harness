@@ -168,6 +168,9 @@ Gatekeeper authenticates the route and the adapter assigns the non-client-spoofa
 `gatekeeper` actor with observe/control capability. No harness port or bearer token
 is involved. `HARNESS_JOURNAL_PATH` selects the durable journal; when absent it
 defaults to `gatekeeper-harness.jsonl` in Gatekeeper's working directory.
+`HARNESS_WORKSPACE_PATH` selects the root used by the filesystem, search, and Bash
+tool bundles; set it to a dedicated service-owned directory in deployments rather
+than inheriting Gatekeeper's process directory.
 
 The `service` lifecycle is mandatory: runs continue on background threads after
 `gk_handle` returns. Gatekeeper therefore pins the dylib until process exit and a
