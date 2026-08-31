@@ -23,7 +23,7 @@
                       registry (box! allocator ToolRegistry (tool-registry-new allocator))]
                   (if (not (register-tool-bundle! plugin registry allocator))
                       13
-                      (match (tool-find (load registry) "c_echo")
+                      (match (tool-find (load registry) "coil_echo")
                         (None [] 14)
                         (Some [definition]
                           (let [tool definition
@@ -36,7 +36,7 @@
                                   (set! call (zeroed ToolCall))
                                   (set! context (zeroed ToolExecutionContext))
                                   (set! (.id call) "call-1")
-                                  (set! (.name call) "c_echo")
+                                  (set! (.name call) "coil_echo")
                                   (set! (.arguments call) (.value parsed))
                                   (set! (.raw-arguments call) "{\"text\":\"hello from C\"}")
                                   (set! (.run-id context) "integration-run")

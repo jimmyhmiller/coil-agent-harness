@@ -1,0 +1,68 @@
+(module harness-tool-plugin-abi)
+
+(import "coil.primitive" :as primitive)
+(import "coil.slice" :use *)
+
+(const HARNESS_TOOL_ABI_VERSION 1)
+
+;;; Stable C-compatible layouts shared by a Coil host and Coil plugin. No Coil
+;;; allocator, slice, trait object, sum, or other compiler-owned layout crosses
+;;; the dynamic-library boundary.
+(defstruct CToolSlice [(data (ptr u8)) (length usize)])
+
+(defstruct CToolInvocation
+  [(struct-size u32)
+   (reserved u32)
+   (call-id CToolSlice)
+   (arguments-json CToolSlice)
+   (run-id CToolSlice)
+   (run-deadline-monotonic-ms i64)
+   (tool-deadline-monotonic-ms i64)
+   (host-context (ptr i8))
+   (is-cancelled (fnptr c [(ptr i8)] i32))])
+
+(defstruct CToolResult
+  [(struct-size u32)
+   (status i32)
+   (output-json CToolSlice)
+   (error CToolSlice)
+   (release-context (ptr i8))])
+
+(defstruct CToolDescriptor
+  [(struct-size u32)
+   (effect u32)
+   (strict u32)
+   (idempotent u32)
+   (name CToolSlice)
+   (description CToolSlice)
+   (input-schema-json CToolSlice)
+   (timeout-ms i64)
+   (tool-context (ptr i8))
+   (execute (fnptr c [(ptr i8) (ptr CToolInvocation) (ptr CToolResult)] i32))])
+
+(defstruct CToolPluginDescriptor
+  [(struct-size u32)
+   (tool-count u32)
+   (tools (ptr CToolDescriptor))
+   (plugin-context (ptr i8))
+   (release-result (fnptr c [(ptr i8) (ptr CToolResult)] i32))
+   (shutdown (fnptr c [(ptr i8)] i32))])
+
+(static-assert (= (primitive/sizeof CToolSlice) 16) "tool ABI slice size")
+(static-assert (= (primitive/sizeof CToolInvocation) 88) "tool ABI invocation size")
+(static-assert (= (primitive/sizeof CToolResult) 48) "tool ABI result size")
+(static-assert (= (primitive/sizeof CToolDescriptor) 88) "tool ABI descriptor size")
+(static-assert (= (primitive/sizeof CToolPluginDescriptor) 40) "tool ABI plugin size")
+
+(defn c-tool-slice [(value CToolSlice)] (-> (slice u8))
+  (slice-new [u8] (.data value) (cast i64 (.length value))))
+
+(defn c-tool-slice-valid? [(value CToolSlice)] (-> bool)
+  (or (= (cast i64 (.length value)) 0)
+      (not (= (.data value) (cast (ptr u8) 0)))))
+
+(defn c-tool-slice-from [(value (slice u8))] (-> CToolSlice)
+  (let [result (primitive/alloc-stack CToolSlice)]
+    (set! (.data result) (slice-data [u8] value))
+    (set! (.length result) (cast usize (slice-len [u8] value)))
+    (load result)))

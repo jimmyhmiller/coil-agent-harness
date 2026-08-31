@@ -8,62 +8,14 @@
 (import "coil.str" :use *)
 (import "harness-json" :use *)
 (import "harness-tool" :use *)
+(import "harness-tool-plugin-abi" :use *)
 
 (extern dlopen :cc c [(ptr i8) i64] (-> (ptr i8)))
 (extern dlsym :cc c [(ptr i8) (ptr i8)] (-> (ptr i8)))
 (extern dlclose :cc c [(ptr i8)] (-> i32))
 (extern dlerror :cc c [] (-> (ptr i8)))
 
-(const HARNESS_TOOL_ABI_VERSION 1)
 (const RTLD_NOW 2)
-
-;;; Exact mirror of include/harness_tool_plugin.h. Only fixed-width scalars,
-;;; pointers, and pointer+length byte slices cross the native boundary.
-(defstruct CToolSlice [(data (ptr u8)) (length usize)])
-
-(defstruct CToolInvocation
-  [(struct-size u32)
-   (reserved u32)
-   (call-id CToolSlice)
-   (arguments-json CToolSlice)
-   (run-id CToolSlice)
-   (run-deadline-monotonic-ms i64)
-   (tool-deadline-monotonic-ms i64)
-   (host-context (ptr i8))
-   (is-cancelled (fnptr c [(ptr i8)] i32))])
-
-(defstruct CToolResult
-  [(struct-size u32)
-   (status i32)
-   (output-json CToolSlice)
-   (error CToolSlice)
-   (release-context (ptr i8))])
-
-(defstruct CToolDescriptor
-  [(struct-size u32)
-   (effect u32)
-   (strict u32)
-   (idempotent u32)
-   (name CToolSlice)
-   (description CToolSlice)
-   (input-schema-json CToolSlice)
-   (timeout-ms i64)
-   (tool-context (ptr i8))
-   (execute (fnptr c [(ptr i8) (ptr CToolInvocation) (ptr CToolResult)] i32))])
-
-(defstruct CToolPluginDescriptor
-  [(struct-size u32)
-   (tool-count u32)
-   (tools (ptr CToolDescriptor))
-   (plugin-context (ptr i8))
-   (release-result (fnptr c [(ptr i8) (ptr CToolResult)] i32))
-   (shutdown (fnptr c [(ptr i8)] i32))])
-
-(static-assert (= (primitive/sizeof CToolSlice) 16) "C tool ABI slice size")
-(static-assert (= (primitive/sizeof CToolInvocation) 88) "C tool ABI invocation size")
-(static-assert (= (primitive/sizeof CToolResult) 48) "C tool ABI result size")
-(static-assert (= (primitive/sizeof CToolDescriptor) 88) "C tool ABI descriptor size")
-(static-assert (= (primitive/sizeof CToolPluginDescriptor) 40) "C tool ABI plugin size")
 
 (defstruct DynamicCTool
   [(plugin (ptr CToolPluginDescriptor))
@@ -79,18 +31,6 @@
   (DynamicCToolPluginLoaded [(plugin DynamicCToolPlugin)])
   (DynamicCToolPluginLoadFailed [(message (slice u8))]))
 
-(defn c-tool-slice [(value CToolSlice)] (-> (slice u8))
-  (slice-new [u8] (.data value) (cast i64 (.length value))))
-
-(defn c-tool-slice-valid? [(value CToolSlice)] (-> bool)
-  (or (= (cast i64 (.length value)) 0)
-      (not (= (.data value) (cast (ptr u8) 0)))))
-
-(defn c-tool-slice-from [(value (slice u8))] (-> CToolSlice)
-  (let [result (primitive/alloc-stack CToolSlice)]
-    (set! (.data result) (slice-data [u8] value))
-    (set! (.length result) (cast usize (slice-len [u8] value)))
-    (load result)))
 
 (defn c-tool-loader-error [(allocator (dyn Allocator))
                             (fallback (slice u8))] (-> (slice u8))
@@ -153,7 +93,7 @@
                                               invocation
                                               native-result)]
                     (if (!= (cast i64 code) 0)
-                        (set! (.error result) "C tool execute callback failed")
+                        (set! (.error result) "native tool execute callback failed")
                         (do
                           (set! (.status result) (c-tool-result-status (.status native-result)))
                           (if (c-tool-slice-valid? (.error native-result))
@@ -163,19 +103,19 @@
                               (do
                                 (set! (.status result) (ToolErrored))
                                 (set! (.error result)
-                                      "C tool returned an invalid error slice")))
+                                      "native tool returned an invalid error slice")))
                           (if (not (c-tool-slice-valid? (.output-json native-result)))
                               (do
                                 (set! (.status result) (ToolErrored))
                                 (set! (.error result)
-                                      "C tool returned an invalid output slice"))
+                                      "native tool returned an invalid output slice"))
                               (if (= (cast i64 (.length (.output-json native-result))) 0)
                                   (when (match (.status result)
                                           (ToolSucceeded [] true)
                                           (_ false))
                                     (set! (.status result) (ToolErrored))
                                     (set! (.error result)
-                                          "C tool returned no success output")
+                                          "native tool returned no success output")
                                     0)
                                   (let [parsed
                                           (json-parse allocator
@@ -186,7 +126,7 @@
                                         (do
                                           (set! (.status result) (ToolErrored))
                                           (set! (.error result)
-                                                "C tool returned invalid output JSON"))))))))
+                                                "native tool returned invalid output JSON"))))))))
                     (primitive/call-ptr (.release-result plugin)
                                         (.plugin-context plugin)
                                         native-result)
@@ -283,7 +223,7 @@
   (let [handle (dlopen (str->cstr allocator path) RTLD_NOW)]
     (if (= handle (cast (ptr i8) 0))
         (DynamicCToolPluginLoadFailed
-          (c-tool-loader-error allocator "could not load C tool plugin"))
+          (c-tool-loader-error allocator "could not load native tool plugin"))
         (let [version-symbol (dlsym handle c"harness_tool_abi_version")
               plugin-symbol (dlsym handle c"harness_tool_plugin")]
           (if (or (= version-symbol (cast (ptr i8) 0))
@@ -291,7 +231,7 @@
               (do
                 (dlclose handle)
                 (DynamicCToolPluginLoadFailed
-                  "C tool plugin is missing required ABI symbols"))
+                  "native tool plugin is missing required ABI symbols"))
               (let [version
                       (primitive/call-ptr
                         (cast (fnptr c [] u32) version-symbol))
@@ -302,7 +242,7 @@
                     (do
                       (dlclose handle)
                       (DynamicCToolPluginLoadFailed
-                        "C tool plugin uses an unsupported ABI version"))
+                        "native tool plugin uses an unsupported ABI version"))
                     (if (or (= descriptor (cast (ptr CToolPluginDescriptor) 0))
                             (!= (cast i64 (.struct-size descriptor))
                                 (primitive/sizeof CToolPluginDescriptor))
@@ -315,7 +255,7 @@
                         (do
                           (dlclose handle)
                           (DynamicCToolPluginLoadFailed
-                            "C tool plugin descriptor is invalid"))
+                            "native tool plugin descriptor is invalid"))
                         (let [(mut definitions) (al-new [ToolDefinition] allocator)
                               (mut i) 0
                               (mut valid) true]
@@ -337,7 +277,7 @@
                               (do
                                 (dlclose handle)
                                 (DynamicCToolPluginLoadFailed
-                                  "C tool plugin contains an invalid tool descriptor"))
+                                  "native tool plugin contains an invalid tool descriptor"))
                               (let [plugin (primitive/alloc-stack DynamicCToolPlugin)]
                                 (set! (.handle plugin) handle)
                                 (set! (.descriptor plugin) descriptor)

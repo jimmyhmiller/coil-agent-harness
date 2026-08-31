@@ -1,0 +1,81 @@
+(module harness-coil-tool-plugin-fixture)
+
+(import "coil.primitive" :as primitive)
+(import "harness-tool-plugin-abi" :use *)
+
+;;; A dynamically loaded tool library written entirely in Coil. The exported
+;;; symbols and aggregate layouts use the stable C calling convention, but no C
+;;; source or generated C shim is involved.
+(defn fixture-execute [(tool-context (ptr i8))
+                       (invocation (ptr CToolInvocation))
+                       (result (ptr CToolResult))] (-> i32)
+  (if (or (= invocation (cast (ptr CToolInvocation) 0))
+          (= result (cast (ptr CToolResult) 0)))
+      (cast i32 1)
+      (if (or (!= (cast i64 (.struct-size invocation))
+                  (primitive/sizeof CToolInvocation))
+              (!= (cast i64 (.struct-size result))
+                  (primitive/sizeof CToolResult)))
+          (cast i32 1)
+          (if (and (not (= (cast (ptr i8) (.is-cancelled invocation))
+                           (cast (ptr i8) 0)))
+                   (!= (cast i64
+                             (primitive/call-ptr (.is-cancelled invocation)
+                                                 (.host-context invocation)))
+                       0))
+              (do
+                (set! (.status result) (cast i32 1))
+                (set! (.output-json result) (c-tool-slice-from "null"))
+                (set! (.error result) (c-tool-slice-from "cancelled"))
+                (cast i32 0))
+              (do
+                (set! (.status result) (cast i32 0))
+                (set! (.output-json result) (.arguments-json invocation))
+                (set! (.error result) (c-tool-slice-from ""))
+                (set! (.release-context result) (cast (ptr i8) 0))
+                (cast i32 0))))))
+
+(defn fixture-release-result [(plugin-context (ptr i8))
+                              (result (ptr CToolResult))] (-> i32)
+  (cast i32 0))
+
+(defn fixture-shutdown [(plugin-context (ptr i8))] (-> i32)
+  (cast i32 0))
+
+(defn fixture-tool-cell [] (-> (ptr CToolDescriptor))
+  (primitive/alloc-static CToolDescriptor))
+
+(defn fixture-plugin-cell [] (-> (ptr CToolPluginDescriptor))
+  (primitive/alloc-static CToolPluginDescriptor))
+
+(defn fixture-abi-version [] (-> u32)
+  (cast u32 HARNESS_TOOL_ABI_VERSION))
+
+(defn fixture-plugin [] (-> (ptr CToolPluginDescriptor))
+  (let [tool (fixture-tool-cell)
+        plugin (fixture-plugin-cell)]
+    (set! tool (zeroed CToolDescriptor))
+    (set! (.struct-size tool) (cast u32 (primitive/sizeof CToolDescriptor)))
+    (set! (.effect tool) (cast u32 0))
+    (set! (.strict tool) (cast u32 1))
+    (set! (.idempotent tool) (cast u32 1))
+    (set! (.name tool) (c-tool-slice-from "coil_echo"))
+    (set! (.description tool) (c-tool-slice-from "Echo an object through the tool ABI."))
+    (set! (.input-schema-json tool)
+          (c-tool-slice-from
+            "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"],\"additionalProperties\":false}"))
+    (set! (.timeout-ms tool) 1000)
+    (set! (.tool-context tool) (cast (ptr i8) 0))
+    (set! (.execute tool) (fnptr-of fixture-execute))
+    (set! plugin (zeroed CToolPluginDescriptor))
+    (set! (.struct-size plugin) (cast u32 (primitive/sizeof CToolPluginDescriptor)))
+    (set! (.tool-count plugin) (cast u32 1))
+    (set! (.tools plugin) tool)
+    (set! (.plugin-context plugin) (cast (ptr i8) 0))
+    (set! (.release-result plugin) (fnptr-of fixture-release-result))
+    (set! (.shutdown plugin) (fnptr-of fixture-shutdown))
+    plugin))
+
+(export-c
+  [fixture-abi-version :as "harness_tool_abi_version"]
+  [fixture-plugin :as "harness_tool_plugin"])

@@ -73,9 +73,9 @@ Three are available:
 **We choose (2) for the general extension system.** It remains the boundary for
 untrusted extensions, event subscriptions, interceptions, UI integration, and
 independently supervised processes. There is also a deliberately narrower trusted
-native tier: the versioned C tool ABI in `docs/c-tool-plugins.md`. That ABI can only
-describe and execute tools; it does not expose Coil traits or general extension
-hooks.
+native tier: Coil shared libraries using the versioned C-compatible tool ABI in
+`docs/c-tool-plugins.md`. That ABI can only describe and execute tools; it does not
+expose Coil traits or general extension hooks.
 
 The reason is that we already built it. `src/bus/` has an `Envelope` with
 `from`/`to`/`kind`/`correlation`, an `Address` sum (`Agent`, `Topic`, `Broadcast`,
@@ -107,9 +107,10 @@ extension subscribes to. This is why the design distinguishes *notification* top
 *interception* requests (correlated request/reply with a deadline). Only the second
 kind can slow a turn down, there are eight of them, and each is opt-in.
 
-The C tool tier is loaded with `dlopen`, but it is not a general first-party
-extension tier. Its small C-only surface keeps the trusted native case explicit
-without coupling the broader extension design to Coil's internal ABI.
+The native tool tier is loaded with `dlopen`, but it is not a general first-party
+extension tier. Its small C-compatible surface is defined and implemented in Coil;
+it keeps the trusted native case explicit without exposing Coil's compiler-owned
+layouts as an ABI.
 
 ## 3. Our surface
 

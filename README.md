@@ -19,7 +19,7 @@ agent run or the durable service runtime. See
 [the reusable-library guide](docs/reusable-library.md) and the standalone
 [`examples/composable-harness`](examples/composable-harness) consumer.
 Trusted native tool libraries can also be loaded dynamically through the stable,
-versioned [C tool-plugin ABI](docs/c-tool-plugins.md).
+versioned [C-compatible tool-plugin ABI implemented in Coil](docs/c-tool-plugins.md).
 
 The current slice can:
 

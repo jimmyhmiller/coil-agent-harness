@@ -1,9 +1,12 @@
-# C tool plugins
+# Coil tool plugins over a C ABI
 
 Trusted native libraries can add tools without being compiled into the harness.
-The public ABI is [include/harness_tool_plugin.h](../include/harness_tool_plugin.h).
-It contains no Coil data layouts: only fixed-width integers, pointers, function
-pointers, and pointer-length byte slices cross the shared-library boundary.
+Both the host adapter and plugins are written in Coil. "C ABI" names the stable
+calling convention and data layout at the shared-library boundary; it does not
+require C source, a C header, or a generated C shim. The contract is defined in
+[src/runtime/tool_plugin_abi.coil](../src/runtime/tool_plugin_abi.coil). Only
+fixed-width integers, pointers, C-callable function pointers, and pointer-length
+byte slices cross that boundary.
 
 This is deliberately a **tool ABI**, not a general extension ABI. A loaded library
 runs native code inside the harness process and has the process's full authority.
@@ -11,15 +14,16 @@ Untrusted or independently supervised extensions still belong on the agent bus.
 
 ## Export and describe tools
 
-Every library exports two C symbols:
+Every library exports two symbols using Coil's `export-c` form:
 
-```c
-uint32_t harness_tool_abi_version(void);
-const HarnessToolPlugin *harness_tool_plugin(void);
+```coil
+(export-c
+  [my-abi-version :as "harness_tool_abi_version"]
+  [my-plugin :as "harness_tool_plugin"])
 ```
 
 `harness_tool_plugin` returns a process-lifetime descriptor containing one or more
-`HarnessToolDescriptor` values. Each tool declares:
+`CToolDescriptor` values. Each tool declares:
 
 - name and description;
 - JSON Schema input document;
@@ -35,13 +39,14 @@ does not partially install on a collision.
 
 ## Execution
 
-The execution callback receives normalized JSON arguments along with the call ID,
-run ID, monotonic run/tool deadlines, and a host cancellation callback:
+The Coil execution callback receives normalized JSON arguments along with the call
+ID, run ID, monotonic run/tool deadlines, and a host cancellation callback:
 
-```c
-int32_t execute(void *tool_context,
-                const HarnessToolInvocation *invocation,
-                HarnessToolResult *result);
+```coil
+(defn execute [(tool-context (ptr i8))
+               (invocation (ptr CToolInvocation))
+               (result (ptr CToolResult))] (-> i32)
+  ...)
 ```
 
 Returning zero means the callback filled `result`; nonzero means the callback itself
@@ -63,9 +68,9 @@ thread-safe or synchronize its own mutable `plugin_context` and `tool_context`.
       ...)))
 ```
 
-`DynamicCToolPlugin` implements `ToolBundle`, so native tools compose exactly like
-Coil-native bundles. The registry can then be assigned to `ModelRequest.tools` or
-`HarnessRuntimeConfig.registry`.
+`DynamicCToolPlugin` implements `ToolBundle`, so dynamically loaded tools compose
+exactly like statically linked Coil bundles. The registry can then be assigned to
+`ModelRequest.tools` or `HarnessRuntimeConfig.registry`.
 
 Call `c-tool-plugin-close!` only after all runs and tool worker threads using that
 registry have stopped. It calls the optional plugin `shutdown` hook and then
@@ -74,15 +79,14 @@ the registry.
 
 ## Build and test
 
-On macOS:
+A plugin is an ordinary Coil module built as a shared library:
 
 ```sh
-cc -dynamiclib -fPIC -std=c11 \
-  -I /path/to/coil-agent-harness/include \
-  my_tools.c -o libmy_tools.dylib
+coil build my_tools.coil --shared -o libmy_tools.dylib
 ```
 
-On Linux, use `-shared` and produce a `.so`. A complete implementation lives in
-`integration/c_tool_plugin_fixture.c`; `scripts/test_c_tool_plugin.sh` builds it,
-loads it, registers `c_echo`, executes it through the normal harness tool interface,
-and verifies the returned JSON.
+Use a `.so` output name on Linux. A complete Coil implementation lives in
+[integration/coil_tool_plugin_fixture.coil](../integration/coil_tool_plugin_fixture.coil).
+`scripts/test_c_tool_plugin.sh` builds it with Coil, loads it, registers
+`coil_echo`, executes it through the normal harness tool interface, and verifies
+the returned JSON. The test does not compile or generate C.

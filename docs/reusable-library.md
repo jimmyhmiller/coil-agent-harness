@@ -98,7 +98,7 @@ See `examples/composable-harness` for a separate package that imports the harnes
 defines its own tool and bundle, composes it with a built-in bundle, and runs as an
 ordinary Coil project.
 
-Tools do not have to be written in Coil or statically linked. Trusted shared
-libraries can describe and execute tools through the versioned C ABI documented in
-[C tool plugins](c-tool-plugins.md). The loader adapts those descriptors into the
-same `ToolBundle` and `ToolRegistry` interfaces.
+Tools do not have to be statically linked. Trusted shared libraries written in
+Coil can describe and execute tools through the versioned C-compatible ABI
+documented in [Coil tool plugins](c-tool-plugins.md). The loader adapts those
+descriptors into the same `ToolBundle` and `ToolRegistry` interfaces.

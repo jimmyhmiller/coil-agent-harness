@@ -2,24 +2,15 @@
 set -eu
 
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-temporary_dir=$(mktemp -d)
-trap 'rm -rf "$temporary_dir"' EXIT HUP INT TERM
-
 case "$(uname -s)" in
-  Darwin)
-    extension=dylib
-    shared_flag=-dynamiclib
-    ;;
-  *)
-    extension=so
-    shared_flag=-shared
-    ;;
+  Darwin) extension=dylib ;;
+  *) extension=so ;;
 esac
 
-plugin="$temporary_dir/libharness_c_tool_fixture.$extension"
-cc "$shared_flag" -fPIC -std=c11 -Wall -Wextra -Werror \
-  -I "$project_dir/include" \
-  "$project_dir/integration/c_tool_plugin_fixture.c" \
+plugin="$project_dir/build/libharness_coil_tool_fixture.$extension"
+mkdir -p "$project_dir/build"
+coil build "$project_dir/integration/coil_tool_plugin_fixture.coil" \
+  --shared \
   -o "$plugin"
 
 HARNESS_C_TOOL_PLUGIN="$plugin" \
