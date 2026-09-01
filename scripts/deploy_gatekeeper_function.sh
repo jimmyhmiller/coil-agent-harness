@@ -50,9 +50,9 @@ test -x "$coil_bin"
 PATH="$(dirname "$coil_bin"):$PATH" "$source_dir/scripts/build_gatekeeper_function.sh"
 (
   cd "$source_dir"
-  # The Linux executable uses Coil's bundled static curl, whose compression
-  # objects require zlib after curl on the final link line.
-  PATH="$(dirname "$coil_bin"):$PATH" coil build src/main.coil -lz -o "$harness_artifact"
+  # Match the service library's Linux portability rule: use the platform shared
+  # libcurl instead of Coil's executable-oriented bundled archives.
+  PATH="$(dirname "$coil_bin"):$PATH" coil build src/main.coil -lcurl -o "$harness_artifact"
 )
 test -s "$artifact"
 test -s "$harness_artifact"
