@@ -22,6 +22,10 @@ events=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.events.json")
 stream=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.stream.txt")
 worker_result=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.worker.json")
 resumed=$(mktemp "$project_dir/build/gatekeeper-e2e.XXXXXX.resumed.txt")
+factory_root=$(mktemp -d "$project_dir/build/gatekeeper-e2e.XXXXXX.factories")
+factory_state=$(mktemp -d "$project_dir/build/gatekeeper-e2e.XXXXXX.factory-state")
+factory_config=$(mktemp -d "$project_dir/build/gatekeeper-e2e.XXXXXX.factory-config")
+factory_project=$(mktemp -d "$project_dir/build/gatekeeper-e2e.XXXXXX.factory-project")
 
 cleanup() {
   if [ "${server_pid:-}" ]; then
@@ -29,6 +33,7 @@ cleanup() {
     wait "$server_pid" 2>/dev/null || true
   fi
   rm -f "$config" "$journal" "$log" "$unauthorized" "$describe" "$guide" "$tools" "$created" "$events" "$stream" "$worker_result" "$resumed"
+  rm -rf "$factory_root" "$factory_state" "$factory_config" "$factory_project"
 }
 trap cleanup EXIT INT TERM
 
@@ -36,6 +41,8 @@ sed "s|@HARNESS_DYLIB@|$dylib|g" \
   "$project_dir/integration/gatekeeper-test.toml.in" > "$config"
 
 GATEKEEPER_TOKEN=$token HARNESS_JOURNAL_PATH=$journal \
+  HARNESS_WORKFLOW_ROOT=$factory_root HARNESS_FACTORY_STATE_ROOT=$factory_state \
+  HARNESS_CONFIG_DIR=$factory_config HARNESS_FACTORY_LAUNCHER=/usr/bin/true \
   "$gatekeeper_bin" --config "$config" > "$log" 2>&1 &
 server_pid=$!
 
@@ -60,8 +67,9 @@ grep -q '"lifecycle": "service"' "$describe"
 
 curl -fsS -H "Authorization: Bearer $token" \
   "http://127.0.0.1:$port/agents" > "$guide"
-grep -q '^COIL SOFTWARE FACTORY' "$guide"
-grep -q 'harness factory run factories/review --project my-repo' "$guide"
+grep -q '^COIL SOFTWARE FACTORY API' "$guide"
+grep -q 'POST /agents/v1/factory-definitions' "$guide"
+grep -q 'POST /agents/v1/factory-runs' "$guide"
 
 curl -fsS -H "Authorization: Bearer $token" \
   -H 'Accept: application/json' \
@@ -72,6 +80,31 @@ grep -q '"worker_protocol"' "$describe"
 curl -fsS -H "Authorization: Bearer $token" \
   "http://127.0.0.1:$port/agents?format=json" > "$describe"
 grep -q '"endpoints"' "$describe"
+
+curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  --data "{\"version\":1,\"name\":\"demo\",\"path\":\"$factory_project\"}" \
+  "http://127.0.0.1:$port/agents/v1/projects" > "$worker_result"
+grep -q '"status":"created"' "$worker_result"
+
+curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  --data '{"version":1,"name":"review","goal":"Implement and verify.","context":[{"file":"context.md","markdown":"# Context\n\nPreserve behavior.\n"}],"tools":{"groups":["filesystem","bash"]},"commands":{"before":[],"after":[],"before_each":[],"after_each":[]},"workers":[{"file":"01-implement.md","markdown":"# Implement\n\nMake and test the change.\n"},{"file":"02-verify.md","markdown":"# Verify\n\nReview and fix failures.\n"}]}' \
+  "http://127.0.0.1:$port/agents/v1/factory-definitions" > "$worker_result"
+grep -q '"status":"created"' "$worker_result"
+
+curl -fsS -H "Authorization: Bearer $token" \
+  "http://127.0.0.1:$port/agents/v1/factory-definitions/review" > "$worker_result"
+grep -q '01-implement.md' "$worker_result"
+curl -fsS -X POST -H "Authorization: Bearer $token" \
+  "http://127.0.0.1:$port/agents/v1/factory-definitions/review/validate" > "$worker_result"
+grep -q '"status":"valid"' "$worker_result"
+
+curl -fsS -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+  --data '{"version":1,"request_id":"factory-e2e","workflow":"review","project":"demo"}' \
+  "http://127.0.0.1:$port/agents/v1/factory-runs" > "$worker_result"
+grep -q '"status":"accepted"' "$worker_result"
+curl -fsS -H "Authorization: Bearer $token" \
+  "http://127.0.0.1:$port/agents/v1/factory-runs/factory-e2e" > "$worker_result"
+grep -q '"status":"accepted"' "$worker_result"
 
 curl -fsS -H "Authorization: Bearer $token" \
   "http://127.0.0.1:$port/agents/v1/tools" > "$tools"

@@ -1,0 +1,64 @@
+(module harness-factory-run-api-test)
+
+(import "coil.alloc" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-factory-definition-api" :use *)
+(import "harness-factory-run-api" :use *)
+(import "harness-json" :use *)
+(import "harness-project-api" :use *)
+
+(const RUN_CONFIG "/tmp/coil-agent-harness-factory-run-config")
+(const RUN_WORKFLOWS "/tmp/coil-agent-harness-factory-run-workflows")
+(const RUN_STATE "/tmp/coil-agent-harness-factory-run-state")
+(const RUN_PROJECT "/tmp/coil-agent-harness-factory-run-project")
+
+(extern rmdir :cc c [(ptr i8)] (-> i32))
+
+(deftest starts-an-idempotently-named-factory-request-and-exposes-status
+         (let [allocator (malloc-allocator)]
+           (directory-create-all allocator RUN_CONFIG 448)
+           (directory-create-all allocator RUN_WORKFLOWS 448)
+           (directory-create-all allocator RUN_STATE 448)
+           (directory-create-all allocator RUN_PROJECT 448)
+           (let [workflow-dir (path-join allocator RUN_WORKFLOWS "review")]
+             (path-remove allocator (path-join allocator workflow-dir "factory.json"))
+             (path-remove allocator (path-join allocator workflow-dir "context.md"))
+             (path-remove allocator (path-join allocator workflow-dir "01-review.md"))
+             (rmdir (str->cstr allocator workflow-dir)))
+           (path-remove allocator (path-join allocator RUN_CONFIG "projects.json"))
+           (path-remove allocator (path-join allocator (path-join allocator RUN_STATE "requests") "run-one.json"))
+           (match (os/env-set allocator "HARNESS_CONFIG_DIR" RUN_CONFIG true)
+             (Ok [value] 0) (Err [failure] (assert false)))
+           (match (os/env-set allocator "HARNESS_WORKFLOW_ROOT" RUN_WORKFLOWS true)
+             (Ok [value] 0) (Err [failure] (assert false)))
+           (match (os/env-set allocator "HARNESS_FACTORY_STATE_ROOT" RUN_STATE true)
+             (Ok [value] 0) (Err [failure] (assert false)))
+           (match (os/env-set allocator "HARNESS_FACTORY_LAUNCHER" "/usr/bin/true" true)
+             (Ok [value] 0) (Err [failure] (assert false)))
+           (let [project
+                   (json-parse allocator
+                               "{\"version\":1,\"name\":\"demo\",\"path\":\"/tmp/coil-agent-harness-factory-run-project\"}")]
+             (let [created (project-api-create allocator (.value project))]
+               (assert-eq (.status created) 201)))
+           (let [workflow
+                   (json-parse allocator
+                               "{\"version\":1,\"name\":\"review\",\"goal\":\"Review it.\",\"context\":[{\"file\":\"context.md\",\"markdown\":\"# Context\\n\"}],\"tools\":{\"groups\":[\"filesystem\"]},\"commands\":{\"before\":[],\"after\":[],\"before_each\":[],\"after_each\":[]},\"workers\":[{\"file\":\"01-review.md\",\"markdown\":\"# Review\\n\"}]}" )]
+             (let [created (factory-api-create allocator (.value workflow))]
+               (assert-eq (.status created) 201)))
+           (let [run
+                   (json-parse allocator
+                               "{\"version\":1,\"request_id\":\"run-one\",\"workflow\":\"review\",\"project\":\"demo\"}")
+                 started (factory-run-api-start allocator (.value run))]
+             (assert-eq (.status started) 202)
+             (assert (= (factory-api-string (.body started) "status") "accepted"))
+             (let [duplicate (factory-run-api-start allocator (.value run))]
+               (assert-eq (.status duplicate) 409)))
+           (let [status (factory-run-api-status allocator "run-one")]
+             (assert-eq (.status status) 200)
+             (assert (= (factory-api-string (.body status) "status") "accepted")))))

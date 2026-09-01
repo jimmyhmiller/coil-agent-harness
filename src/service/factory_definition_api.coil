@@ -1,0 +1,364 @@
+(module harness-factory-definition-api)
+
+(import "coil.alloc" :use *)
+(import "coil.arraylist" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-json" :use *)
+(import "harness-project-config" :use *)
+(import "provider-common" :use *)
+
+(extern rmdir :cc c [(ptr i8)] (-> i32))
+
+(defstruct FactoryApiResponse [(status i64) (body Json)])
+
+(defn factory-api-response [(status i64) (body Json)] (-> FactoryApiResponse)
+  (let [response (primitive/alloc-stack FactoryApiResponse)]
+    (set! (.status response) status)
+    (set! (.body response) body)
+    (load response)))
+
+(defn factory-api-error [(allocator (dyn Allocator))
+                         (status i64)
+                         (code (slice u8))
+                         (message (slice u8))] (-> FactoryApiResponse)
+  (let [(mut body) (json-object allocator)]
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-put-string! (mut body) "error" code)
+    (json-put-string! (mut body) "message" message)
+    (factory-api-response status (load body))))
+
+(defn factory-api-env-or [(allocator (dyn Allocator))
+                          (name (slice u8))
+                          (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get allocator name)
+    (Ok [found]
+        (match found
+          (Some [owned] (os/owned-string-slice owned))
+          (None [] fallback)))
+    (Err [failure] fallback)))
+
+(defn factory-api-root [(allocator (dyn Allocator))] (-> (slice u8))
+  (factory-api-env-or allocator "HARNESS_WORKFLOW_ROOT" "factories"))
+
+(defn factory-api-string [(value Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at value key)
+    (Some [text] text)
+    (None [] "")))
+
+(defn factory-api-markdown-file-valid? [(name (slice u8))] (-> bool)
+  (let [n (slice-len [u8] name)]
+    (and (> n 3)
+         (and (= (substr name (- n 3) n) ".md")
+              (and (match (str-find name "/") (Some [at] false) (None [] true))
+                   (match (str-find name "..") (Some [at] false) (None [] true)))))))
+
+(defn factory-api-array-strings-valid? [(value Json)] (-> bool)
+  (match (json-array-items value)
+    (None [] false)
+    (Some [items]
+      (let [(mut valid) true (mut i) 0 n (al-len [Json] (load items))]
+        (loop (if (or (>= (load i) n) (not (load valid)))
+                  (break)
+                  (do
+                    (match (al-get [Json] (load items) (load i))
+                      (JsonString [text] (when (= (slice-len [u8] text) 0) (store! valid false) 0))
+                      (_ (store! valid false)))
+                    (set! i (+ (load i) 1)))))
+        (load valid)))))
+
+(defn factory-api-file-entries-valid? [(entries Json) (required bool)] (-> bool)
+  (match (json-array-items entries)
+    (None [] false)
+    (Some [items]
+      (let [(mut valid) (or (not required) (> (al-len [Json] (load items)) 0))
+            (mut i) 0
+            n (al-len [Json] (load items))]
+        (loop (if (or (>= (load i) n) (not (load valid)))
+                  (break)
+                  (let [entry (al-get [Json] (load items) (load i))
+                        file (factory-api-string entry "file")
+                        markdown (factory-api-string entry "markdown")]
+                    (when (or (not (factory-api-markdown-file-valid? file))
+                              (= (slice-len [u8] markdown) 0))
+                      (store! valid false)
+                      0)
+                    (set! i (+ (load i) 1)))))
+        (load valid)))))
+
+(defn factory-api-files-unique? [(allocator (dyn Allocator))
+                                 (context Json)
+                                 (workers Json)] (-> bool)
+  (let [(mut seen) (al-new [(slice u8)] allocator)
+        (mut valid) true
+        (mut group) 0]
+    (loop (if (>= (load group) 2)
+              (break)
+              (let [entries (if (= (load group) 0) context workers)
+                    n (json-array-length entries)
+                    (mut i) 0]
+                (loop (if (or (>= (load i) n) (not (load valid)))
+                          (break)
+                          (let [file (factory-api-string (json-array-get entries (load i)) "file")
+                                (mut j) 0]
+                            (loop (if (>= (load j) (al-len [(slice u8)] (load seen)))
+                                      (break)
+                                      (do
+                                        (when (= file (al-get [(slice u8)] (load seen) (load j)))
+                                          (store! valid false)
+                                          0)
+                                        (set! j (+ (load j) 1)))))
+                            (when (load valid) (al-push! [(slice u8)] (mut seen) file) 0)
+                            (set! i (+ (load i) 1)))))
+                (set! group (+ (load group) 1)))))
+    (load valid)))
+
+(defn factory-api-write! [(allocator (dyn Allocator))
+                          (path (slice u8))
+                          (contents (slice u8))] (-> bool)
+  (match (fs/write-file allocator path contents)
+    (Ok [written] true)
+    (Err [failure] false)))
+
+(defn factory-api-manifest [(allocator (dyn Allocator)) (command Json)] (-> Json)
+  (let [(mut manifest) (json-object allocator)
+        (mut contexts) (json-array allocator)
+        (mut workers) (json-array allocator)
+        context-entries (json-get command "context")
+        worker-entries (json-get command "workers")
+        (mut i) 0]
+    (json-put-string! (mut manifest) "name" (factory-api-string command "name"))
+    (json-put-string! (mut manifest) "goal" (factory-api-string command "goal"))
+    (when (> (slice-len [u8] (factory-api-string command "input")) 0)
+      (json-put-string! (mut manifest) "input" (factory-api-string command "input"))
+      0)
+    (loop (if (>= (load i) (json-array-length context-entries))
+              (break)
+              (do
+                (json-array-push! (mut contexts)
+                                  (JsonString (factory-api-string
+                                                (json-array-get context-entries (load i))
+                                                "file")))
+                (set! i (+ (load i) 1)))))
+    (set! i 0)
+    (loop (if (>= (load i) (json-array-length worker-entries))
+              (break)
+              (let [entry (json-array-get worker-entries (load i))
+                    file (factory-api-string entry "file")
+                    provider (factory-api-string entry "provider")
+                    model (factory-api-string entry "model")
+                    reasoning (factory-api-string entry "reasoning")]
+                (if (and (= provider "")
+                         (and (= model "")
+                              (and (= reasoning "")
+                                   (and (not (json-object-has? entry "before"))
+                                        (not (json-object-has? entry "after"))))))
+                    (json-array-push! (mut workers) (JsonString file))
+                    (let [(mut worker) (json-object allocator)]
+                      (json-put-string! (mut worker) "file" file)
+                      (when (> (slice-len [u8] provider) 0) (json-put-string! (mut worker) "provider" provider) 0)
+                      (when (> (slice-len [u8] model) 0) (json-put-string! (mut worker) "model" model) 0)
+                      (when (> (slice-len [u8] reasoning) 0) (json-put-string! (mut worker) "reasoning" reasoning) 0)
+                      (when (json-object-has? entry "before")
+                        (json-object-put! (mut worker) "before" (json-get entry "before"))
+                        0)
+                      (when (json-object-has? entry "after")
+                        (json-object-put! (mut worker) "after" (json-get entry "after"))
+                        0)
+                      (json-array-push! (mut workers) (load worker))))
+                (set! i (+ (load i) 1)))))
+    (json-object-put! (mut manifest) "context" (load contexts))
+    (json-object-put! (mut manifest) "tools" (json-get command "tools"))
+    (json-object-put! (mut manifest) "commands" (json-get command "commands"))
+    (json-object-put! (mut manifest) "workers" (load workers))
+    (load manifest)))
+
+(defn factory-api-clean-created! [(allocator (dyn Allocator))
+                                  (directory (slice u8))
+                                  (context Json)
+                                  (workers Json)] (-> i64)
+  (let [(mut group) 0]
+    (loop (if (>= (load group) 2)
+              (break)
+              (let [entries (if (= (load group) 0) context workers)
+                    (mut i) 0]
+                (loop (if (>= (load i) (json-array-length entries))
+                          (break)
+                          (do
+                            (path-remove allocator
+                                         (path-join allocator
+                                                    directory
+                                                    (factory-api-string
+                                                      (json-array-get entries (load i))
+                                                      "file")))
+                            (set! i (+ (load i) 1)))))
+                (set! group (+ (load group) 1)))))
+    (path-remove allocator (path-join allocator directory "factory.json"))
+    (rmdir (str->cstr allocator directory))
+    0))
+
+(defn factory-api-create [(allocator (dyn Allocator)) (command Json)] (-> FactoryApiResponse)
+  (let [name (factory-api-string command "name")
+        goal (factory-api-string command "goal")
+        input (factory-api-string command "input")
+        context (json-get command "context")
+        workers (json-get command "workers")
+        groups (json-get (json-get command "tools") "groups")
+        root (factory-api-root allocator)
+        directory (path-join allocator root name)]
+    (cond (!= (json-number-i64 (json-get command "version")) 1)
+            (factory-api-error allocator 400 "invalid_version" "version must be 1")
+          (not (project-name-valid? name))
+            (factory-api-error allocator 400 "invalid_name" "name must use only letters, digits, dash, underscore, and dot")
+          (= (slice-len [u8] goal) 0)
+            (factory-api-error allocator 400 "invalid_goal" "goal must not be empty")
+          (not (or (= input "") (= input "issue")))
+            (factory-api-error allocator 400 "invalid_input" "input must be omitted or issue")
+          (not (factory-api-array-strings-valid? groups))
+            (factory-api-error allocator 400 "invalid_tools" "tools.groups must be a non-empty string array")
+          (not (factory-api-file-entries-valid? context false))
+            (factory-api-error allocator 400 "invalid_context" "context must be an array of Markdown file and markdown pairs")
+          (not (factory-api-file-entries-valid? workers true))
+            (factory-api-error allocator 400 "invalid_workers" "workers must contain Markdown file and markdown pairs")
+          (not (factory-api-files-unique? allocator context workers))
+            (factory-api-error allocator 400 "duplicate_file" "context and worker filenames must be unique")
+          (path-exists? allocator directory)
+            (factory-api-error allocator 409 "workflow_exists" "a workflow with this name already exists")
+          (!= (directory-create-all allocator root 448) 0)
+            (factory-api-error allocator 500 "workflow_root_failed" "could not create the workflow root")
+          (!= (directory-create allocator directory 448) 0)
+            (factory-api-error allocator 500 "workflow_create_failed" "could not create the workflow directory")
+          :else
+            (let [(mut ok) true (mut group) 0]
+              (loop (if (or (>= (load group) 2) (not (load ok)))
+                        (break)
+                        (let [entries (if (= (load group) 0) context workers)
+                              (mut i) 0]
+                          (loop (if (or (>= (load i) (json-array-length entries))
+                                        (not (load ok)))
+                                    (break)
+                                    (let [entry (json-array-get entries (load i))]
+                                      (when (not (factory-api-write!
+                                                   allocator
+                                                   (path-join allocator directory (factory-api-string entry "file"))
+                                                   (factory-api-string entry "markdown")))
+                                        (store! ok false)
+                                        0)
+                                      (set! i (+ (load i) 1)))))
+                          (set! group (+ (load group) 1)))))
+              (let [manifest (factory-api-manifest allocator command)]
+                (when (and (load ok)
+                           (not (factory-api-write! allocator
+                                                    (path-join allocator directory "factory.json")
+                                                    (json-stringify allocator manifest))))
+                  (store! ok false)
+                  0)
+                (if (not (load ok))
+                    (do
+                      (factory-api-clean-created! allocator directory context workers)
+                      (factory-api-error allocator 500 "workflow_write_failed" "could not write every workflow file"))
+                    (match (load-factory-definition allocator directory)
+                      (FactoryInvalid [message]
+                        (do
+                          (factory-api-clean-created! allocator directory context workers)
+                          (factory-api-error allocator 400 "invalid_workflow" message)))
+                      (FactoryLoaded [definition]
+                        (let [(mut body) (json-object allocator)]
+                          (json-object-put! (mut body) "version" (json-integer allocator 1))
+                          (json-put-string! (mut body) "name" name)
+                          (json-put-string! (mut body) "directory" directory)
+                          (json-put-string! (mut body) "status" "created")
+                          (factory-api-response 201 (load body)))))))))))
+
+(defn factory-api-source [(allocator (dyn Allocator))
+                          (name (slice u8))] (-> FactoryApiResponse)
+  (if (not (project-name-valid? name))
+      (factory-api-error allocator 400 "invalid_name" "workflow name is invalid")
+      (let [directory (path-join allocator (factory-api-root allocator) name)
+            manifest-text (factory-read-file allocator directory "factory.json")]
+        (if (= (slice-len [u8] manifest-text) 0)
+            (factory-api-error allocator 404 "workflow_not_found" "workflow does not exist")
+            (let [parsed (json-parse allocator manifest-text)]
+              (if (not (.ok parsed))
+                  (factory-api-error allocator 500 "workflow_corrupt" "factory.json is not valid JSON")
+                  (let [manifest (.value parsed)
+                        context (json-get manifest "context")
+                        workers (json-get manifest "workers")
+                        (mut files) (json-array allocator)
+                        (mut group) 0]
+                    (loop (if (>= (load group) 2)
+                              (break)
+                              (let [entries (if (= (load group) 0) context workers)
+                                    (mut i) 0]
+                                (loop (if (>= (load i) (json-array-length entries))
+                                          (break)
+                                          (let [entry (json-array-get entries (load i))
+                                                file (match entry
+                                                       (JsonString [value] value)
+                                                       (_ (factory-api-string entry "file")))
+                                                (mut source) (json-object allocator)]
+                                            (json-put-string! (mut source) "file" file)
+                                            (json-put-string! (mut source)
+                                                              "markdown"
+                                                              (factory-read-file allocator directory file))
+                                            (json-array-push! (mut files) (load source))
+                                            (set! i (+ (load i) 1)))))
+                                (set! group (+ (load group) 1)))))
+                    (let [(mut body) (json-object allocator)]
+                      (json-object-put! (mut body) "version" (json-integer allocator 1))
+                      (json-object-put! (mut body) "manifest" manifest)
+                      (json-object-put! (mut body) "files" (load files))
+                      (factory-api-response 200 (load body))))))))))
+
+(defn factory-api-validate [(allocator (dyn Allocator))
+                            (name (slice u8))] (-> FactoryApiResponse)
+  (let [directory (path-join allocator (factory-api-root allocator) name)]
+    (match (load-factory-definition allocator directory)
+      (FactoryInvalid [message] (factory-api-error allocator 400 "invalid_workflow" message))
+      (FactoryLoaded [definition]
+        (let [active definition
+              (mut body) (json-object allocator)]
+          (json-object-put! (mut body) "version" (json-integer allocator 1))
+          (json-put-string! (mut body) "name" (.name active))
+          (json-put-string! (mut body) "goal" (.goal active))
+          (json-object-put! (mut body)
+                            "worker_count"
+                            (json-integer allocator (al-len [FactoryWorker] (.workers active))))
+          (json-put-string! (mut body) "status" "valid")
+          (factory-api-response 200 (load body)))))))
+
+(defn factory-api-list [(allocator (dyn Allocator))] (-> FactoryApiResponse)
+  (let [root (factory-api-root allocator)
+        entries (directory-entries allocator root)
+        (mut workflows) (json-array allocator)
+        (mut i) 0]
+    (loop (if (>= (load i) (al-len [(slice u8)] entries))
+              (break)
+              (let [name (al-get [(slice u8)] entries (load i))
+                    directory (path-join allocator root name)]
+                (match (load-factory-definition allocator directory)
+                  (FactoryInvalid [message] 0)
+                  (FactoryLoaded [definition]
+                    (let [active definition
+                          (mut item) (json-object allocator)]
+                      (json-put-string! (mut item) "name" (.name active))
+                      (json-put-string! (mut item) "goal" (.goal active))
+                      (json-put-string! (mut item) "input" (.input active))
+                      (json-object-put! (mut item)
+                                        "worker_count"
+                                        (json-integer allocator
+                                                      (al-len [FactoryWorker] (.workers active))))
+                      (json-array-push! (mut workflows) (load item))
+                      0)))
+                (set! i (+ (load i) 1)))))
+    (let [(mut body) (json-object allocator)]
+      (json-object-put! (mut body) "version" (json-integer allocator 1))
+      (json-object-put! (mut body) "workflows" (load workflows))
+      (factory-api-response 200 (load body)))))

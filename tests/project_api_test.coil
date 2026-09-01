@@ -1,0 +1,51 @@
+(module harness-project-api-test)
+
+(import "coil.alloc" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+(import "harness-project-api" :use *)
+
+(const CONFIG_ROOT "/tmp/coil-agent-harness-project-api-config")
+(const PROJECT_ROOT "/tmp/coil-agent-harness-project-api-project")
+
+(deftest creates-and-lists-a-named-project-atomically
+         (let [allocator (malloc-allocator)]
+           (path-remove allocator (path-join allocator CONFIG_ROOT "projects.json"))
+           (path-remove allocator (path-join allocator CONFIG_ROOT "projects.json.new"))
+           (directory-create-all allocator CONFIG_ROOT 448)
+           (directory-create-all allocator PROJECT_ROOT 448)
+           (match (os/env-set allocator "HARNESS_CONFIG_DIR" CONFIG_ROOT true)
+             (Ok [value] 0)
+             (Err [failure] (assert false)))
+           (let [parsed
+                   (json-parse allocator
+                               "{\"version\":1,\"name\":\"demo\",\"path\":\"/tmp/coil-agent-harness-project-api-project\",\"label\":\"Demo\",\"summary\":\"API test\"}")
+                 created (project-api-create allocator (.value parsed))]
+             (assert-eq (.status created) 201)
+             (assert (= (project-api-string (.body created) "status") "created")))
+           (let [listed (project-api-list allocator)
+                 projects (json-get (.body listed) "projects")]
+             (assert-eq (.status listed) 200)
+             (assert-eq (json-array-length projects) 1)
+             (assert (= (project-api-string (json-array-get projects 0) "name") "demo")))
+           (let [parsed
+                   (json-parse allocator
+                               "{\"version\":1,\"name\":\"demo\",\"path\":\"/tmp/coil-agent-harness-project-api-project\"}")
+                 duplicate (project-api-create allocator (.value parsed))]
+             (assert-eq (.status duplicate) 409))))
+
+(deftest refuses-a-project-path-that-does-not-exist
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"version\":1,\"name\":\"missing\",\"path\":\"/tmp/no-such-harness-project-api-path\"}")]
+           (match (os/env-set allocator "HARNESS_CONFIG_DIR" CONFIG_ROOT true)
+             (Ok [value] 0)
+             (Err [failure] (assert false)))
+           (let [response (project-api-create allocator (.value parsed))]
+             (assert-eq (.status response) 400))))

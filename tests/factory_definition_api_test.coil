@@ -1,0 +1,85 @@
+(module harness-factory-definition-api-test)
+
+(import "coil.alloc" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-factory-definition-api" :use *)
+(import "harness-json" :use *)
+
+(extern rmdir :cc c [(ptr i8)] (-> i32))
+
+(const API_ROOT "/tmp/coil-agent-harness-factory-api-test")
+
+(defn api-clean [(allocator (dyn Allocator))] (-> i64)
+  (let [directory (path-join allocator API_ROOT "review")]
+    (path-remove allocator (path-join allocator directory "factory.json"))
+    (path-remove allocator (path-join allocator directory "context.md"))
+    (path-remove allocator (path-join allocator directory "01-implement.md"))
+    (path-remove allocator (path-join allocator directory "02-verify.md"))
+    (rmdir (str->cstr allocator directory))
+    (rmdir (str->cstr allocator API_ROOT))
+    0))
+
+(defn api-command [(allocator (dyn Allocator))] (-> Json)
+  (let [parsed
+          (json-parse
+            allocator
+            "{\"version\":1,\"name\":\"review\",\"goal\":\"Implement and verify the requested change.\",\"context\":[{\"file\":\"context.md\",\"markdown\":\"# Shared context\\n\\nPreserve public behavior.\\n\"}],\"tools\":{\"groups\":[\"filesystem\",\"bash\"]},\"commands\":{\"before\":[],\"after\":[],\"before_each\":[],\"after_each\":[]},\"workers\":[{\"file\":\"01-implement.md\",\"markdown\":\"# Implement\\n\\nMake the change and test it.\\n\",\"before\":[\"git status --short\"]},{\"file\":\"02-verify.md\",\"markdown\":\"# Verify\\n\\nReview independently and fix failures.\\n\"}]}" )]
+    (assert (.ok parsed))
+    (.value parsed)))
+
+(deftest creates-lists-reads-and-validates-a-real-markdown-workflow
+         (let [allocator (malloc-allocator)]
+           (api-clean allocator)
+           (match (os/env-set allocator "HARNESS_WORKFLOW_ROOT" API_ROOT true)
+             (Ok [value] 0)
+             (Err [failure] (assert false)))
+           (let [created (factory-api-create allocator (api-command allocator))]
+             (assert-eq (.status created) 201)
+             (assert (= (factory-api-string (.body created) "status") "created")))
+           (let [listed (factory-api-list allocator)
+                 workflows (json-get (.body listed) "workflows")]
+             (assert-eq (.status listed) 200)
+             (assert-eq (json-array-length workflows) 1)
+             (assert (= (factory-api-string (json-array-get workflows 0) "name") "review")))
+           (let [source (factory-api-source allocator "review")
+                 files (json-get (.body source) "files")]
+             (assert-eq (.status source) 200)
+             (assert-eq (json-array-length files) 3)
+             (assert (= (factory-api-string (json-get (.body source) "manifest") "goal")
+                        "Implement and verify the requested change."))
+             (assert-eq (json-array-length
+                          (json-get
+                            (json-array-get (json-get (json-get (.body source) "manifest") "workers") 0)
+                            "before"))
+                        1))
+           (let [validated (factory-api-validate allocator "review")]
+             (assert-eq (.status validated) 200)
+             (assert-eq (json-number-i64 (json-get (.body validated) "worker_count")) 2))
+           (let [duplicate (factory-api-create allocator (api-command allocator))]
+             (assert-eq (.status duplicate) 409))
+           (api-clean allocator)))
+
+(deftest rejects-path-traversal-without-leaving-a-directory
+         (let [allocator (malloc-allocator)
+               parsed
+                 (json-parse allocator
+                             "{\"version\":1,\"name\":\"bad/name\",\"goal\":\"bad\",\"context\":[{\"file\":\"context.md\",\"markdown\":\"x\"}],\"tools\":{\"groups\":[\"filesystem\"]},\"commands\":{},\"workers\":[{\"file\":\"../worker.md\",\"markdown\":\"x\"}]}" )]
+           (match (os/env-set allocator "HARNESS_WORKFLOW_ROOT" API_ROOT true)
+             (Ok [value] 0)
+             (Err [failure] (assert false)))
+           (let [response (factory-api-create allocator (.value parsed))]
+             (assert-eq (.status response) 400))
+           (assert (not (path-exists? allocator (path-join allocator API_ROOT "bad"))))))
+
+(deftest accepts-an-empty-context-array-but-still-requires-a-worker
+         (let [allocator (malloc-allocator)
+               empty (json-parse allocator "[]")]
+           (assert (factory-api-file-entries-valid? (.value empty) false))
+           (assert (not (factory-api-file-entries-valid? (.value empty) true)))))

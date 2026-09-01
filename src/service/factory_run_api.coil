@@ -1,0 +1,158 @@
+(module harness-factory-run-api)
+
+(import "coil.alloc" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.os" :as os)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-factory-definition" :use *)
+(import "harness-factory-definition-api" :use *)
+(import "harness-json" :use *)
+(import "harness-project-config" :use *)
+(import "provider-common" :use *)
+
+(extern waitpid :cc c [i32 (ptr i32) i32] (-> i32))
+
+(defstruct FactoryRunApiResponse [(status i64) (body Json)])
+
+(defn factory-run-api-response [(status i64) (body Json)] (-> FactoryRunApiResponse)
+  (let [response (primitive/alloc-stack FactoryRunApiResponse)]
+    (set! (.status response) status)
+    (set! (.body response) body)
+    (load response)))
+
+(defn factory-run-api-error [(allocator (dyn Allocator))
+                             (status i64)
+                             (code (slice u8))
+                             (message (slice u8))] (-> FactoryRunApiResponse)
+  (let [(mut body) (json-object allocator)]
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-put-string! (mut body) "error" code)
+    (json-put-string! (mut body) "message" message)
+    (factory-run-api-response status (load body))))
+
+(defn factory-run-api-env [(allocator (dyn Allocator))
+                           (name (slice u8))
+                           (fallback (slice u8))] (-> (slice u8))
+  (match (os/env-get allocator name)
+    (Ok [found]
+      (match found (Some [owned] (os/owned-string-slice owned)) (None [] fallback)))
+    (Err [failure] fallback)))
+
+(defn factory-run-api-start [(allocator (dyn Allocator))
+                             (command Json)] (-> FactoryRunApiResponse)
+  (block :factory-run-start
+  (let [request-id (factory-api-string command "request_id")
+        workflow (factory-api-string command "workflow")
+        project (factory-api-string command "project")
+        provider (let [value (factory-api-string command "provider")] (if (= value "") "codex" value))
+        model (let [value (factory-api-string command "model")] (if (= value "") "gpt-5.6-luna" value))
+        launcher (factory-run-api-env allocator
+                                      "HARNESS_FACTORY_LAUNCHER"
+                                      "/usr/local/libexec/coil-agent-harness/launch_factory_service.sh")]
+    (cond (!= (json-number-i64 (json-get command "version")) 1)
+            (factory-run-api-error allocator 400 "invalid_version" "version must be 1")
+          (not (project-name-valid? request-id))
+            (factory-run-api-error allocator 400 "invalid_request_id" "request_id must use only letters, digits, dash, underscore, and dot")
+          (not (project-name-valid? workflow))
+            (factory-run-api-error allocator 400 "invalid_workflow" "workflow name is invalid")
+          (not (project-name-valid? project))
+            (factory-run-api-error allocator 400 "invalid_project" "project name is invalid")
+          (or (not (project-name-valid? provider)) (not (project-name-valid? model)))
+            (factory-run-api-error allocator 400 "invalid_model" "provider and model must use safe identifier characters")
+          (not (path-exists? allocator launcher))
+            (factory-run-api-error allocator 503 "factory_runner_unavailable" "factory runner is not installed")
+          :else
+            (match (project-config-load allocator)
+              (ProjectConfigInvalid [message]
+                (factory-run-api-error allocator 500 "project_config_invalid" message))
+              (ProjectConfigLoaded [config]
+                (let [(mut active) config]
+                  (if (not (project-config-has? (mut active) project))
+                      (factory-run-api-error allocator 404 "project_not_found" "project is not declared")
+                      (match (load-factory-definition
+                               allocator
+                               (path-join allocator (factory-api-root allocator) workflow))
+                        (FactoryInvalid [message]
+                          (factory-run-api-error allocator 404 "workflow_not_found" message))
+                        (FactoryLoaded [definition]
+                          (let [state-root (factory-run-api-env allocator
+                                                               "HARNESS_FACTORY_STATE_ROOT"
+                                                               "/var/lib/gatekeeper/harness-factory")
+                                request-root (path-join allocator state-root "requests")
+                                status-path (path-join allocator request-root (concat-or-empty allocator request-id ".json"))]
+                            (if (path-exists? allocator status-path)
+                                (factory-run-api-error allocator 409 "factory_run_exists" "request_id has already been used")
+                                (let [argv (primitive/alloc-stack (array (ptr i8) 8))
+                                      status (primitive/alloc-stack i32)
+                                      (mut accepted) (json-object allocator)]
+                                  (directory-create-all allocator request-root 448)
+                                  (json-object-put! (mut accepted) "version" (json-integer allocator 1))
+                                  (json-put-string! (mut accepted) "request_id" request-id)
+                                  (json-put-string! (mut accepted) "workflow" workflow)
+                                  (json-put-string! (mut accepted) "project" project)
+                                  (json-put-string! (mut accepted) "status" "accepted")
+                                  (match (fs/write-file allocator
+                                                        status-path
+                                                        (json-stringify allocator (load accepted)))
+                                    (Err [failure]
+                                      (return-from :factory-run-start
+                                        (factory-run-api-error allocator
+                                                               500
+                                                               "factory_run_status_failed"
+                                                               "could not reserve the factory run request")))
+                                    (Ok [written] 0))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 0) (str->cstr allocator launcher))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 1) (str->cstr allocator request-id))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 2) (str->cstr allocator workflow))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 3) (str->cstr allocator project))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 4) (str->cstr allocator provider))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 5) (str->cstr allocator model))
+                                  (set! (primitive/index (primitive/cast (ptr (ptr i8)) argv) 6) (cast (ptr i8) 0))
+                                  (let [pid (os/spawn (str->cstr allocator launcher)
+                                                      (primitive/cast (ptr (ptr i8)) argv)
+                                                      (os/spawn-envp))]
+                                    (if (< pid 0)
+                                        (do
+                                          (path-remove allocator status-path)
+                                          (factory-run-api-error allocator 503 "factory_run_start_failed" "could not launch the factory runner"))
+                                        (do
+                                          (waitpid (cast i32 pid) status 0)
+                                          (let [(mut body) (json-object allocator)]
+                                            (json-object-put! (mut body) "version" (json-integer allocator 1))
+                                            (json-put-string! (mut body) "request_id" request-id)
+                                            (json-put-string! (mut body) "workflow" workflow)
+                                            (json-put-string! (mut body) "project" project)
+                                            (json-put-string! (mut body) "status" "accepted")
+                                            (json-put-string! (mut body)
+                                                              "status_url"
+                                                              (concat-or-empty allocator
+                                                                               "/v1/factory-runs/"
+                                                                               request-id))
+                                            (factory-run-api-response 202 (load body)))))))))))))))))))
+
+(defn factory-run-api-status [(allocator (dyn Allocator))
+                              (request-id (slice u8))] (-> FactoryRunApiResponse)
+  (if (not (project-name-valid? request-id))
+      (factory-run-api-error allocator 400 "invalid_request_id" "request_id is invalid")
+      (let [state-root (factory-run-api-env allocator
+                                            "HARNESS_FACTORY_STATE_ROOT"
+                                            "/var/lib/gatekeeper/harness-factory")
+            request-root (path-join allocator state-root "requests")
+            status-path (path-join allocator request-root (concat-or-empty allocator request-id ".json"))
+            log-path (path-join allocator request-root (concat-or-empty allocator request-id ".log"))]
+        (match (fs/read-file allocator status-path)
+          (Err [failure] (factory-run-api-error allocator 404 "factory_run_not_found" "factory run request does not exist"))
+          (Ok [source]
+            (let [parsed (json-parse allocator source)]
+              (if (not (.ok parsed))
+                  (factory-run-api-error allocator 500 "factory_run_status_invalid" "factory run status is corrupt")
+                  (let [(mut body) (.value parsed)]
+                    (match (fs/read-file allocator log-path)
+                      (Ok [log] (do (json-put-string! (mut body) "log_output" log) 0))
+                      (Err [failure] 0))
+                    (factory-run-api-response 200 (load body))))))))))

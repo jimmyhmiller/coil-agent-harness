@@ -10,9 +10,12 @@
 (import "coil.str" :use *)
 (import "harness-event" :use *)
 (import "harness-event-journal" :use *)
+(import "harness-factory-definition-api" :use *)
+(import "harness-factory-run-api" :use *)
 (import "harness-json" :use *)
 (import "harness-model-router" :use *)
 (import "harness-provider-config" :use *)
+(import "harness-project-api" :use *)
 (import "harness-run-state" :use *)
 (import "harness-system" :use *)
 (import "provider-common" :use *)
@@ -1438,7 +1441,65 @@
         principal (.principal request)
         can-observe (.can-observe request)
         can-control (.can-control request)]
-    (cond (and (= method "GET") (= target "/v1/tools"))
+    (cond (and (= method "POST") (= target "/v1/factory-runs"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (not (load (field parsed ok)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON")
+                      (let [response (factory-run-api-start allocator (load (field parsed value)))]
+                        (service-response (.status response) (.body response))))))
+          (and (= method "GET") (starts-with target "/v1/factory-runs/"))
+            (if (not can-observe)
+                (service-forbidden allocator)
+                (let [response (factory-run-api-status
+                                 allocator
+                                 (subslice [u8] target 17 (slice-len [u8] target)))]
+                  (service-response (.status response) (.body response))))
+          (and (= method "GET") (= target "/v1/projects"))
+            (if (not can-observe)
+                (service-forbidden allocator)
+                (let [response (project-api-list allocator)]
+                  (service-response (.status response) (.body response))))
+          (and (= method "POST") (= target "/v1/projects"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (not (load (field parsed ok)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON")
+                      (let [response (project-api-create allocator (load (field parsed value)))]
+                        (service-response (.status response) (.body response))))))
+          (and (= method "GET") (= target "/v1/factory-definitions"))
+            (if (not can-observe)
+                (service-forbidden allocator)
+                (let [response (factory-api-list allocator)]
+                  (service-response (.status response) (.body response))))
+          (and (= method "POST") (= target "/v1/factory-definitions"))
+            (if (not can-control)
+                (service-forbidden allocator)
+                (let [parsed (service-parse-command service (load (field request body)))]
+                  (if (not (load (field parsed ok)))
+                      (service-error allocator 400 "invalid_json" "request body is not valid JSON")
+                      (let [response (factory-api-create allocator (load (field parsed value)))]
+                        (service-response (.status response) (.body response))))))
+          (starts-with target "/v1/factory-definitions/")
+            (let [rest (subslice [u8] target 24 (slice-len [u8] target))
+                  validate-name
+                    (match (str-find rest "/validate")
+                      (Some [at] (if (= (+ at 9) (slice-len [u8] rest)) (substr rest 0 at) ""))
+                      (None [] ""))]
+              (cond (and (= method "POST") (> (slice-len [u8] validate-name) 0))
+                      (if (not can-control)
+                          (service-forbidden allocator)
+                          (let [response (factory-api-validate allocator validate-name)]
+                            (service-response (.status response) (.body response))))
+                    (= method "GET")
+                      (if (not can-observe)
+                          (service-forbidden allocator)
+                          (let [response (factory-api-source allocator rest)]
+                            (service-response (.status response) (.body response))))
+                    :else (service-error allocator 404 "not_found" "route does not exist")))
+          (and (= method "GET") (= target "/v1/tools"))
             (if (not can-observe) (service-forbidden allocator) (service-list-tools service))
           (and (= method "POST") (= target "/v1/tools/authorize"))
             (if (not can-control)

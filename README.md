@@ -167,6 +167,22 @@ Requests such as `/agents/v1/runs/<id>` reach `RunService` as `/v1/runs/<id>`.
 An authenticated `GET /agents` returns a plain-text, zero-context guide intended
 to be handed directly to an agent. Request `GET /agents?format=json` or send
 `Accept: application/json` for the same API as structured discovery metadata.
+
+The primary software-factory API is first class rather than an instruction to
+assemble filesystem or Bash tool calls:
+
+- `GET|POST /agents/v1/projects` lists or atomically declares named existing checkouts.
+- `GET|POST /agents/v1/factory-definitions` lists or creates real `factory.json`,
+  context Markdown, and ordered worker Markdown under `HARNESS_WORKFLOW_ROOT`.
+- `GET /agents/v1/factory-definitions/{name}` returns the manifest and Markdown;
+  `POST .../{name}/validate` runs the same loader used before execution.
+- `POST /agents/v1/factory-runs` starts a validated workflow against a declared
+  project using an idempotent `request_id`; `GET /agents/v1/factory-runs/{request_id}`
+  returns accepted/running/completed/failed state and the captured factory log.
+
+The managed factory runner uses `HARNESS_FACTORY_STATE_ROOT` for request status,
+logs, factory journals, and isolated-worktree bookkeeping. Production deployments
+install the harness executable and runner scripts alongside the Gatekeeper function.
 Gatekeeper authenticates the route and the adapter assigns the non-client-spoofable
 `gatekeeper` actor with observe/control capability. No harness port or bearer token
 is involved. `HARNESS_JOURNAL_PATH` selects the durable journal; when absent it

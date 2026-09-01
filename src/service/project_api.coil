@@ -1,0 +1,123 @@
+(module harness-project-api)
+
+(import "coil.alloc" :use *)
+(import "coil.fs" :as fs)
+(import "coil.match" :use *)
+(import "coil.primitive" :as primitive)
+(import "coil.result" :use *)
+(import "coil.slice" :use *)
+(import "coil.str" :use *)
+(import "harness-directory" :use *)
+(import "harness-json" :use *)
+(import "harness-project-config" :use *)
+(import "provider-common" :use *)
+
+(extern rename :cc c [(ptr i8) (ptr i8)] (-> i32))
+
+(defstruct ProjectApiResponse [(status i64) (body Json)])
+
+(defn project-api-response [(status i64) (body Json)] (-> ProjectApiResponse)
+  (let [response (primitive/alloc-stack ProjectApiResponse)]
+    (set! (.status response) status)
+    (set! (.body response) body)
+    (load response)))
+
+(defn project-api-error [(allocator (dyn Allocator))
+                         (status i64)
+                         (code (slice u8))
+                         (message (slice u8))] (-> ProjectApiResponse)
+  (let [(mut body) (json-object allocator)]
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-put-string! (mut body) "error" code)
+    (json-put-string! (mut body) "message" message)
+    (project-api-response status (load body))))
+
+(defn project-api-string [(value Json) (key (slice u8))] (-> (slice u8))
+  (match (json-string-at value key) (Some [text] text) (None [] "")))
+
+(defn project-api-json [(allocator (dyn Allocator))
+                        (config (ptr ProjectConfig))] (-> Json)
+  (let [(mut body) (json-object allocator)
+        (mut projects) (json-array allocator)
+        (mut i) 0]
+    (loop (if (>= (load i) (project-config-count config))
+              (break)
+              (let [project (project-config-at config (load i))
+                    (mut item) (json-object allocator)]
+                (json-put-string! (mut item) "name" (load (field project name)))
+                (json-put-string! (mut item) "path" (load (field project path)))
+                (json-put-string! (mut item) "label" (load (field project label)))
+                (json-put-string! (mut item) "summary" (load (field project summary)))
+                (json-put-string! (mut item)
+                                  "default_issue_workflow"
+                                  (load (field project default-issue-workflow)))
+                (json-array-push! (mut projects) (load item))
+                (set! i (+ (load i) 1)))))
+    (json-object-put! (mut body) "version" (json-integer allocator 1))
+    (json-object-put! (mut body) "projects" (load projects))
+    (load body)))
+
+(defn project-api-list [(allocator (dyn Allocator))] (-> ProjectApiResponse)
+  (match (project-config-load allocator)
+    (ProjectConfigInvalid [message] (project-api-error allocator 500 "project_config_invalid" message))
+    (ProjectConfigLoaded [config]
+      (let [(mut active) config]
+        (project-api-response 200 (project-api-json allocator (mut active)))))))
+
+(defn project-api-create [(allocator (dyn Allocator))
+                          (command Json)] (-> ProjectApiResponse)
+  (let [name (project-api-string command "name")
+        path (project-expand-home allocator (project-api-string command "path"))]
+    (cond (!= (json-number-i64 (json-get command "version")) 1)
+            (project-api-error allocator 400 "invalid_version" "version must be 1")
+          (not (project-name-valid? name))
+            (project-api-error allocator 400 "invalid_name" "name must use only letters, digits, dash, underscore, and dot")
+          (not (starts-with path "/"))
+            (project-api-error allocator 400 "invalid_path" "path must be absolute or start with ~/")
+          (not (path-exists? allocator path))
+            (project-api-error allocator 400 "project_path_missing" "project path does not exist")
+          :else
+            (match (project-config-load allocator)
+              (ProjectConfigInvalid [message]
+                (project-api-error allocator 500 "project_config_invalid" message))
+              (ProjectConfigLoaded [config]
+                (let [(mut active) config]
+                  (if (project-config-has? (mut active) name)
+                      (project-api-error allocator 409 "project_exists" "a project with this name already exists")
+                      (let [(mut document) (project-api-json allocator (mut active))
+                            (mut projects) (json-get (load document) "projects")
+                            (mut entry) (json-object allocator)
+                            config-path (project-config-path allocator)
+                            temporary (concat-or-empty allocator config-path ".new")]
+                        (json-put-string! (mut entry) "name" name)
+                        (json-put-string! (mut entry) "path" path)
+                        (json-put-string! (mut entry)
+                                          "label"
+                                          (let [value (project-api-string command "label")]
+                                            (if (= value "") name value)))
+                        (json-put-string! (mut entry) "summary" (project-api-string command "summary"))
+                        (json-put-string! (mut entry)
+                                          "default_issue_workflow"
+                                          (let [value (project-api-string command "default_issue_workflow")]
+                                            (if (= value "") PROJECT_DEFAULT_ISSUE_WORKFLOW value)))
+                        (json-array-push! (mut projects) (load entry))
+                        (json-object-put! (mut document) "projects" (load projects))
+                        (if (!= (directory-create-all allocator (project-config-root allocator) 448) 0)
+                            (project-api-error allocator 500 "project_config_write_failed" "could not create the config directory")
+                            (match (fs/write-file allocator temporary (json-stringify allocator (load document)))
+                              (Err [failure]
+                                (project-api-error allocator 500 "project_config_write_failed" "could not write projects.json"))
+                              (Ok [written]
+                                (if (!= (cast i64
+                                             (rename (str->cstr allocator temporary)
+                                                     (str->cstr allocator config-path)))
+                                        0)
+                                    (do
+                                      (path-remove allocator temporary)
+                                      (project-api-error allocator 500 "project_config_write_failed" "could not install projects.json"))
+                                    (let [(mut body) (json-object allocator)]
+                                      (json-object-put! (mut body) "version" (json-integer allocator 1))
+                                      (json-put-string! (mut body) "name" name)
+                                      (json-put-string! (mut body) "path" path)
+                                      (json-put-string! (mut body) "status" "created")
+                                      (project-api-response 201 (load body)))))))))))))))
